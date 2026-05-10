@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
@@ -9,7 +9,7 @@ COPY packages/worker packages/worker
 RUN npm run build -w packages/shared
 RUN npm run build -w packages/worker
 
-FROM node:20-alpine
+FROM node:26-alpine
 # Install ffmpeg for video compilation
 RUN apk add --no-cache ffmpeg
 WORKDIR /app

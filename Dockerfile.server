@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
@@ -9,7 +9,7 @@ COPY packages/server packages/server
 RUN npm run build -w packages/shared
 RUN npm run build -w packages/server
 
-FROM node:20-alpine
+FROM node:26-alpine
 WORKDIR /app
 COPY --from=builder /app/packages/server/dist ./dist
 COPY --from=builder /app/packages/server/public ./public
