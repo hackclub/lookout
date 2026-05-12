@@ -20,7 +20,7 @@
     "@lookout/shared": "*",
     "@sentry/node": "^10.45.0",
     "drizzle-orm": "^0.45.1",
-    "fastify": "^5.8.3",
+    "fastify": "^5.8.5",
     "pg": "^8.13.0",
     "pg-boss": "^10.1.0"
   },
