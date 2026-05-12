@@ -340,21 +340,42 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     return () => unlisten?.();
   }, []);
 
-  // Sync state to rust backend (for instant tray loads) AND emit to tray window
+  // Sync menu-bar state to Rust + the tray window.
+  //
+  // IMPORTANT: do NOT call `update_tray_time` on every displaySeconds change.
+  // The Rust tray ticker is the authoritative source for the menu-bar title
+  // and runs at 1s cadence; calling update_tray_time from JS every second
+  // creates two writers fighting over the title, which produces the visible
+  // flicker between "<1m"/"1m" and "1m"/"2m" at the minute boundaries
+  // (JS interpolates to one second, Rust to another).
+  //
+  // We still split the writes:
+  //   - `update_tray_time`: pause/resume only (the icon/title needs to
+  //     change immediately when paused, which the Rust ticker won't do
+  //     within its 1s tick window).
+  //   - `set_tray_state` + `tray-state` event: tray-window UI updates
+  //     fine-grained per second.
+
+  // controlMode + initial-show effect (low frequency)
   useEffect(() => {
-    const timeText = formatTimeTray(displaySeconds);
-    const state = { 
-      displaySeconds, 
-      screenshotCount, 
+    invoke("show_tray", { timeText: formatTimeTray(displaySeconds) }).catch(console.error);
+    invoke("update_tray_time", {
+      timeText: formatTimeTray(displaySeconds),
+      isPaused: controlMode === "paused",
+    }).catch(console.error);
+    // (displaySeconds intentionally read-only here — not in deps. We just
+    // need a sensible initial title; the Rust ticker takes over from there.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlMode]);
+
+  // Per-second state sync (tray window, not menu-bar title)
+  useEffect(() => {
+    const state = {
+      displaySeconds,
+      screenshotCount,
       controlMode,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
-    
-    invoke("show_tray", { timeText }).catch(console.error);
-    // The Rust tray ticker now handles the menu bar title, but we
-    // still call update_tray_time as a fallback for the initial render
-    // and for camera sources where the ticker might not be running yet.
-    invoke("update_tray_time", { timeText, isPaused: controlMode === "paused" }).catch(console.error);
     invoke("set_tray_state", { state }).catch(console.error);
     emit("tray-state", state).catch(console.error);
 

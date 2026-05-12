@@ -70,7 +70,11 @@ export function validateCapturedAt(
   if (capMs < nowMs - CAPTURED_AT_PAST_TOLERANCE_MS) {
     return { ok: false, code: "captured_at_too_old" };
   }
-  if (capMs < sessionStartedAt.getTime()) {
+  // Allow up to 2s of slop before sessionStartedAt to absorb the race
+  // between two parallel first-uploads: the winner sets started_at to
+  // its own clientCapturedAt; the loser's clientCapturedAt may be a
+  // hair earlier. 2s is much shorter than any human-perceptible window.
+  if (capMs < sessionStartedAt.getTime() - 2_000) {
     return { ok: false, code: "captured_at_before_session_start" };
   }
   if (latestCapturedAt && capMs <= latestCapturedAt.getTime()) {

@@ -150,6 +150,41 @@ describe("bucket mode (legacy compat)", () => {
 // Credit-mode mode-flip
 // ────────────────────────────────────────────────────────────
 
+describe("activation race / first capture", () => {
+  it("first capture with capturedAt slightly before serverNow does NOT 400", async () => {
+    // Repro for the bug seen in the wild on 0.2.1: the client takes a
+    // screenshot at clock T0, the request reaches the server at T0+latency
+    // (a few hundred ms). Without the fix, the server set started_at to
+    // its own serverNow and rejected the older capturedAt.
+    const { token, id } = await createSession();
+    // Simulate ~250ms of upload latency: the client's capturedAt timestamp
+    // predates the server's serverNow by a quarter second.
+    const clientCapturedAt = new Date(virtualNow - 250).toISOString();
+    const up = await postUpload(token, clientCapturedAt);
+    expect(up.status).toBe(200);
+    expect(up.body.trackingMode).toBe("credit");
+
+    // started_at should be the client's capturedAt, not serverNow.
+    const s = await loadSession(id);
+    expect(s?.startedAt?.getTime()).toBe(virtualNow - 250);
+
+    // And confirm completes cleanly.
+    const conf = await confirmUpload(token, up.body.screenshotId);
+    expect(conf.status).toBe(200);
+  });
+
+  it("first capture with clientCapturedAt in the future is clamped to serverNow", async () => {
+    const { token, id } = await createSession();
+    // Lying client: capturedAt = serverNow + 30s (within future envelope).
+    const future = new Date(virtualNow + 30_000).toISOString();
+    const up = await postUpload(token, future);
+    expect(up.status).toBe(200);
+    const s = await loadSession(id);
+    // started_at must never be in the future.
+    expect(s?.startedAt?.getTime()).toBe(virtualNow);
+  });
+});
+
 describe("credit mode opt-in", () => {
   it("first capturedAt flips tracking_mode to credit", async () => {
     const { token, id } = await createSession();

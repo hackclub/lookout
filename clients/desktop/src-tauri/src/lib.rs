@@ -1628,8 +1628,15 @@ fn stop_capture_loop(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Start the Rust-side tray title ticker (for camera sessions where
 /// the capture loop runs in JS but we still want an accurate menu bar timer).
+///
+/// MUST be `async` — `start_tray_timer` calls `tokio::spawn` internally,
+/// which panics if not invoked from inside a tokio runtime. Tauri runs
+/// `async` commands on its own tokio runtime, but sync commands run on a
+/// thread without one. Calling this command sync caused SIGABRT on camera
+/// sessions in 0.2.0 + 0.2.1 (only camera path uses this; screen capture
+/// goes through `start_capture_loop` which is already async).
 #[tauri::command]
-fn start_tray_ticker(
+async fn start_tray_ticker(
     tracked_seconds: i64,
     state: State<'_, AppState>,
     app: AppHandle,
@@ -2295,5 +2302,44 @@ mod compat_tests {
         assert_eq!(parse_iso_to_unix_ms(""), None);
         assert_eq!(parse_iso_to_unix_ms("not-a-date"), None);
         assert_eq!(parse_iso_to_unix_ms("2025/06/01"), None);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Regression test for the camera-session crash (SIGABRT) in 0.2.0/0.2.1.
+    //
+    // `start_tray_ticker` was a sync `#[tauri::command]` that called
+    // `tokio::spawn` via `start_tray_timer`. Sync Tauri commands run on a
+    // thread with no tokio runtime in context, so `tokio::spawn` panicked
+    // and the app aborted. The fix is making the command `async` so Tauri
+    // hosts it on its async runtime.
+    //
+    // We can't easily instantiate Tauri's AppHandle in a unit test, so we
+    // reproduce the underlying invariant: `tokio::spawn` must run inside a
+    // runtime. If this assertion ever weakens (e.g. tokio adds an
+    // ambient-runtime fallback), revisit whether the `async fn` is still
+    // load-bearing on the command.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tokio_spawn_panics_without_runtime() {
+        // The exact failure mode that crashed 0.2.0/0.2.1 camera sessions.
+        let result = std::panic::catch_unwind(|| {
+            let _ = tokio::spawn(async {});
+        });
+        assert!(
+            result.is_err(),
+            "tokio::spawn outside a runtime should panic — if this now succeeds, \
+             tokio's behavior changed and the async-fn fix may no longer be required."
+        );
+    }
+
+    #[test]
+    fn tokio_spawn_succeeds_inside_runtime() {
+        // Mirrors what Tauri's async runtime does for `async` commands.
+        let rt = tokio::runtime::Runtime::new().expect("build runtime");
+        rt.block_on(async {
+            let h = tokio::spawn(async { 42i32 });
+            assert_eq!(h.await.unwrap(), 42);
+        });
     }
 }

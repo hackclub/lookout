@@ -267,9 +267,29 @@ export async function sessionRoutes(app: FastifyInstance) {
         const wantsCredit = clientCapturedAt !== null;
         const noScreenshots =
           totalRequests === 0; // we measured this above; race-free for activation
+
+        // Use the client's capturedAt as started_at when it's there: the
+        // session "starts" at the moment the first screenshot was taken,
+        // not when the server's HTTP handler ran. Without this, upload
+        // latency + client clock skew make the very first capturedAt fall
+        // microseconds before serverNow and trip captured_at_before_session_start.
+        //
+        // Envelope check below would catch a wildly-skewed clientCapturedAt;
+        // do a quick anti-future-cheat check here so an attacker can't set
+        // startedAt far in the future. clamp to ≤ serverNow.
+        let activationStartedAt = serverNow;
+        if (clientCapturedAt) {
+          // bound to past envelope (5min) so a malicious client can't push
+          // started_at arbitrarily into the past.
+          const minAllowed = new Date(serverNow.getTime() - 5 * 60_000);
+          const clamped = clientCapturedAt < minAllowed ? minAllowed : clientCapturedAt;
+          // never set started_at in the future.
+          activationStartedAt = clamped > serverNow ? serverNow : clamped;
+        }
+
         const setFields: Record<string, unknown> = {
           status: "active",
-          startedAt: serverNow,
+          startedAt: activationStartedAt,
           lastScreenshotAt: serverNow,
           updatedAt: serverNow,
         };

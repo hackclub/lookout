@@ -131,10 +131,17 @@ describe("validateCapturedAt", () => {
     expect(r).toEqual({ ok: false, code: "captured_at_too_old" });
   });
 
-  it("rejects capturedAt before session.startedAt", () => {
-    const cap = ms(startedAt, -1_000);
+  it("rejects capturedAt more than 2s before session.startedAt", () => {
+    const cap = ms(startedAt, -3_000); // 3s before startedAt, past slop window
     const r = validateCapturedAt(cap, serverNow, startedAt, null);
     expect(r).toEqual({ ok: false, code: "captured_at_before_session_start" });
+  });
+
+  it("accepts capturedAt within the 2s slop before startedAt (activation race)", () => {
+    const cap = ms(startedAt, -1_500); // within 2s tolerance
+    expect(validateCapturedAt(cap, serverNow, startedAt, null)).toEqual({
+      ok: true,
+    });
   });
 
   it("accepts capturedAt equal to startedAt (boundary)", () => {
