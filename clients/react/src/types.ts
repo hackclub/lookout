@@ -58,6 +58,12 @@ export interface CaptureResult {
   blob: Blob;
   width: number;
   height: number;
+  /** ms since epoch, in the client's clock. Recorded at the moment the
+   *  screenshot was taken (vs. when the upload arrives at the server).
+   *  Forwarded to the server as `capturedAt` to drive credit-mode tracking.
+   *  Optional — older capture code may omit it; the uploader falls back to
+   *  Date.now() at enqueue time. */
+  capturedAtMs?: number;
 }
 
 // ─── Upload State ────────────────────────────────────────

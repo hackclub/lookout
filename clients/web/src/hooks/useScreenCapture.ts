@@ -11,6 +11,9 @@ export interface CaptureResult {
   blob: Blob;
   width: number;
   height: number;
+  /** Client-clock ms timestamp recorded at frame-grab time. Forwarded to
+   *  the server as `capturedAt` to drive credit-mode tracking. */
+  capturedAtMs?: number;
 }
 
 /** Wait for the video element to have decoded dimensions after play(). */
@@ -111,12 +114,15 @@ export function useScreenCapture() {
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    // Stamp client-clock time at the moment the frame was grabbed.
+    const capturedAtMs = Date.now();
+
     const toBlobPromise = new Promise<CaptureResult | null>((resolve) => {
       canvas.toBlob(
         (blob) => {
           resolve(
             blob
-              ? { blob, width: canvas.width, height: canvas.height }
+              ? { blob, width: canvas.width, height: canvas.height, capturedAtMs }
               : null,
           );
         },

@@ -89,7 +89,22 @@ export async function internalRoutes(app: FastifyInstance) {
       // Exclude internal R2 storage keys and build proper media URLs
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       const { videoR2Key, thumbnailR2Key, ...sessionData } = session;
-      const liveTrackedSeconds = Math.max(0, (Number(count) - 1) * 60);
+      // Bucket-mode: tracked = (distinct buckets - 1) * 60.
+      // Credit-mode: read session.trackedSeconds directly (maintained per-credit).
+      const liveBucketTracked = Math.max(0, (Number(count) - 1) * 60);
+      const trackedSeconds =
+        session.trackingMode === "credit"
+          ? session.trackedSeconds ?? 0
+          : session.trackedSeconds ?? liveBucketTracked;
+      const [{ confirmedCount }] = await db
+        .select({ confirmedCount: sql<number>`count(*)::int` })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, sessionId),
+            eq(schema.screenshots.confirmed, true),
+          ),
+        );
       return {
         session: {
           ...sessionData,
@@ -100,8 +115,8 @@ export async function internalRoutes(app: FastifyInstance) {
             ? `${baseUrl}/api/media/${session.id}/video.mp4`
             : null,
         },
-        trackedSeconds: session.trackedSeconds ?? liveTrackedSeconds,
-        screenshotCount: Number(count),
+        trackedSeconds,
+        screenshotCount: Number(confirmedCount),
       };
     },
   );
@@ -176,19 +191,25 @@ export async function internalRoutes(app: FastifyInstance) {
         );
       }
 
-      // Compute tracked seconds before stopping
-      const [{ buckets }] = await db
-        .select({
-          buckets: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
-        })
-        .from(schema.screenshots)
-        .where(
-          and(
-            eq(schema.screenshots.sessionId, sessionId),
-            eq(schema.screenshots.confirmed, true),
-          ),
-        );
-      const trackedSeconds = Math.max(0, (Number(buckets) - 1) * 60);
+      // Compute tracked seconds before stopping. Credit-mode sessions
+      // already have it maintained on the row; bucket-mode computes live.
+      let trackedSeconds: number;
+      if (session.trackingMode === "credit") {
+        trackedSeconds = session.trackedSeconds ?? 0;
+      } else {
+        const [{ buckets }] = await db
+          .select({
+            buckets: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
+          })
+          .from(schema.screenshots)
+          .where(
+            and(
+              eq(schema.screenshots.sessionId, sessionId),
+              eq(schema.screenshots.confirmed, true),
+            ),
+          );
+        trackedSeconds = Math.max(0, (Number(buckets) - 1) * 60);
+      }
 
       const [updated] = await db
         .update(schema.sessions)

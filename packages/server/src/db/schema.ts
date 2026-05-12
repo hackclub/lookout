@@ -49,6 +49,13 @@ export const sessions = pgTable(
     resumedAt: timestamp("resumed_at", { withTimezone: true }),
     totalActiveSeconds: integer("total_active_seconds").notNull().default(0),
     trackedSeconds: integer("tracked_seconds"),
+    // Credit-mode tracking state. 'bucket' (default) is the legacy
+    // distinct-minute-bucket count; 'credit' is the server-authoritative
+    // wall-clock acceptance window. Mode is decided by the first upload
+    // (presence of capturedAt) and is sticky for the session's lifetime.
+    trackingMode: text("tracking_mode").notNull().default("bucket"),
+    streakAnchorAt: timestamp("streak_anchor_at", { withTimezone: true }),
+    streakCreditedCount: integer("streak_credited_count").notNull().default(0),
     videoUrl: text("video_url"),
     videoR2Key: text("video_r2_key"),
     thumbnailUrl: text("thumbnail_url"),
@@ -84,6 +91,17 @@ export const screenshots = pgTable(
     height: integer("height"),
     fileSizeBytes: integer("file_size_bytes"),
     sampled: boolean("sampled").notNull().default(false),
+    // Client-attested (or server-fallback) capture time. Populated for ALL
+    // new rows post-migration 0007 regardless of mode — credit-mode rows use
+    // it for streak math, bucket-mode rows store it as debug-only data.
+    // NULL for pre-migration rows; never backfilled.
+    capturedAt: timestamp("captured_at", { withTimezone: true }),
+    // Credit-mode only. 0 or 60. NULL for bucket-mode rows.
+    creditedSeconds: integer("credited_seconds"),
+    // Credit-mode only. Server-predicted capture time at confirm; lets us
+    // compute the design-invariant delta (capturedAt - expectedAt) per row.
+    // NULL for bucket rows and for the seed capture of a credit streak.
+    expectedAt: timestamp("expected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -97,5 +115,9 @@ export const screenshots = pgTable(
     index("idx_screenshots_unconfirmed")
       .on(table.sessionId)
       .where(sql`confirmed = false`),
+    index("idx_screenshots_session_captured_at").on(
+      table.sessionId,
+      table.capturedAt,
+    ),
   ],
 );

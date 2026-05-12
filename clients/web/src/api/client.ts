@@ -59,8 +59,14 @@ export const api = {
     return fetchJson(`${API_BASE}/sessions/${getToken()}`);
   },
 
-  getUploadUrl(): Promise<UploadUrlResponse> {
-    return fetchJson(`${API_BASE}/sessions/${getToken()}/upload-url`);
+  /** `capturedAt` is optional — sending it on a session's first request
+   *  opts that session into credit-mode tracking. Omit for legacy behavior. */
+  getUploadUrl(opts?: { capturedAt?: string }): Promise<UploadUrlResponse> {
+    const base = `${API_BASE}/sessions/${getToken()}/upload-url`;
+    const url = opts?.capturedAt
+      ? `${base}?capturedAt=${encodeURIComponent(opts.capturedAt)}`
+      : base;
+    return fetchJson(url);
   },
 
   confirmScreenshot(

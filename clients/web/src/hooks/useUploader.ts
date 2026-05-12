@@ -11,6 +11,10 @@ interface UploadState {
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [2000, 4000, 8000];
 
+/** Toggle the web client into credit-mode by sending `capturedAt`. Old
+ *  builds (without this flag) keep using bucket-mode on the server. */
+const ENABLE_CREDIT_MODE = true;
+
 async function retry<T>(
   fn: () => Promise<T>,
   retries: number = MAX_RETRIES,
@@ -47,9 +51,13 @@ export function useUploader() {
       setState((s) => ({ ...s, pending: s.pending - 1 }));
 
       try {
-        // Step 1: Get presigned URL (server records timestamp)
+        // Step 1: Get presigned URL (server records timestamp). Send
+        // capturedAt to opt into credit mode; omit for legacy bucket.
+        const capturedAt = ENABLE_CREDIT_MODE
+          ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
+          : undefined;
         const { uploadUrl, screenshotId, nextExpectedAt } = await retry(() =>
-          api.getUploadUrl(),
+          api.getUploadUrl({ capturedAt }),
         );
         nextExpectedAtRef.current = nextExpectedAt;
 
@@ -98,11 +106,17 @@ export function useUploader() {
     [processQueue],
   );
 
+  const getNextExpectedAt = useCallback(
+    () => nextExpectedAtRef.current,
+    [],
+  );
+
   return {
     enqueueUpload,
     uploadState: state,
     trackedSeconds,
     lastImageUrl,
     nextExpectedAt: nextExpectedAtRef.current,
+    getNextExpectedAt,
   };
 }

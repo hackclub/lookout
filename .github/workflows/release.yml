@@ -11,7 +11,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Run the full test suite first. The release build only proceeds if
+  # tests pass. Uses `workflow_call` from .github/workflows/tests.yml so
+  # the same jobs run identically on push, PR, and release.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: tests
     permissions:
       contents: write
     strategy:

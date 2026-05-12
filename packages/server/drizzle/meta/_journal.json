@@ -50,6 +50,13 @@
       "when": 1777302721429,
       "tag": "0006_living_namora",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1778606892716,
+      "tag": "0007_credit_mode",
+      "breakpoints": true
     }
   ]
 }

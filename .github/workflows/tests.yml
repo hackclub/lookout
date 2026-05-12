@@ -1,0 +1,152 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Allow other workflows (e.g. release) to require these jobs before
+  # they themselves run by depending on this workflow via `needs`.
+  workflow_call:
+
+# Least-privilege by default. Individual jobs can override if they ever
+# need to write artifacts/releases, but the test suite is read-only.
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Server: TypeScript + Vitest, integration tests against real Postgres.
+  # Covers the credit-mode dispatcher, envelope validation, streak math,
+  # idempotency, pause/resume, and legacy-wire-shape compat tests.
+  # ──────────────────────────────────────────────────────────────────
+  server:
+    name: Server tests
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lookout
+          POSTGRES_PASSWORD: lookout
+          POSTGRES_DB: lookout_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U lookout"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://lookout:lookout@localhost:5434/lookout_test
+      # Tests don't actually hit R2 (the AWS SDK is mocked in setup.ts),
+      # but config/r2.ts throws on import if these are unset.
+      R2_ACCOUNT_ID: test-account
+      R2_ACCESS_KEY_ID: test-key
+      R2_SECRET_ACCESS_KEY: test-secret
+      R2_BUCKET_NAME: test-bucket
+      INTERNAL_API_KEY: test-internal-key
+      # Subprocess test that spawns `cargo test --test legacy_client` against
+      # a real Fastify server. Skipping in CI keeps the matrix fast — the
+      # cross-language compat is already covered by Rust unit tests below,
+      # which run the same legacy structs against the same JSON shape.
+      SKIP_RUST_SUBPROCESS: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w packages/shared
+
+      - name: Run migrations
+        working-directory: packages/server
+        run: npx drizzle-kit migrate
+
+      - name: Type-check server
+        working-directory: packages/server
+        run: npx tsc --noEmit
+
+      - name: Vitest (unit + integration)
+        working-directory: packages/server
+        run: npx vitest run
+
+  # ──────────────────────────────────────────────────────────────────
+  # Desktop client: Rust unit + serde compat tests.
+  # The 4-way matrix (legacy/new struct × legacy/new JSON) here is the
+  # load-bearing proof that the currently-shipped binary can still
+  # deserialize what the new server emits.
+  # ──────────────────────────────────────────────────────────────────
+  desktop-rust:
+    name: Desktop Rust tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libx11-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libpipewire-0.3-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgbm-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "./clients/desktop/src-tauri -> target"
+          shared-key: tests-ubuntu
+
+      - name: cargo test --lib
+        working-directory: clients/desktop/src-tauri
+        run: cargo test --lib
+
+  # ──────────────────────────────────────────────────────────────────
+  # Type-check the rest of the workspace (React/web clients). Catches
+  # regressions in the shared types or the credit-mode client wiring.
+  # ──────────────────────────────────────────────────────────────────
+  clients-typecheck:
+    name: Client type-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared + react packages
+        run: |
+          npm run build -w packages/shared
+          npm run build -w clients/react
+
+      - name: Type-check desktop frontend
+        working-directory: clients/desktop
+        run: npx tsc --noEmit

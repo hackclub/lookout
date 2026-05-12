@@ -6,7 +6,14 @@ import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
 import { r2Client, R2_BUCKET } from "../config/r2.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
-import { computeMinuteBucket, checkRateLimit, checkGenericRateLimit } from "../lib/timing.js";
+import {
+  computeMinuteBucket,
+  checkRateLimit,
+  checkGenericRateLimit,
+  creditCapture,
+  validateCapturedAt,
+} from "../lib/timing.js";
+import { now } from "../lib/clock.js";
 import {
   SCREENSHOT_INTERVAL_MS,
   PRESIGNED_URL_EXPIRY_SECONDS,
@@ -14,6 +21,35 @@ import {
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
 } from "@lookout/shared";
+
+/** Tracked-seconds dispatcher. Routes to bucket-count math for legacy
+ *  sessions or reads the incrementally-maintained value for credit-mode
+ *  sessions. Always go through this — never inline the SQL. */
+async function getTrackedSecondsForSession(session: {
+  id: string;
+  trackingMode: string;
+  trackedSeconds: number | null;
+}): Promise<number> {
+  if (session.trackingMode === "credit") {
+    return session.trackedSeconds ?? 0;
+  }
+  return getTrackedSecondsBucket(session.id);
+}
+
+async function getTrackedSecondsBucket(sessionId: string): Promise<number> {
+  const [{ count }] = await db
+    .select({
+      count: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
+    })
+    .from(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        eq(schema.screenshots.confirmed, true),
+      ),
+    );
+  return Math.max(0, (Number(count) - 1) * 60);
+}
 
 // ── Shared schema fragments ─────────────────────────────────
 
@@ -38,22 +74,6 @@ async function findSession(token: string) {
   return db.query.sessions.findFirst({
     where: eq(schema.sessions.token, token),
   });
-}
-
-/** Count distinct confirmed minute buckets for a session */
-async function getTrackedSeconds(sessionId: string): Promise<number> {
-  const [{ count }] = await db
-    .select({
-      count: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
-    })
-    .from(schema.screenshots)
-    .where(
-      and(
-        eq(schema.screenshots.sessionId, sessionId),
-        eq(schema.screenshots.confirmed, true),
-      ),
-    );
-  return Math.max(0, (Number(count) - 1) * 60);
 }
 
 /** Count total confirmed screenshots */
@@ -100,10 +120,14 @@ export async function sessionRoutes(app: FastifyInstance) {
       const session = await findSession(request.params.token);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
-      const liveTrackedSeconds = await getTrackedSeconds(session.id);
+      const liveTrackedSeconds = await getTrackedSecondsForSession(session);
       const screenshotCount = await getScreenshotCount(session.id);
-      // Prefer stored value (survives screenshot cleanup), fall back to live count
-      const trackedSeconds = session.trackedSeconds ?? liveTrackedSeconds;
+      // Prefer stored value (survives screenshot cleanup), fall back to live count.
+      // For credit mode, both paths read sessions.tracked_seconds so they match.
+      const trackedSeconds =
+        session.trackingMode === "credit"
+          ? liveTrackedSeconds
+          : session.trackedSeconds ?? liveTrackedSeconds;
 
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
@@ -169,11 +193,26 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
-  // Get presigned upload URL — this is where server timestamps capture time
-  app.get<{ Params: { token: string } }>(
+  // Get presigned upload URL.
+  // Accepts optional `capturedAt` (ISO string) in the querystring. Presence
+  // on the first request flips the session into credit mode for life; mode
+  // is sticky thereafter. See plan doc for details.
+  app.get<{
+    Params: { token: string };
+    Querystring: { capturedAt?: string };
+  }>(
     "/api/sessions/:token/upload-url",
     {
-      schema: { params: tokenParamSchema },
+      schema: {
+        params: tokenParamSchema,
+        querystring: {
+          type: "object" as const,
+          properties: {
+            capturedAt: { type: "string" as const, format: "date-time" },
+          },
+          additionalProperties: false,
+        },
+      },
     },
     async (request, reply) => {
       const session = await findSession(request.params.token);
@@ -205,36 +244,144 @@ export async function sessionRoutes(app: FastifyInstance) {
           .send({ error: "Max upload requests per session exceeded" });
       }
 
-      const now = new Date();
+      const serverNow = now();
+      const clientCapturedAtRaw = request.query.capturedAt;
+      const clientCapturedAt = clientCapturedAtRaw
+        ? new Date(clientCapturedAtRaw)
+        : null;
+      if (clientCapturedAt && Number.isNaN(clientCapturedAt.getTime())) {
+        return reply
+          .code(400)
+          .send({ error: "captured_at_invalid" });
+      }
 
-      // If activating, set started_at (with optimistic locking)
+      // Activate session if pending, and resolve the effective tracking mode.
+      // Mode-flip is atomic: only the very first upload (no existing
+      // screenshot rows) that carries capturedAt can switch to credit.
+      let trackingMode = session.trackingMode;
+      let startedAt: Date;
+
       if (isActivating) {
+        // We may flip the mode atomically with activation. If capturedAt is
+        // present AND no screenshots exist yet, flip to credit.
+        const wantsCredit = clientCapturedAt !== null;
+        const noScreenshots =
+          totalRequests === 0; // we measured this above; race-free for activation
+        const setFields: Record<string, unknown> = {
+          status: "active",
+          startedAt: serverNow,
+          lastScreenshotAt: serverNow,
+          updatedAt: serverNow,
+        };
+        if (wantsCredit && noScreenshots) {
+          setFields.trackingMode = "credit";
+        }
         const [updated] = await db
           .update(schema.sessions)
-          .set({
-            status: "active",
-            startedAt: now,
-            lastScreenshotAt: now,
-            updatedAt: now,
-          })
+          .set(setFields)
           .where(and(eq(schema.sessions.id, session.id), eq(schema.sessions.status, "pending")))
-          .returning({ id: schema.sessions.id });
+          .returning({
+            id: schema.sessions.id,
+            trackingMode: schema.sessions.trackingMode,
+            startedAt: schema.sessions.startedAt,
+          });
         if (!updated) {
           // Another request already activated; re-fetch and continue
           const refreshed = await findSession(request.params.token);
           if (!refreshed || (refreshed.status !== "active" && refreshed.status !== "pending")) {
             return reply.code(409).send({ error: `Session is ${refreshed?.status ?? "unknown"}, cannot upload` });
           }
+          trackingMode = refreshed.trackingMode;
+          startedAt = refreshed.startedAt!;
+        } else {
+          trackingMode = updated.trackingMode;
+          startedAt = updated.startedAt!;
         }
       } else {
+        // Existing active session. Try a one-shot mode flip if we're the
+        // very first upload of an already-active session (rare but possible:
+        // session was activated by some other code path with no screenshots).
+        // Guarded on tracking_mode='bucket' AND no screenshots rows.
+        if (clientCapturedAt && trackingMode === "bucket") {
+          const [{ count }] = await db
+            .select({ count: sql<number>`count(*)::int` })
+            .from(schema.screenshots)
+            .where(eq(schema.screenshots.sessionId, session.id));
+          if (Number(count) === 0) {
+            const [flipped] = await db
+              .update(schema.sessions)
+              .set({ trackingMode: "credit", updatedAt: serverNow })
+              .where(
+                and(
+                  eq(schema.sessions.id, session.id),
+                  eq(schema.sessions.trackingMode, "bucket"),
+                ),
+              )
+              .returning({ trackingMode: schema.sessions.trackingMode });
+            if (flipped) trackingMode = flipped.trackingMode;
+          }
+        }
+
         await db
           .update(schema.sessions)
-          .set({ lastScreenshotAt: now, updatedAt: now })
+          .set({ lastScreenshotAt: serverNow, updatedAt: serverNow })
           .where(eq(schema.sessions.id, session.id));
+        startedAt = session.startedAt!;
       }
 
-      const startedAt = isActivating ? now : session.startedAt!;
-      const minuteBucket = computeMinuteBucket(now, startedAt);
+      // Resolve the row's `captured_at` value — populated in both modes for
+      // debugging. In bucket mode it's never read for math.
+      const rowCapturedAt = clientCapturedAt ?? serverNow;
+
+      // Credit-mode: capturedAt is required and must pass the envelope.
+      let nextExpectedAt: Date;
+      if (trackingMode === "credit") {
+        if (!clientCapturedAt) {
+          return reply
+            .code(400)
+            .send({ error: "credit_mode_requires_captured_at" });
+        }
+
+        // Look up the latest existing capturedAt for monotonicity.
+        const [latest] = await db
+          .select({ capturedAt: schema.screenshots.capturedAt })
+          .from(schema.screenshots)
+          .where(eq(schema.screenshots.sessionId, session.id))
+          .orderBy(sql`${schema.screenshots.capturedAt} DESC NULLS LAST`)
+          .limit(1);
+
+        const validation = validateCapturedAt(
+          clientCapturedAt,
+          serverNow,
+          startedAt,
+          latest?.capturedAt ?? null,
+        );
+        if (!validation.ok) {
+          return reply.code(400).send({ error: validation.code });
+        }
+
+        // Predict nextExpectedAt assuming this capture will credit. The
+        // confirm response returns the authoritative post-credit value.
+        // Note: streak_credited_count is the count BEFORE this capture.
+        // If anchor is null, this will seed → next is captured + 60s.
+        // Else this is the (count+1)th capture, so the *next next* mark is
+        // anchor + (count + 2) * 60s.
+        if (session.streakAnchorAt === null) {
+          nextExpectedAt = new Date(
+            clientCapturedAt.getTime() + SCREENSHOT_INTERVAL_MS,
+          );
+        } else {
+          nextExpectedAt = new Date(
+            session.streakAnchorAt.getTime() +
+              (session.streakCreditedCount + 2) * SCREENSHOT_INTERVAL_MS,
+          );
+        }
+      } else {
+        // Bucket mode: existing semantics.
+        nextExpectedAt = new Date(serverNow.getTime() + SCREENSHOT_INTERVAL_MS);
+      }
+
+      const minuteBucket = computeMinuteBucket(serverNow, startedAt);
       const screenshotId = randomUUID();
       const r2Key = `screenshots/${session.id}/${screenshotId}.jpg`;
 
@@ -243,9 +390,10 @@ export async function sessionRoutes(app: FastifyInstance) {
         id: screenshotId,
         sessionId: session.id,
         r2Key,
-        requestedAt: now,
+        requestedAt: serverNow,
         minuteBucket,
         confirmed: false,
+        capturedAt: rowCapturedAt,
       });
 
       // Generate presigned PUT URL
@@ -262,16 +410,14 @@ export async function sessionRoutes(app: FastifyInstance) {
         expiresIn: PRESIGNED_URL_EXPIRY_SECONDS,
       });
 
-      const nextExpectedAt = new Date(
-        now.getTime() + SCREENSHOT_INTERVAL_MS,
-      ).toISOString();
-
       return {
         uploadUrl,
         r2Key,
         screenshotId,
         minuteBucket,
-        nextExpectedAt,
+        nextExpectedAt: nextExpectedAt.toISOString(),
+        serverTime: serverNow.toISOString(),
+        trackingMode,
       };
     },
   );
@@ -341,13 +487,30 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Screenshot not found" });
       }
 
-      // Idempotent: already confirmed
+      const serverNow = now();
+
+      // Idempotent: already confirmed. Return cached trackedSeconds and a
+      // freshly-computed nextExpectedAt (the streak may have advanced since
+      // the original confirm — never return a stale target).
       if (screenshot.confirmed) {
-        const trackedSeconds = await getTrackedSeconds(session.id);
-        const nextExpectedAt = new Date(
-          Date.now() + SCREENSHOT_INTERVAL_MS,
-        ).toISOString();
-        return { confirmed: true, trackedSeconds, nextExpectedAt };
+        const trackedSeconds = await getTrackedSecondsForSession(session);
+        let nextExpectedAt: string;
+        if (session.trackingMode === "credit" && session.streakAnchorAt) {
+          nextExpectedAt = new Date(
+            session.streakAnchorAt.getTime() +
+              (session.streakCreditedCount + 1) * SCREENSHOT_INTERVAL_MS,
+          ).toISOString();
+        } else {
+          nextExpectedAt = new Date(
+            serverNow.getTime() + SCREENSHOT_INTERVAL_MS,
+          ).toISOString();
+        }
+        return {
+          confirmed: true,
+          trackedSeconds,
+          nextExpectedAt,
+          serverTime: serverNow.toISOString(),
+        };
       }
 
       // Verify the object actually exists in R2 and is within size limits
@@ -381,29 +544,117 @@ export async function sessionRoutes(app: FastifyInstance) {
           .send({ error: "Max screenshots per session exceeded" });
       }
 
-      // Mark confirmed
-      await db
-        .update(schema.screenshots)
-        .set({
-          confirmed: true,
-          width,
-          height,
-          fileSizeBytes: fileSize,
-        })
-        .where(eq(schema.screenshots.id, screenshotId));
+      let nextExpectedAtIso: string;
+      let trackedSeconds: number;
 
-      // Update session's last_screenshot_at
-      await db
-        .update(schema.sessions)
-        .set({ lastScreenshotAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.sessions.id, session.id));
+      if (session.trackingMode === "credit") {
+        // Credit-mode: run streak math + writes in one transaction with a
+        // row lock on the session so concurrent confirms serialize.
+        const result = await db.transaction(async (tx) => {
+          // SELECT FOR UPDATE serializes concurrent confirms for this session.
+          // node-postgres returns timestamps as strings by default — coerce
+          // to Date before any time math.
+          const locked = await tx.execute(sql`
+            SELECT id, streak_anchor_at, streak_credited_count, tracked_seconds
+            FROM sessions WHERE id = ${session.id} FOR UPDATE
+          `);
+          const rawRow = (locked as unknown as { rows: Array<{
+            streak_anchor_at: Date | string | null;
+            streak_credited_count: number | string;
+            tracked_seconds: number | string | null;
+          }> }).rows[0];
+          const streakAnchorAt: Date | null = rawRow.streak_anchor_at
+            ? rawRow.streak_anchor_at instanceof Date
+              ? rawRow.streak_anchor_at
+              : new Date(rawRow.streak_anchor_at)
+            : null;
+          const streakCreditedCount = Number(rawRow.streak_credited_count);
+          const currentTracked = Number(rawRow.tracked_seconds ?? 0);
 
-      const trackedSeconds = await getTrackedSeconds(session.id);
-      const nextExpectedAt = new Date(
-        Date.now() + SCREENSHOT_INTERVAL_MS,
-      ).toISOString();
+          const cap = screenshot.capturedAt ?? serverNow;
+          const decision = creditCapture(
+            cap,
+            streakAnchorAt,
+            streakCreditedCount,
+          );
 
-      return { confirmed: true, trackedSeconds, nextExpectedAt };
+          // Mark screenshot confirmed + record credit + expected_at. The
+          // WHERE confirmed=false guard provides per-row idempotency: if a
+          // racing confirm beat us, this affects zero rows and we'll be a
+          // no-op (the streak update below would then double-credit, so we
+          // must check the returned row count).
+          const confirmedRows = await tx
+            .update(schema.screenshots)
+            .set({
+              confirmed: true,
+              width,
+              height,
+              fileSizeBytes: fileSize,
+              creditedSeconds: decision.credit,
+              expectedAt: decision.expectedAt,
+            })
+            .where(
+              and(
+                eq(schema.screenshots.id, screenshotId),
+                eq(schema.screenshots.confirmed, false),
+              ),
+            )
+            .returning({ id: schema.screenshots.id });
+
+          if (confirmedRows.length === 0) {
+            // Lost the race — another confirm flipped the row. Just read the
+            // current session state and return.
+            return { trackedSeconds: currentTracked, decision };
+          }
+
+          // Apply streak state + advance tracked_seconds atomically.
+          const newTracked = currentTracked + decision.credit;
+          await tx
+            .update(schema.sessions)
+            .set({
+              streakAnchorAt: decision.newAnchor,
+              streakCreditedCount: decision.newCount,
+              trackedSeconds: newTracked,
+              lastScreenshotAt: serverNow,
+              updatedAt: serverNow,
+            })
+            .where(eq(schema.sessions.id, session.id));
+
+          return { trackedSeconds: newTracked, decision };
+        });
+
+        trackedSeconds = result.trackedSeconds;
+        nextExpectedAtIso = result.decision.nextExpectedAt.toISOString();
+      } else {
+        // Bucket-mode: existing semantics. Flip the row, bump
+        // last_screenshot_at, compute trackedSeconds from bucket count.
+        await db
+          .update(schema.screenshots)
+          .set({
+            confirmed: true,
+            width,
+            height,
+            fileSizeBytes: fileSize,
+          })
+          .where(eq(schema.screenshots.id, screenshotId));
+
+        await db
+          .update(schema.sessions)
+          .set({ lastScreenshotAt: serverNow, updatedAt: serverNow })
+          .where(eq(schema.sessions.id, session.id));
+
+        trackedSeconds = await getTrackedSecondsBucket(session.id);
+        nextExpectedAtIso = new Date(
+          serverNow.getTime() + SCREENSHOT_INTERVAL_MS,
+        ).toISOString();
+      }
+
+      return {
+        confirmed: true,
+        trackedSeconds,
+        nextExpectedAt: nextExpectedAtIso,
+        serverTime: serverNow.toISOString(),
+      };
     },
   );
 
@@ -501,17 +752,27 @@ export async function sessionRoutes(app: FastifyInstance) {
           .send({ error: `Session is ${session.status}, cannot resume` });
       }
 
-      const now = new Date();
+      const resumeNow = now();
+
+      // Credit-mode: clear the streak so the first post-resume capture
+      // seeds a fresh anchor with 0 credit. Without this, the natural
+      // "out-of-window resets streak" branch would burn 60s of credit on
+      // every resume, even though the bucket-mode equivalent doesn't.
+      const setFields: Record<string, unknown> = {
+        status: "active",
+        pausedAt: null,
+        resumedAt: resumeNow,
+        lastScreenshotAt: resumeNow,
+        updatedAt: resumeNow,
+      };
+      if (session.trackingMode === "credit") {
+        setFields.streakAnchorAt = null;
+        setFields.streakCreditedCount = 0;
+      }
 
       const [updated] = await db
         .update(schema.sessions)
-        .set({
-          status: "active",
-          pausedAt: null,
-          resumedAt: now,
-          lastScreenshotAt: now,
-          updatedAt: now,
-        })
+        .set(setFields)
         .where(and(eq(schema.sessions.id, session.id), eq(schema.sessions.status, "paused")))
         .returning({ id: schema.sessions.id });
 
@@ -520,10 +781,14 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const nextExpectedAt = new Date(
-        now.getTime() + SCREENSHOT_INTERVAL_MS,
+        resumeNow.getTime() + SCREENSHOT_INTERVAL_MS,
       ).toISOString();
 
-      return { status: "active" as const, nextExpectedAt };
+      return {
+        status: "active" as const,
+        nextExpectedAt,
+        serverTime: resumeNow.toISOString(),
+      };
     },
   );
 
@@ -567,19 +832,19 @@ export async function sessionRoutes(app: FastifyInstance) {
         );
       }
 
-      const now = new Date();
+      const stopNow = now();
 
       // Compute tracked seconds before stopping (screenshots may be cleaned up later)
-      const trackedSeconds = await getTrackedSeconds(session.id);
+      const trackedSeconds = await getTrackedSecondsForSession(session);
 
       const [updated] = await db
         .update(schema.sessions)
         .set({
           status: "stopped",
-          stoppedAt: now,
+          stoppedAt: stopNow,
           totalActiveSeconds,
           trackedSeconds,
-          updatedAt: now,
+          updatedAt: stopNow,
         })
         .where(and(
           eq(schema.sessions.id, session.id),
@@ -599,7 +864,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         // No screenshots — mark failed (no video possible)
         await db
           .update(schema.sessions)
-          .set({ status: "failed", updatedAt: now })
+          .set({ status: "failed", updatedAt: stopNow })
           .where(eq(schema.sessions.id, session.id));
       }
 
@@ -631,8 +896,12 @@ export async function sessionRoutes(app: FastifyInstance) {
       const session = await findSession(request.params.token);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
-      const liveTrackedSeconds = await getTrackedSeconds(session.id);
-      const trackedSeconds = session.trackedSeconds ?? liveTrackedSeconds;
+      const liveTrackedSeconds = await getTrackedSecondsForSession(session);
+      // For credit mode, dispatcher already reads from session.trackedSeconds.
+      const trackedSeconds =
+        session.trackingMode === "credit"
+          ? liveTrackedSeconds
+          : session.trackedSeconds ?? liveTrackedSeconds;
 
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       return {
@@ -771,14 +1040,17 @@ export async function sessionRoutes(app: FastifyInstance) {
         .from(schema.sessions)
         .where(inArray(schema.sessions.token, validTokens));
 
-      // Get screenshot counts for all sessions in one query
+      // Get screenshot counts for all sessions in one query.
+      // For bucket-mode sessions we still compute live tracked-seconds from
+      // bucket count here; credit-mode sessions read sessions.tracked_seconds
+      // directly (maintained incrementally) and skip the aggregation.
       const sessionIds = rows.map((r) => r.id);
       const counts =
         sessionIds.length > 0
           ? await db
               .select({
                 sessionId: schema.screenshots.sessionId,
-                trackedSeconds: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
+                bucketCount: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
                 screenshotCount: sql<number>`count(*)`,
               })
               .from(schema.screenshots)
@@ -795,7 +1067,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         counts.map((c) => [
           c.sessionId,
           {
-            trackedSeconds: Math.max(0, (Number(c.trackedSeconds) - 1) * 60),
+            bucketTrackedSeconds: Math.max(0, (Number(c.bucketCount) - 1) * 60),
             screenshotCount: Number(c.screenshotCount),
           },
         ]),
@@ -804,13 +1076,17 @@ export async function sessionRoutes(app: FastifyInstance) {
       // Generate permanent thumbnail URLs via redirect endpoint
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
       const sessions = rows.map((s) => {
-          const c = countMap.get(s.id) ?? { trackedSeconds: 0, screenshotCount: 0 };
+          const c = countMap.get(s.id) ?? { bucketTrackedSeconds: 0, screenshotCount: 0 };
           const thumbnailUrl = s.thumbnailR2Key
             ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
             : null;
-          // Prefer stored trackedSeconds (survives screenshot cleanup),
-          // fall back to live screenshot count for active sessions
-          const trackedSeconds = s.trackedSeconds ?? c.trackedSeconds;
+          // Credit-mode: trust sessions.tracked_seconds (maintained per-credit).
+          // Bucket-mode: prefer stored value (survives screenshot cleanup),
+          // fall back to live screenshot bucket count for active sessions.
+          const trackedSeconds =
+            s.trackingMode === "credit"
+              ? s.trackedSeconds ?? 0
+              : s.trackedSeconds ?? c.bucketTrackedSeconds;
           return {
             token: s.token,
             name: s.name,

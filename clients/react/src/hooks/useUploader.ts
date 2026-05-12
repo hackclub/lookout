@@ -3,6 +3,12 @@ import { useLookoutContext } from "../LookoutProvider.js";
 import { HttpError } from "../api/client.js";
 import type { CaptureResult, UploadState } from "../types.js";
 
+/** Whether to opt into credit-mode tracking by sending `capturedAt` to the
+ *  server on every upload. The new desktop / web build enables this on new
+ *  sessions; the legacy build never sets it (and the server keeps the
+ *  session in bucket-mode). Toggle one place, get both behaviors. */
+const ENABLE_CREDIT_MODE = true;
+
 async function retry<T>(
   fn: () => Promise<T>,
   maxRetries: number,
@@ -31,6 +37,11 @@ export interface UploaderResult {
   lastScreenshotUrl: string | null;
   /** ISO timestamp: when the server expects the next screenshot. */
   nextExpectedAt: string | null;
+  /** Snapshot of the latest `nextExpectedAt` from the ref — for callers
+   *  (e.g. capture-loop schedulers) that need the freshest value without
+   *  re-rendering. Returns the same string `nextExpectedAt` does, but
+   *  available synchronously from within effects. */
+  getNextExpectedAt: () => string | null;
   /** Last upload error message, if any. */
   lastError: string | null;
   /** True when a 409 conflict was received (session paused server-side). */
@@ -67,8 +78,13 @@ export function useUploader(): UploaderResult {
       setUploads((s) => ({ ...s, pending: s.pending - 1 }));
 
       try {
+        // Send capturedAt for credit-mode opt-in. When disabled (legacy
+        // build), this is omitted and the server stays in bucket mode.
+        const capturedAt = ENABLE_CREDIT_MODE
+          ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
+          : undefined;
         const { uploadUrl, screenshotId, nextExpectedAt } = await retry(
-          () => client.getUploadUrl(),
+          () => client.getUploadUrl({ capturedAt }),
           maxRetries,
           retryDelays,
         );
@@ -139,12 +155,18 @@ export function useUploader(): UploaderResult {
     [maxPendingBuffer, processQueue],
   );
 
+  const getNextExpectedAt = useCallback(
+    () => nextExpectedAtRef.current,
+    [],
+  );
+
   return {
     enqueue,
     uploads,
     trackedSeconds,
     lastScreenshotUrl,
     nextExpectedAt: nextExpectedAtRef.current,
+    getNextExpectedAt,
     lastError,
     sessionConflict,
     resetConflict,

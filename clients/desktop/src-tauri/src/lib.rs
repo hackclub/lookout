@@ -487,6 +487,9 @@ fn list_macos_windows_any_space() -> Vec<WindowInfo> {
     windows
 }
 
+// Response structs use `#[serde(default)]` on new fields so older servers
+// that don't include them still deserialize cleanly (no `deny_unknown_fields`
+// either — keeps forward-compat for any future additions).
 #[derive(Serialize, Deserialize)]
 pub struct UploadUrlResponse {
     #[serde(rename = "uploadUrl")]
@@ -499,6 +502,12 @@ pub struct UploadUrlResponse {
     pub minute_bucket: i32,
     #[serde(rename = "nextExpectedAt")]
     pub next_expected_at: String,
+    /// Server wall-clock at response time. Absent on pre-credit-mode servers.
+    #[serde(rename = "serverTime", default)]
+    pub server_time: Option<String>,
+    /// Sticky tracking mode for the session. Absent on pre-credit-mode servers.
+    #[serde(rename = "trackingMode", default)]
+    pub tracking_mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -508,6 +517,8 @@ pub struct ConfirmResponse {
     pub tracked_seconds: i64,
     #[serde(rename = "nextExpectedAt")]
     pub next_expected_at: String,
+    #[serde(rename = "serverTime", default)]
+    pub server_time: Option<String>,
 }
 
 /// Result returned to the frontend from capture_and_upload.
@@ -794,10 +805,16 @@ fn take_screenshot(
 /// Shared upload-and-confirm pipeline: get presigned URL, PUT to R2, POST
 /// confirmation. Used by both `capture_and_upload` (screen/window) and
 /// `upload_frame` (camera).
+///
+/// `captured_at` is the ISO-8601 timestamp (in client clock) of when the
+/// screenshot was actually taken. Optional — when `None`, the request
+/// matches the legacy bucket-mode payload byte-for-byte. When `Some`, it
+/// opts the session into credit-mode tracking on the first request.
 async fn upload_and_confirm(
     jpeg_base64: &str,
     width: u32,
     height: u32,
+    captured_at: Option<&str>,
     config: &SessionConfig,
     app: &AppHandle,
 ) -> Result<CaptureUploadResult, String> {
@@ -811,11 +828,18 @@ async fn upload_and_confirm(
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let mut upload_url_url = format!(
+        "{}/api/sessions/{}/upload-url",
+        config.api_base_url, config.token
+    );
+    if let Some(c) = captured_at {
+        // url-encode just enough to safely embed an ISO-8601 string
+        // (colons are reserved). reqwest will handle the rest.
+        let encoded = c.replace(':', "%3A").replace('+', "%2B");
+        upload_url_url.push_str(&format!("?capturedAt={encoded}"));
+    }
     let url_response = client
-        .get(format!(
-            "{}/api/sessions/{}/upload-url",
-            config.api_base_url, config.token
-        ))
+        .get(upload_url_url)
         .send()
         .await
         .map_err(|e| format!("Failed to get upload URL: {e}"))?;
@@ -899,6 +923,49 @@ async fn upload_and_confirm(
     })
 }
 
+/// Build an ISO-8601 timestamp in UTC for the current instant. Used as the
+/// client-attested `capturedAt` on upload requests when credit mode is on.
+/// Format: `YYYY-MM-DDTHH:MM:SS.sssZ` — what `Date.parse()` and Go's
+/// `time.Parse(time.RFC3339)` both accept without surprises.
+fn captured_at_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = dur.as_secs() as i64;
+    let millis = dur.subsec_millis();
+
+    // Civil date math via days-since-epoch — Howard Hinnant's algorithm.
+    let days = total_secs.div_euclid(86_400);
+    let time_of_day = total_secs.rem_euclid(86_400) as u32;
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    // Convert days-since-1970-01-01 to civil (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, minute, second, millis
+    )
+}
+
+/// Credit-mode opt-in toggle. New desktop builds always send `capturedAt`;
+/// pinning to one flag keeps the wire-format change reviewable in one spot.
+/// Old builds (without this constant) never sent it and the server stays in
+/// bucket mode for those sessions.
+const ENABLE_CREDIT_MODE: bool = true;
+
 /// Full capture-upload-confirm pipeline in Rust (no browser CORS issues).
 /// Returns the confirm data AND the screenshot preview (base64) so the
 /// frontend can display the captured frame without a separate IPC call.
@@ -951,10 +1018,16 @@ async fn capture_and_upload(
         ),
     );
 
+    let captured_at = if ENABLE_CREDIT_MODE {
+        Some(captured_at_now())
+    } else {
+        None
+    };
     upload_and_confirm(
         &screenshot.base64,
         screenshot.width,
         screenshot.height,
+        captured_at.as_deref(),
         &config,
         &app,
     )
@@ -983,7 +1056,12 @@ async fn upload_frame(
         format!("uploading camera frame {}x{}", width, height),
     );
 
-    upload_and_confirm(&base64, width, height, &config, &app).await
+    let captured_at = if ENABLE_CREDIT_MODE {
+        Some(captured_at_now())
+    } else {
+        None
+    };
+    upload_and_confirm(&base64, width, height, captured_at.as_deref(), &config, &app).await
 }
 
 // ── Capture-loop interval (seconds) ─────────────────────────────
@@ -1187,13 +1265,19 @@ async fn capture_loop_task(
     jpeg_quality: u8,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
-    use tokio::time::{interval, Duration, MissedTickBehavior};
+    use tokio::time::{sleep_until, Duration, Instant as TokioInstant};
 
-    let mut ticker = interval(Duration::from_secs(CAPTURE_INTERVAL_SECS));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    // Consume the first (immediate) tick — we want to fire one capture right away.
-    ticker.tick().await;
+    // Self-scheduling chain. The fixed-interval ticker is replaced with a
+    // `sleep_until(next_target)` that's recomputed from each confirm's
+    // `nextExpectedAt`. When the server returns an ISO timestamp we parse
+    // it via system clock delta; otherwise we fall back to the legacy 60s
+    // cadence. Catch-up-on-miss: clamp negative delays to 0 so we fire
+    // immediately rather than waiting another full interval after sleep.
+    let interval_dur = Duration::from_secs(CAPTURE_INTERVAL_SECS);
+    // First iteration overwrites this before reading; the value is just a
+    // placeholder so the variable is bound for the loop body.
+    #[allow(unused_assignments)]
+    let mut next_fire = TokioInstant::now();
     let mut last_tick = StdInstant::now();
 
     // Helper: check session status with the server and handle sleep/pause recovery
@@ -1323,12 +1407,21 @@ async fn capture_loop_task(
         .map_err(|e| format!("spawn_blocking panicked: {e}"))
         .and_then(|r| r);
 
+        // Capture the wall-clock moment NOW — that's the value we'll send
+        // as `capturedAt`, not when the upload eventually reaches the server.
+        let captured_at = if ENABLE_CREDIT_MODE {
+            Some(captured_at_now())
+        } else {
+            None
+        };
+
         match screenshot_result {
             Ok(screenshot) => {
                 match upload_and_confirm(
                     &screenshot.base64,
                     screenshot.width,
                     screenshot.height,
+                    captured_at.as_deref(),
                     &config,
                     &app,
                 )
@@ -1340,6 +1433,19 @@ async fn capture_loop_task(
                             let state = app.state::<AppState>();
                             sync_tray_timer(&state, result.tracked_seconds);
                         }
+                        // Compute next fire from the server-provided
+                        // nextExpectedAt. If parsing fails or the target is
+                        // in the past, default to "fire now" (catch-up).
+                        let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
+                        let now_ms = current_unix_ms();
+                        let delay_ms = match parsed_target_ms {
+                            Some(target) => (target - now_ms).max(0) as u64,
+                            None => CAPTURE_INTERVAL_SECS * 1000,
+                        };
+                        // Safety upper-bound: never sleep longer than 2x interval,
+                        // protects against malformed responses.
+                        let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
+                        next_fire = TokioInstant::now() + Duration::from_millis(delay_ms);
                         let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
                     }
                     Err(e) => {
@@ -1350,6 +1456,8 @@ async fn capture_loop_task(
                                 message: e.clone(),
                             },
                         );
+                        // No server target available — fall back to interval.
+                        next_fire = TokioInstant::now() + interval_dur;
                         // Check if server paused the session
                         match handle_sleep_recovery(&app, &config).await {
                             Ok(true) => { /* continue */ }
@@ -1367,12 +1475,15 @@ async fn capture_loop_task(
                         message: e.clone(),
                     },
                 );
+                // Local capture failure — retry on the legacy cadence.
+                next_fire = TokioInstant::now() + interval_dur;
             }
         }
 
-        // Wait for next tick or cancellation
+        // Wait until next_fire or cancellation. sleep_until returns
+        // immediately if next_fire is already in the past (catch-up).
         tokio::select! {
-            _ = ticker.tick() => {}
+            _ = sleep_until(next_fire) => {}
             _ = cancel_rx.changed() => {
                 eprintln!("[capture-loop] cancelled");
                 break;
@@ -1381,6 +1492,75 @@ async fn capture_loop_task(
     }
 
     eprintln!("[capture-loop] stopped");
+}
+
+/// Parse an ISO-8601 timestamp like `2024-09-12T18:34:21.123Z` to milliseconds
+/// since the Unix epoch. Returns None on any parse failure. Implementation
+/// uses civil-date math (Howard Hinnant) so we don't pull in chrono just
+/// for this one call site.
+fn parse_iso_to_unix_ms(s: &str) -> Option<i64> {
+    // Expected layout: YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM|-HH:MM]
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T'
+        || bytes[13] != b':' || bytes[16] != b':' {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    // Fractional seconds + timezone offset.
+    let mut ms: i64 = 0;
+    let mut idx = 19;
+    if bytes.get(idx).copied() == Some(b'.') {
+        idx += 1;
+        let frac_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        let frac = &s[frac_start..idx];
+        // Take the first 3 digits as milliseconds, ignore the rest.
+        let trimmed: String = frac.chars().take(3).collect();
+        let padded = format!("{:0<3}", trimmed); // pad right to 3 chars
+        ms = padded.parse().ok()?;
+    }
+    let mut tz_offset_min: i64 = 0;
+    if let Some(&c) = bytes.get(idx) {
+        if c == b'Z' {
+            // UTC, no offset
+        } else if c == b'+' || c == b'-' {
+            let sign: i64 = if c == b'+' { 1 } else { -1 };
+            let h: i64 = s.get(idx + 1..idx + 3)?.parse().ok()?;
+            let m: i64 = if bytes.get(idx + 3) == Some(&b':') {
+                s.get(idx + 4..idx + 6)?.parse().ok()?
+            } else {
+                s.get(idx + 3..idx + 5)?.parse().ok()?
+            };
+            tz_offset_min = sign * (h * 60 + m);
+        }
+    }
+
+    // Civil date → days-since-epoch (Howard Hinnant).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m_adj = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * m_adj as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    let total_secs =
+        days * 86_400 + (hour as i64) * 3600 + (minute as i64) * 60 + second as i64;
+    Some((total_secs - tz_offset_min * 60) * 1000 + ms)
+}
+
+fn current_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Start the Rust-side capture loop. Replaces any existing loop.
@@ -1913,4 +2093,207 @@ pub fn run() {
                 }
             }
         });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Compat tests for the wire format.
+//
+// Cross-checks that:
+//   1. The CURRENT response structs accept both legacy and new JSON.
+//   2. The LEGACY response structs (copied verbatim from the pre-credit-mode
+//      `lib.rs`) still accept the new server's JSON. This is the load-bearing
+//      compat guarantee: an unupgraded user's binary in the wild keeps working.
+// ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod compat_tests {
+    use super::{
+        captured_at_now, parse_iso_to_unix_ms, ConfirmResponse, UploadUrlResponse,
+    };
+
+    // Snapshot of the pre-credit-mode struct definitions, byte-for-byte from
+    // git history. If a future change accidentally breaks shape compat with
+    // shipped binaries, the relevant test below will fail.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct LegacyUploadUrlResponse {
+        #[serde(rename = "uploadUrl")]
+        upload_url: String,
+        #[serde(rename = "r2Key")]
+        r2_key: String,
+        #[serde(rename = "screenshotId")]
+        screenshot_id: String,
+        #[serde(rename = "minuteBucket")]
+        minute_bucket: i32,
+        #[serde(rename = "nextExpectedAt")]
+        next_expected_at: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct LegacyConfirmResponse {
+        confirmed: bool,
+        #[serde(rename = "trackedSeconds")]
+        tracked_seconds: i64,
+        #[serde(rename = "nextExpectedAt")]
+        next_expected_at: String,
+    }
+
+    const LEGACY_UPLOAD_JSON: &str = r#"{
+        "uploadUrl": "https://r2.example.com/upload",
+        "r2Key": "screenshots/abc/def.jpg",
+        "screenshotId": "11111111-2222-3333-4444-555555555555",
+        "minuteBucket": 7,
+        "nextExpectedAt": "2025-06-01T12:01:00.000Z"
+    }"#;
+
+    const NEW_UPLOAD_JSON: &str = r#"{
+        "uploadUrl": "https://r2.example.com/upload",
+        "r2Key": "screenshots/abc/def.jpg",
+        "screenshotId": "11111111-2222-3333-4444-555555555555",
+        "minuteBucket": 7,
+        "nextExpectedAt": "2025-06-01T12:01:00.000Z",
+        "serverTime": "2025-06-01T12:00:00.000Z",
+        "trackingMode": "credit"
+    }"#;
+
+    const LEGACY_CONFIRM_JSON: &str = r#"{
+        "confirmed": true,
+        "trackedSeconds": 60,
+        "nextExpectedAt": "2025-06-01T12:01:00.000Z"
+    }"#;
+
+    const NEW_CONFIRM_JSON: &str = r#"{
+        "confirmed": true,
+        "trackedSeconds": 60,
+        "nextExpectedAt": "2025-06-01T12:01:00.000Z",
+        "serverTime": "2025-06-01T12:00:00.500Z"
+    }"#;
+
+    // ── 4-way matrix: {legacy, new} struct × {legacy, new} JSON ───────
+
+    #[test]
+    fn new_struct_parses_legacy_json_upload_url() {
+        // New binary hitting an OLD server (rollout window): the new struct
+        // must accept the legacy JSON (missing serverTime / trackingMode).
+        let r: UploadUrlResponse = serde_json::from_str(LEGACY_UPLOAD_JSON).unwrap();
+        assert_eq!(r.screenshot_id, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(r.minute_bucket, 7);
+        assert!(r.server_time.is_none());
+        assert!(r.tracking_mode.is_none());
+    }
+
+    #[test]
+    fn new_struct_parses_new_json_upload_url() {
+        let r: UploadUrlResponse = serde_json::from_str(NEW_UPLOAD_JSON).unwrap();
+        assert_eq!(r.server_time.as_deref(), Some("2025-06-01T12:00:00.000Z"));
+        assert_eq!(r.tracking_mode.as_deref(), Some("credit"));
+    }
+
+    #[test]
+    fn legacy_struct_parses_new_json_upload_url() {
+        // *** Load-bearing compat guarantee ***
+        // The struct shape as it exists in the currently-shipped binary
+        // must continue to deserialize the new server's responses. If
+        // serde's default behavior (ignore unknown fields) ever changes
+        // — or if someone adds `deny_unknown_fields` later — this fails.
+        let r: LegacyUploadUrlResponse = serde_json::from_str(NEW_UPLOAD_JSON).unwrap();
+        assert_eq!(r.screenshot_id, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(r.minute_bucket, 7);
+        assert_eq!(r.next_expected_at, "2025-06-01T12:01:00.000Z");
+    }
+
+    #[test]
+    fn legacy_struct_parses_legacy_json_upload_url() {
+        let r: LegacyUploadUrlResponse = serde_json::from_str(LEGACY_UPLOAD_JSON).unwrap();
+        assert_eq!(r.minute_bucket, 7);
+    }
+
+    #[test]
+    fn new_struct_parses_legacy_json_confirm() {
+        let r: ConfirmResponse = serde_json::from_str(LEGACY_CONFIRM_JSON).unwrap();
+        assert_eq!(r.tracked_seconds, 60);
+        assert!(r.server_time.is_none());
+    }
+
+    #[test]
+    fn new_struct_parses_new_json_confirm() {
+        let r: ConfirmResponse = serde_json::from_str(NEW_CONFIRM_JSON).unwrap();
+        assert_eq!(r.tracked_seconds, 60);
+        assert!(r.server_time.is_some());
+    }
+
+    #[test]
+    fn legacy_struct_parses_new_json_confirm() {
+        // *** Load-bearing compat guarantee *** for /screenshots responses.
+        let r: LegacyConfirmResponse = serde_json::from_str(NEW_CONFIRM_JSON).unwrap();
+        assert!(r.confirmed);
+        assert_eq!(r.tracked_seconds, 60);
+        assert_eq!(r.next_expected_at, "2025-06-01T12:01:00.000Z");
+    }
+
+    #[test]
+    fn legacy_struct_parses_legacy_json_confirm() {
+        let r: LegacyConfirmResponse = serde_json::from_str(LEGACY_CONFIRM_JSON).unwrap();
+        assert_eq!(r.tracked_seconds, 60);
+    }
+
+    // ── captured_at helpers ───────────────────────────────────────────
+
+    #[test]
+    fn captured_at_now_is_iso8601_utc() {
+        let s = captured_at_now();
+        // YYYY-MM-DDTHH:MM:SS.sssZ — 24 chars total
+        assert_eq!(s.len(), 24);
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[7..8], "-");
+        assert_eq!(&s[10..11], "T");
+        assert_eq!(&s[13..14], ":");
+        assert_eq!(&s[16..17], ":");
+        assert_eq!(&s[19..20], ".");
+        assert_eq!(&s[23..24], "Z");
+    }
+
+    #[test]
+    fn parse_iso_to_unix_ms_round_trips_captured_at_now() {
+        let s = captured_at_now();
+        let parsed = parse_iso_to_unix_ms(&s).expect("parses");
+        let actual = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        // Round-trip within 5s of wall clock.
+        assert!((parsed - actual).abs() < 5_000, "parsed={parsed} actual={actual}");
+    }
+
+    #[test]
+    fn parse_iso_to_unix_ms_handles_known_values() {
+        // 2025-01-01T00:00:00.000Z = 1735689600000
+        assert_eq!(
+            parse_iso_to_unix_ms("2025-01-01T00:00:00.000Z"),
+            Some(1735689600000)
+        );
+        // 2025-06-01T12:00:00.000Z = 1748779200000
+        assert_eq!(
+            parse_iso_to_unix_ms("2025-06-01T12:00:00.000Z"),
+            Some(1748779200000)
+        );
+        // 1970-01-01T00:00:00.000Z = 0
+        assert_eq!(parse_iso_to_unix_ms("1970-01-01T00:00:00.000Z"), Some(0));
+    }
+
+    #[test]
+    fn parse_iso_to_unix_ms_handles_timezone_offset() {
+        // 12:00 at +05:00 == 07:00 UTC
+        let a = parse_iso_to_unix_ms("2025-06-01T12:00:00.000+05:00");
+        let b = parse_iso_to_unix_ms("2025-06-01T07:00:00.000Z");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn parse_iso_to_unix_ms_rejects_garbage() {
+        assert_eq!(parse_iso_to_unix_ms(""), None);
+        assert_eq!(parse_iso_to_unix_ms("not-a-date"), None);
+        assert_eq!(parse_iso_to_unix_ms("2025/06/01"), None);
+    }
 }

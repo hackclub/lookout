@@ -1,46 +1,78 @@
 version: 2
+
+# Shared cooldown: Dependabot waits at least 7 days after a version is
+# published before opening a PR for it. Defense against supply-chain
+# attacks where a compromised maintainer pushes a malicious release —
+# the window gives the ecosystem time to flag and yank it before we
+# auto-pull it in. Applies to ALL update types (deps + devDeps).
+#
+# Docs: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown
+#
+# YAML anchor (&cooldown_7d) lets every ecosystem reuse the same setting
+# without duplication.
+
 updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown: &cooldown_7d
+      default-days: 7
+      semver-major-days: 7
+      semver-minor-days: 7
+      semver-patch-days: 7
 
   - package-ecosystem: "npm"
     directory: "/packages/server"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "npm"
     directory: "/packages/shared"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "npm"
     directory: "/packages/worker"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "npm"
     directory: "/clients/desktop"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "npm"
     directory: "/clients/react"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "npm"
     directory: "/clients/web"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
+
+  # Cargo / Rust supply-chain coverage — same 7-day cooldown applies.
+  - package-ecosystem: "cargo"
+    directory: "/clients/desktop/src-tauri"
+    schedule:
+      interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown: *cooldown_7d

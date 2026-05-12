@@ -93,7 +93,15 @@ async function checkTimeouts() {
   );
 
   const toStop = await db
-    .select({ id: schema.sessions.id, status: schema.sessions.status, startedAt: schema.sessions.startedAt, resumedAt: schema.sessions.resumedAt, totalActiveSeconds: schema.sessions.totalActiveSeconds })
+    .select({
+      id: schema.sessions.id,
+      status: schema.sessions.status,
+      startedAt: schema.sessions.startedAt,
+      resumedAt: schema.sessions.resumedAt,
+      totalActiveSeconds: schema.sessions.totalActiveSeconds,
+      trackingMode: schema.sessions.trackingMode,
+      trackedSeconds: schema.sessions.trackedSeconds,
+    })
     .from(schema.sessions)
     .where(
       and(
@@ -114,19 +122,25 @@ async function checkTimeouts() {
       );
     }
 
-    // Compute tracked seconds before stopping (screenshots may be cleaned up later)
-    const [{ buckets }] = await db
-      .select({
-        buckets: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
-      })
-      .from(schema.screenshots)
-      .where(
-        and(
-          eq(schema.screenshots.sessionId, session.id),
-          eq(schema.screenshots.confirmed, true),
-        ),
-      );
-    const trackedSeconds = Math.max(0, (Number(buckets) - 1) * 60);
+    // Compute tracked seconds before stopping. Credit-mode sessions
+    // maintain the value incrementally; bucket-mode computes live.
+    let trackedSeconds: number;
+    if (session.trackingMode === "credit") {
+      trackedSeconds = session.trackedSeconds ?? 0;
+    } else {
+      const [{ buckets }] = await db
+        .select({
+          buckets: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
+        })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, session.id),
+            eq(schema.screenshots.confirmed, true),
+          ),
+        );
+      trackedSeconds = Math.max(0, (Number(buckets) - 1) * 60);
+    }
 
     await db
       .update(schema.sessions)

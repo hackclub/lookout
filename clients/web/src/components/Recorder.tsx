@@ -26,14 +26,19 @@ export function Recorder({
 }: RecorderProps) {
   const { isSharing, startSharing, takeScreenshotAsync, stopSharing } =
     useScreenCapture();
+  const uploader = useUploader();
   const {
     enqueueUpload,
     uploadState,
     trackedSeconds: uploadTrackedSeconds,
     lastImageUrl,
-  } = useUploader();
-  const intervalRef = useRef<ReturnType<typeof setInterval>>();
+  } = uploader;
+  // Holds the latest setTimeout id (self-scheduling chain following
+  // server-provided nextExpectedAt) — never a setInterval.
+  const intervalRef = useRef<ReturnType<typeof setTimeout>>();
   const hasStartedRef = useRef(false);
+  const uploaderRef = useRef(uploader);
+  uploaderRef.current = uploader;
   const [error, setError] = useState<string | null>(null);
   const isPaused = sessionStatus === "paused";
   const isActive = sessionStatus === "active" || sessionStatus === "pending";
@@ -52,29 +57,46 @@ export function Recorder({
     }
   }, [takeScreenshotAsync, enqueueUpload]);
 
-  // Capture immediately when screen sharing starts, then every interval.
-  // Triggers on both "pending" and "active" — the first upload-url request
-  // will activate the session server-side.
+  // Capture immediately when screen sharing starts, then schedule each
+  // subsequent capture from the server's `nextExpectedAt`. Falls back to
+  // SCREENSHOT_INTERVAL_MS if the server didn't return one (e.g. first
+  // capture or a network blip). Catch-up-on-miss: if the next target is in
+  // the past, fire immediately rather than waiting another full interval.
   useEffect(() => {
-    if (isSharing && isActive && !hasStartedRef.current) {
-      hasStartedRef.current = true;
-      // Capture first screenshot immediately
-      captureAndUpload();
-      intervalRef.current = setInterval(captureAndUpload, SCREENSHOT_INTERVAL_MS);
-    }
-
-    // If sharing stopped or session left active state, clear interval
     if (!isSharing || !isActive) {
       hasStartedRef.current = false;
       if (intervalRef.current) {
-        clearInterval(intervalRef.current);
+        clearTimeout(intervalRef.current);
         intervalRef.current = undefined;
       }
+      return;
     }
 
+    if (hasStartedRef.current) return;
+    hasStartedRef.current = true;
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await captureAndUpload();
+      if (cancelled) return;
+      const nextIso = uploaderRef.current.getNextExpectedAt();
+      let delayMs: number;
+      if (nextIso) {
+        const parsed = Date.parse(nextIso);
+        delayMs = Number.isFinite(parsed) ? parsed - Date.now() : SCREENSHOT_INTERVAL_MS;
+      } else {
+        delayMs = SCREENSHOT_INTERVAL_MS;
+      }
+      if (delayMs < 0) delayMs = 0;
+      intervalRef.current = setTimeout(tick, delayMs);
+    };
+    tick();
+
     return () => {
+      cancelled = true;
       if (intervalRef.current) {
-        clearInterval(intervalRef.current);
+        clearTimeout(intervalRef.current);
         intervalRef.current = undefined;
       }
     };
@@ -103,7 +125,7 @@ export function Recorder({
 
   const handlePause = async () => {
     if (intervalRef.current) {
-      clearInterval(intervalRef.current);
+      clearTimeout(intervalRef.current);
       intervalRef.current = undefined;
     }
     hasStartedRef.current = false;
@@ -117,7 +139,7 @@ export function Recorder({
 
   const handleStop = async () => {
     if (intervalRef.current) {
-      clearInterval(intervalRef.current);
+      clearTimeout(intervalRef.current);
       intervalRef.current = undefined;
     }
     hasStartedRef.current = false;

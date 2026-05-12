@@ -30,6 +30,34 @@ export const SCREENSHOT_INTERVAL_MS = 60_000;
 export const MAX_CLOCK_SKEW_MS = 5_000;
 
 // ──────────────────────────────────────────────────────────
+// Credit-mode tracking (see plan: server-authoritative wall-clock)
+// ──────────────────────────────────────────────────────────
+
+/** Trust envelope: how far in the past `capturedAt` may be relative
+ *  to server `now()` before being rejected. Wide enough to absorb
+ *  normal client-clock skew and buffered uploads.
+ *  Default: 300000 (5 minutes) */
+export const CAPTURED_AT_PAST_TOLERANCE_MS = 300_000;
+
+/** Trust envelope: how far in the future `capturedAt` may be relative
+ *  to server `now()` before being rejected. Symmetric with the past
+ *  bound to handle clients with fast-skewed clocks.
+ *  Default: 300000 (5 minutes) */
+export const CAPTURED_AT_FUTURE_TOLERANCE_MS = 300_000;
+
+/** Credit-mode streak window: |capturedAt - expectedAt| ≤ this credits
+ *  60s; outside resets the streak to a fresh anchor with 0 credit.
+ *  Tightly coupled to SCREENSHOT_INTERVAL_MS — keep at half-interval.
+ *  Default: 30000 (30 seconds) */
+export const STREAK_WINDOW_MS = 30_000;
+
+/** Seconds awarded per in-window capture in credit mode.
+ *  Equals SCREENSHOT_INTERVAL_MS / 1000. Don't hardcode 60 in the
+ *  credit path — derive from this constant.
+ *  Default: 60 */
+export const CREDIT_PER_CAPTURE_S = 60;
+
+// ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds
 // ──────────────────────────────────────────────────────────
 
