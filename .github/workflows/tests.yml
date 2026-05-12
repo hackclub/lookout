@@ -113,11 +113,17 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
+      # Cache key is platform-based (not workflow-based) so the registry
+      # + git deps populated by tests.yml are reused by release.yml's
+      # Linux-native build, and vice versa. The key matches the entry in
+      # release.yml's matrix for ubuntu-24.04 + native target.
+      # Underlying key includes hashFiles('Cargo.lock') + rustc version,
+      # so any lockfile change naturally invalidates the cache.
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: "./clients/desktop/src-tauri -> target"
-          shared-key: tests-ubuntu
+          shared-key: rust-ubuntu-24.04-native
 
       - name: cargo test --lib
         working-directory: clients/desktop/src-tauri

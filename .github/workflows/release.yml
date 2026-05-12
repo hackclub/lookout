@@ -86,11 +86,14 @@ jobs:
         with:
           targets: ${{ matrix.rust_targets }}
 
+      # Cache key is platform-based so it's shared with tests.yml's
+      # Linux-native cache (same shared-key pattern). For mac/Windows
+      # and cross-compile targets, each gets its own namespace.
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: "./clients/desktop/src-tauri -> target"
-          shared-key: release-${{ matrix.platform }}-${{ matrix.args || 'native' }}
+          shared-key: rust-${{ matrix.platform }}-${{ matrix.args || 'native' }}
 
       - name: Install dependencies
         run: npm ci
