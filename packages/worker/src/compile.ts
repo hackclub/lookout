@@ -62,16 +62,16 @@ async function verifyVideo(
     [
       "-v",
       "error",
-      "-count_frames",
+      "-count_packets",
       "-select_streams",
       "v:0",
       "-show_entries",
-      "stream=nb_read_frames",
+      "stream=nb_read_packets",
       "-of",
       "csv=p=0",
       filePath,
     ],
-    { timeout: 30_000 },
+    { timeout: 60_000 },
   );
 
   const frameCount = parseInt(frameCountStr.trim(), 10);
