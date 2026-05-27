@@ -156,3 +156,11 @@ jobs:
       - name: Type-check desktop frontend
         working-directory: clients/desktop
         run: npx tsc --noEmit
+
+      # Vitest hook tests for the user-facing recording timer. Pinned to
+      # the SDK + web — desktop uses the SDK build so coverage transits.
+      - name: Vitest (React SDK)
+        run: npm test -w clients/react
+
+      - name: Vitest (web client)
+        run: npm test -w clients/web
