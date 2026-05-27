@@ -41,7 +41,7 @@
   "dependencies": {
     "@lookout/shared": "*",
     "@squircle-js/react": "^1.3.0",
-    "@videojs/react": "^10.0.0-beta.8",
+    "@videojs/react": "^10.0.0-beta.24",
     "motion": "^12.38.0"
   },
   "devDependencies": {
