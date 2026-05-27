@@ -657,3 +657,238 @@ describe("captured_at debug column", () => {
     expect(rows[0].capturedAt?.getTime()).toBe(virtualNow + 100);
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// Latency / robustness — simulate real-world network conditions
+// and verify the system still credits correctly. Driven by the
+// halved-time prod investigation: we want the server to absorb
+// jitter, retries, out-of-order arrivals, and slow uploads without
+// dropping credits or double-counting.
+// ────────────────────────────────────────────────────────────
+
+describe("latency — slow uploads", () => {
+  it("absorbs 4s end-to-end latency between capture and confirm", async () => {
+    // Simulate: client takes screenshot at T0, upload + confirm takes 4s
+    // total. Wall clock at server side has advanced by 4s by confirm time.
+    const { token, id } = await createSession();
+    const cap1 = new Date(virtualNow).toISOString();
+    const u1 = await postUpload(token, cap1);
+    advanceVirtualMs(4_000);
+    const c1 = await confirmUpload(token, u1.body.screenshotId);
+    expect(c1.status).toBe(200);
+
+    // Next capture happens at proper +60s from the original capturedAt.
+    advanceVirtualMs(56_000); // total: 60s past first cap
+    const cap2 = new Date(virtualNow).toISOString();
+    const u2 = await postUpload(token, cap2);
+    advanceVirtualMs(4_000); // another 4s of upload latency
+    const c2 = await confirmUpload(token, u2.body.screenshotId);
+    expect(c2.status).toBe(200);
+    expect(c2.body.trackedSeconds).toBe(60);
+  });
+
+  it("captures crediting even when confirm runs 30s after capture", async () => {
+    // Long upload/processing delay. capturedAt anchors the streak math —
+    // not serverNow at confirm time. As long as capturedAt is within the
+    // envelope, the streak still advances.
+    const { token, id } = await createSession();
+    setVirtualNow(baseTime);
+    for (let n = 0; n < 5; n++) {
+      const cap = new Date(virtualNow).toISOString();
+      const u = await postUpload(token, cap);
+      // Each confirm runs 30s after the capturedAt
+      advanceVirtualMs(30_000);
+      const c = await confirmUpload(token, u.body.screenshotId);
+      expect(c.status, `confirm ${n}`).toBe(200);
+      // Advance the remaining 30s to reach the next minute boundary
+      advanceVirtualMs(30_000);
+    }
+    const s = await loadSession(id);
+    // 1 seed + 4 credits = 240s
+    expect(s?.trackedSeconds).toBe(4 * 60);
+  });
+});
+
+describe("latency — idempotent retries", () => {
+  it("client confirms twice (retry path) does not double-credit", async () => {
+    // Simulate: client posts confirm, network drops the response, client
+    // retries. Server must serve the second confirm idempotently.
+    const { token, id } = await createSession();
+    advanceVirtualMs(60_000);
+    const cap1 = new Date(virtualNow).toISOString();
+    const u = await postUpload(token, cap1);
+    advanceVirtualMs(60_000);
+    const cap2 = new Date(virtualNow).toISOString();
+    const u2 = await postUpload(token, cap2);
+    const c2a = await confirmUpload(token, u2.body.screenshotId);
+    const c2b = await confirmUpload(token, u2.body.screenshotId); // retry
+    expect(c2a.status).toBe(200);
+    expect(c2b.status).toBe(200);
+    expect(c2a.body.trackedSeconds).toBe(c2b.body.trackedSeconds);
+    const s = await loadSession(id);
+    expect(s?.trackedSeconds).toBe(c2b.body.trackedSeconds);
+  });
+
+  it("rapid 3-retry storm on confirm produces single credit", async () => {
+    const { token, id } = await createSession();
+    advanceVirtualMs(60_000);
+    const cap1 = new Date(virtualNow).toISOString();
+    const u1 = await postUpload(token, cap1);
+    await confirmUpload(token, u1.body.screenshotId);
+    advanceVirtualMs(60_000);
+    const cap2 = new Date(virtualNow).toISOString();
+    const u2 = await postUpload(token, cap2);
+    // Fire 3 concurrent confirms. Only one should mark the row confirmed;
+    // the others land on the idempotent path or rate limit.
+    const results = await Promise.all([
+      confirmUpload(token, u2.body.screenshotId),
+      confirmUpload(token, u2.body.screenshotId),
+      confirmUpload(token, u2.body.screenshotId),
+    ]);
+    expect(results.every((r) => r.status === 200 || r.status === 429)).toBe(
+      true,
+    );
+    const s = await loadSession(id);
+    expect(s?.trackedSeconds).toBe(60);
+  });
+});
+
+describe("latency — out-of-order arrivals", () => {
+  it("cap N+1 confirm arriving before cap N's confirm does not corrupt streak", async () => {
+    // The client uploads cap N and cap N+1 close together; cap N's
+    // confirm POST gets stuck behind cap N+1's. Server must handle by
+    // capturedAt order, not arrival order.
+    const { token, id } = await createSession();
+    advanceVirtualMs(60_000);
+    const capA = new Date(virtualNow).toISOString();
+    const uA = await postUpload(token, capA);
+    advanceVirtualMs(60_000);
+    const capB = new Date(virtualNow).toISOString();
+    const uB = await postUpload(token, capB);
+
+    // Confirm B BEFORE A. The session.streak_credited_count after A's
+    // confirm should still be correct.
+    const cB = await confirmUpload(token, uB.body.screenshotId);
+    const cA = await confirmUpload(token, uA.body.screenshotId);
+    expect(cA.status).toBe(200);
+    expect(cB.status).toBe(200);
+
+    const s = await loadSession(id);
+    // Both captures should ultimately credit (one as the seed-following
+    // capture, the other as the next-step).
+    expect(s?.trackedSeconds).toBe(60);
+  });
+});
+
+describe("latency — burst races (the bug we saw in prod)", () => {
+  it("rapid 3-capture burst within 100ms reaches server: one credits, others reset", async () => {
+    // The fire-and-forget client bug: after one legitimate capture,
+    // tick re-fires multiple times with capturedAt very close together.
+    // Server should: credit the first, reset on the rapid ones, but not
+    // double-credit or corrupt streak state.
+    const { token, id } = await createSession();
+    advanceVirtualMs(60_000);
+    // Seed the streak with cap0
+    const cap0 = new Date(virtualNow).toISOString();
+    const u0 = await postUpload(token, cap0);
+    await confirmUpload(token, u0.body.screenshotId);
+
+    advanceVirtualMs(60_000);
+    // Legit cap at proper +60s
+    const capLegit = new Date(virtualNow).toISOString();
+    const uLegit = await postUpload(token, capLegit);
+    await confirmUpload(token, uLegit.body.screenshotId);
+
+    // Burst: 2 more captures 50ms and 100ms later
+    advanceVirtualMs(50);
+    const capBurst1 = new Date(virtualNow).toISOString();
+    const uBurst1 = await postUpload(token, capBurst1);
+    advanceVirtualMs(50);
+    const capBurst2 = new Date(virtualNow).toISOString();
+    const uBurst2 = await postUpload(token, capBurst2);
+    await confirmUpload(token, uBurst1.body.screenshotId);
+    await confirmUpload(token, uBurst2.body.screenshotId);
+
+    const s = await loadSession(id);
+    // 1 credit from capLegit, 0 from the bursts (resets)
+    expect(s?.trackedSeconds).toBe(60);
+
+    // Streak should have been reset by the burst captures
+    const rows = await db.query.screenshots.findMany({
+      where: (t, { eq, and }) =>
+        and(eq(t.sessionId, id), eq(t.confirmed, true)),
+      orderBy: (t, { asc }) => asc(t.capturedAt),
+    });
+    expect(rows).toHaveLength(4);
+    expect(rows[0].creditedSeconds).toBe(0); // seed
+    expect(rows[1].creditedSeconds).toBe(60); // legit credit
+    expect(rows[2].creditedSeconds).toBe(0); // burst reset
+    expect(rows[3].creditedSeconds).toBe(0); // burst reset
+  });
+
+  it("burst monotonicity: server rejects captured_at not strictly increasing", async () => {
+    // The cap2 having same capturedAt as cap1 hits the
+    // captured_at_not_monotonic guard.
+    const { token } = await createSession();
+    advanceVirtualMs(60_000);
+    const cap = new Date(virtualNow).toISOString();
+    const u1 = await postUpload(token, cap);
+    expect(u1.status).toBe(200);
+    const u2 = await postUpload(token, cap); // exact same capturedAt
+    expect(u2.status).toBe(400);
+    expect(u2.body.error).toBe("captured_at_not_monotonic");
+  });
+});
+
+describe("latency — sustained recording under jitter", () => {
+  it("10-min recording with ±5s capture jitter: credits ~100%", async () => {
+    // Realistic scenario: captures arrive with small random jitter
+    // around the 60s schedule. Should all stay in window and credit.
+    const { token, id } = await createSession();
+    const jitters = [0, 2_000, -1_000, 3_000, -2_000, 1_500, -500, 2_500, 0, -1_500];
+    setVirtualNow(baseTime);
+
+    for (let n = 0; n < 10; n++) {
+      const t = baseTime.getTime() + n * 60_000 + jitters[n];
+      setVirtualNow(t);
+      const cap = new Date(t).toISOString();
+      const u = await postUpload(token, cap);
+      expect(u.status, `upload ${n}`).toBe(200);
+      const c = await confirmUpload(token, u.body.screenshotId);
+      expect(c.status, `confirm ${n}`).toBe(200);
+    }
+
+    const s = await loadSession(id);
+    // 1 seed + 9 credits = 540s
+    expect(s?.trackedSeconds).toBe(9 * 60);
+  });
+
+  it("capture 35s late (outside 30s window) resets, then recovers", async () => {
+    // A single delayed capture trips the streak reset. Subsequent
+    // captures on schedule re-establish the streak.
+    const { token, id } = await createSession();
+    setVirtualNow(baseTime);
+
+    // Seed
+    const u0 = await postUpload(token, new Date(baseTime).toISOString());
+    await confirmUpload(token, u0.body.screenshotId);
+
+    // Cap 2 lands at +60s (on schedule) — credit
+    setVirtualNow(baseTime.getTime() + 60_000);
+    const u2 = await postUpload(token, new Date(virtualNow).toISOString());
+    const c2 = await confirmUpload(token, u2.body.screenshotId);
+    expect(c2.body.trackedSeconds).toBe(60);
+
+    // Cap 3 at +155s (35s late) — should reset
+    setVirtualNow(baseTime.getTime() + 155_000);
+    const u3 = await postUpload(token, new Date(virtualNow).toISOString());
+    const c3 = await confirmUpload(token, u3.body.screenshotId);
+    expect(c3.body.trackedSeconds).toBe(60); // unchanged
+
+    // Cap 4 at +215s (60s after cap3's anchor) — credit again
+    setVirtualNow(baseTime.getTime() + 215_000);
+    const u4 = await postUpload(token, new Date(virtualNow).toISOString());
+    const c4 = await confirmUpload(token, u4.body.screenshotId);
+    expect(c4.body.trackedSeconds).toBe(120); // +60 from the new streak
+  });
+});

@@ -88,9 +88,12 @@ export const MAX_COMPILE_ATTEMPTS = 3;
 // ──────────────────────────────────────────────────────────
 
 /** Max upload-url requests per 60-second window per session.
- *  Allows for hedging while preventing spam.
- *  Default: 3 */
-export const RATE_LIMIT_PER_MINUTE = 3;
+ *  Sized for: 1 nominal capture/min + occasional burst (race in the
+ *  client's fire-and-forget scheduling chain) + up to 3 client-side
+ *  retries on transient network errors. 3 was too tight: any hiccup
+ *  blew the budget and the chain stalled.
+ *  Default: 10 */
+export const RATE_LIMIT_PER_MINUTE = 10;
 
 /** Max confirmed screenshots per session.
  *  At 1/min this equals 12 hours of recording.
@@ -98,9 +101,10 @@ export const RATE_LIMIT_PER_MINUTE = 3;
 export const MAX_SCREENSHOTS_PER_SESSION = 720;
 
 /** Max total upload-url requests per session (confirmed + unconfirmed).
- *  Set to 2x the screenshot cap for hedging headroom.
- *  Default: 1440 */
-export const MAX_UPLOAD_REQUESTS_PER_SESSION = 1440;
+ *  Sized at ~6x the screenshot cap to absorb client retries and burst
+ *  races without truncating long sessions.
+ *  Default: 4320 */
+export const MAX_UPLOAD_REQUESTS_PER_SESSION = 4320;
 
 /** Max screenshot file size in bytes.
  *  Validated server-side via HeadObject after upload.

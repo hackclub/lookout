@@ -1,12 +1,30 @@
 import { useState, useEffect, useRef } from "react";
+import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
+
+/** Max seconds the display may drift ahead of `serverTrackedSeconds`
+ *  between credits. One capture interval — if the next capture credits,
+ *  the display jumps to the new server value (== frozen value) and
+ *  unfreezes smoothly. If captures stall, the freeze stays put so the
+ *  user sees something is wrong instead of an inflated count. */
+const MAX_INTERPOLATION_S = Math.floor(SCREENSHOT_INTERVAL_MS / 1000);
 
 /**
- * Client-side interpolated timer. Uses server-provided trackedSeconds
- * as ground truth, interpolates between updates for smooth display.
+ * Display timer for the recording session.
  *
- * The server already accounts for the first screenshot at t=0 by using
- * (count(distinct minute_buckets) - 1) * 60, so no client-side offset
- * is needed.
+ * `serverTrackedSeconds` is the ground truth. We interpolate at
+ * wall-clock rate between credits for liveness, but the interpolation
+ * is **capped at one capture interval**. Display never overshoots the
+ * next credit by more than that, so stop/compile reveals at most one
+ * minute of drop — no "halving" surprise.
+ *
+ * `baseRef` ratchets forward (never backward) so a stale-read
+ * idempotent retry returning a lower `trackedSeconds` doesn't cause
+ * the display to jump back. With the cap, ratcheting can only get the
+ * display 60s ahead of the true value, bounded.
+ *
+ * Unfreeze contract: when `serverTrackedSeconds` advances, `baseRef`
+ * ratchets up and `lastSyncRef` resets — display jumps to the new
+ * value and the next interpolation cycle starts from there.
  */
 export function useSessionTimer(
   serverTrackedSeconds: number,
@@ -14,24 +32,12 @@ export function useSessionTimer(
 ): number {
   const [displaySeconds, setDisplaySeconds] = useState(serverTrackedSeconds);
   const lastSyncRef = useRef(Date.now());
-  // Base value the RAF tick counts from. Ratchets up so display never jumps backward.
   const baseRef = useRef(serverTrackedSeconds);
 
-  // Effect 1: Sync baseRef with server value.
-  // Normally ratchets forward (never backward) for smooth display.
-  // But if the display has drifted more than 3 minutes ahead of the server
-  // (e.g. captures were failing while the timer kept interpolating),
-  // snap back to the server value to correct the drift.
-  const DRIFT_CORRECTION_THRESHOLD = 180; // 3 minutes
+  // Ratchet baseRef forward on every server update. Resets the
+  // interpolation anchor — this is what unfreezes the timer.
   useEffect(() => {
-    const drift = baseRef.current - serverTrackedSeconds;
-    let newBase: number;
-    if (drift > DRIFT_CORRECTION_THRESHOLD) {
-      // Display is way ahead of reality — snap to server value
-      newBase = serverTrackedSeconds;
-    } else {
-      newBase = Math.max(baseRef.current, serverTrackedSeconds);
-    }
+    const newBase = Math.max(baseRef.current, serverTrackedSeconds);
     if (newBase !== baseRef.current) {
       baseRef.current = newBase;
       setDisplaySeconds(newBase);
@@ -39,19 +45,24 @@ export function useSessionTimer(
     }
   }, [serverTrackedSeconds]);
 
-  // Effect 2: RAF-driven display interpolation.
-  // On activation: reset time anchor so pause duration isn't counted.
-  // On deactivation (cleanup): snapshot base+elapsed into baseRef to preserve
-  // the display value and prevent backward jumps on resume.
   useEffect(() => {
-    if (!isActive) return;
+    // When the session leaves active (pause/stop), snap display to the
+    // ratcheted base. No further interpolation. Worst-case drop the user
+    // sees is bounded by MAX_INTERPOLATION_S (cap above).
+    if (!isActive) {
+      setDisplaySeconds(baseRef.current);
+      return;
+    }
 
     lastSyncRef.current = Date.now();
 
     let raf: number;
     let lastRenderedSecond = -1;
     const tick = () => {
-      const elapsed = Math.floor((Date.now() - lastSyncRef.current) / 1000);
+      const elapsed = Math.min(
+        MAX_INTERPOLATION_S,
+        Math.floor((Date.now() - lastSyncRef.current) / 1000),
+      );
       if (elapsed !== lastRenderedSecond) {
         lastRenderedSecond = elapsed;
         setDisplaySeconds(baseRef.current + elapsed);
@@ -61,8 +72,11 @@ export function useSessionTimer(
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
-      baseRef.current += Math.floor((Date.now() - lastSyncRef.current) / 1000);
-      lastSyncRef.current = Date.now();
+      // Don't bake elapsed into baseRef here. If we did, baseRef would
+      // grow past the server's true value during pauses or stalls, and
+      // the next server update couldn't ratchet forward (max() would
+      // keep the inflated baseRef). Server credits after resume re-anchor
+      // baseRef via the sync effect above.
     };
   }, [isActive, serverTrackedSeconds]);
 

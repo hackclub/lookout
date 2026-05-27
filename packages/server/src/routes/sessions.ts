@@ -470,11 +470,14 @@ export async function sessionRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      // Rate limit: 10 req/min per token (screenshot confirmation)
+      // Rate limit: 20 req/min per token (screenshot confirmation).
+      // Paired with RATE_LIMIT_PER_MINUTE=10 on upload-url + 3 client
+      // retries — 20 leaves headroom for retried confirms after a
+      // transient network failure between PUT and POST.
       const rl = checkGenericRateLimit(
         "screenshot-confirm",
         request.params.token,
-        10,
+        20,
       );
       if (!rl.allowed) {
         reply.header(
