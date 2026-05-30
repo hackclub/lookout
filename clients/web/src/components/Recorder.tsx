@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
 import { useScreenCapture } from "../hooks/useScreenCapture.js";
+import { useSilentAudioKeepAlive } from "../hooks/useSilentAudioKeepAlive.js";
 import { useUploader } from "../hooks/useUploader.js";
 import { StatusBar } from "./StatusBar.js";
 import type { SessionStatus } from "@lookout/shared";
@@ -43,6 +44,13 @@ export function Recorder({
   const [error, setError] = useState<string | null>(null);
   const isPaused = sessionStatus === "paused";
   const isActive = sessionStatus === "active" || sessionStatus === "pending";
+
+  // Keep the page "audible" to the browser while recording so Chrome
+  // doesn't throttle our setTimeout chain when the user backgrounds the
+  // tab or enables Low Power Mode. The live getDisplayMedia track
+  // already exempts us from some throttling, but Low Power Mode reports
+  // suggest it's not enough on its own.
+  useSilentAudioKeepAlive(isSharing && isActive);
 
   // Sync tracked seconds from uploader to session
   useEffect(() => {

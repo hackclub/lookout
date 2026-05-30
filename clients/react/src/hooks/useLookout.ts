@@ -5,6 +5,7 @@ import { useCameraCapture } from "./useCameraCapture.js";
 import { useUploader } from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
+import { useSilentAudioKeepAlive } from "./useSilentAudioKeepAlive.js";
 import type { LookoutState, LookoutActions, RecorderStatus } from "../types.js";
 
 /**
@@ -82,6 +83,14 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
 
   // Start/stop capture interval based on sharing + session state.
   const isActive = session.status === "active" || session.status === "pending";
+
+  // Keep the page "audible" while recording so the browser doesn't
+  // throttle our setTimeout chain when the user backgrounds the tab or
+  // enables Low Power Mode. The live MediaStream track already exempts
+  // us from some throttling, but Low Power Mode user reports suggest
+  // it's not enough on its own. Harmless on desktop (Tauri) — the Rust
+  // capture loop is independent of this.
+  useSilentAudioKeepAlive(capture.isSharing && isActive);
 
   useEffect(() => {
     if (!capture.isSharing || !isActive) return;
