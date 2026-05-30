@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from "react";
+import { useCallback, useState } from "react";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { HttpError } from "../api/client.js";
 import type { CaptureResult, UploadState } from "../types.js";
@@ -26,22 +26,23 @@ async function retry<T>(
   throw new Error("Unreachable");
 }
 
+export interface UploadConfirmResult {
+  trackedSeconds: number;
+  nextExpectedAt: string;
+}
+
 export interface UploaderResult {
-  /** Add a capture to the upload queue. */
-  enqueue: (capture: CaptureResult) => void;
-  /** Current upload queue state. */
+  /** Run the full pipeline serially: upload + confirm. Returns the
+   *  fresh `nextExpectedAt` from THIS capture's confirm response.
+   *  Throws on failure (after retries) — the caller (the capture-loop
+   *  scheduler) catches and falls back to a local interval. */
+  captureUploadConfirm: (capture: CaptureResult) => Promise<UploadConfirmResult>;
+  /** Current upload state. */
   uploads: UploadState;
   /** Server-reported tracked seconds after latest confirmation. */
   trackedSeconds: number;
   /** Object URL of last successfully uploaded screenshot. */
   lastScreenshotUrl: string | null;
-  /** ISO timestamp: when the server expects the next screenshot. */
-  nextExpectedAt: string | null;
-  /** Snapshot of the latest `nextExpectedAt` from the ref — for callers
-   *  (e.g. capture-loop schedulers) that need the freshest value without
-   *  re-rendering. Returns the same string `nextExpectedAt` does, but
-   *  available synchronously from within effects. */
-  getNextExpectedAt: () => string | null;
   /** Last upload error message, if any. */
   lastError: string | null;
   /** True when a 409 conflict was received (session paused server-side). */
@@ -50,9 +51,22 @@ export interface UploaderResult {
   resetConflict: () => void;
 }
 
+/**
+ * Serial upload pipeline. Matches the desktop Rust loop: each call to
+ * `captureUploadConfirm` runs upload + confirm to completion before
+ * returning, and returns the FRESH `nextExpectedAt` from that capture's
+ * own confirm response.
+ *
+ * Replaces the pre-0.2.4 queue-and-fire-and-forget model. The previous
+ * model was racy: the tick chain read a shared `nextExpectedAt` ref that
+ * lagged behind the in-flight upload by one round-trip, so the ref was
+ * always stale → `delay=0` → burst captures (3-5/min instead of 1/min).
+ * Serial eliminates the race entirely; the chain knows exactly when to
+ * fire next because the value comes from the same capture's response.
+ */
 export function useUploader(): UploaderResult {
   const { client, config } = useLookoutContext();
-  const { maxRetries, retryDelays, maxPendingBuffer } = config.retry;
+  const { maxRetries, retryDelays } = config.retry;
 
   const [uploads, setUploads] = useState<UploadState>({
     pending: 0,
@@ -63,32 +77,22 @@ export function useUploader(): UploaderResult {
   const [lastScreenshotUrl, setLastScreenshotUrl] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [sessionConflict, setSessionConflict] = useState(false);
-  const nextExpectedAtRef = useRef<string | null>(null);
-  const bufferRef = useRef<CaptureResult[]>([]);
-  const processingRef = useRef(false);
 
   const resetConflict = useCallback(() => setSessionConflict(false), []);
 
-  const processQueue = useCallback(async () => {
-    if (processingRef.current) return;
-    processingRef.current = true;
-
-    while (bufferRef.current.length > 0) {
-      const capture = bufferRef.current.shift()!;
-      setUploads((s) => ({ ...s, pending: s.pending - 1 }));
-
+  const captureUploadConfirm = useCallback(
+    async (capture: CaptureResult): Promise<UploadConfirmResult> => {
+      setUploads((s) => ({ ...s, pending: s.pending + 1 }));
       try {
-        // Send capturedAt for credit-mode opt-in. When disabled (legacy
-        // build), this is omitted and the server stays in bucket mode.
         const capturedAt = ENABLE_CREDIT_MODE
           ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
           : undefined;
-        const { uploadUrl, screenshotId, nextExpectedAt } = await retry(
+
+        const { uploadUrl, screenshotId } = await retry(
           () => client.getUploadUrl({ capturedAt }),
           maxRetries,
           retryDelays,
         );
-        nextExpectedAtRef.current = nextExpectedAt;
 
         await retry(
           () => client.uploadToR2(uploadUrl, capture.blob),
@@ -109,64 +113,50 @@ export function useUploader(): UploaderResult {
         );
 
         setTrackedSeconds(result.trackedSeconds);
-        nextExpectedAtRef.current = result.nextExpectedAt;
         setLastScreenshotUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev);
           return URL.createObjectURL(capture.blob);
         });
-        setUploads((s) => ({ ...s, completed: s.completed + 1 }));
+        setUploads((s) => ({
+          ...s,
+          pending: s.pending - 1,
+          completed: s.completed + 1,
+        }));
         config.callbacks.onUploadSuccess?.({
           screenshotId,
           trackedSeconds: result.trackedSeconds,
         });
+
+        return {
+          trackedSeconds: result.trackedSeconds,
+          nextExpectedAt: result.nextExpectedAt,
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Upload failed";
         setLastError(msg);
-        setUploads((s) => ({ ...s, failed: s.failed + 1 }));
+        setUploads((s) => ({
+          ...s,
+          pending: s.pending - 1,
+          failed: s.failed + 1,
+        }));
         config.callbacks.onUploadFailure?.(err instanceof Error ? err : new Error(msg));
 
-        // On 409 (session paused server-side), signal conflict and drain
-        // remaining buffer — they'll all 409 too.
+        // 409 = session paused/stopped server-side. Surface the signal
+        // so the host hook can re-sync session state.
         if (err instanceof HttpError && err.status === 409) {
           setSessionConflict(true);
-          const remaining = bufferRef.current.length;
-          if (remaining > 0) {
-            bufferRef.current.length = 0;
-            setUploads((s) => ({ ...s, pending: 0, failed: s.failed + remaining }));
-          }
-          break;
         }
+        throw err;
       }
-    }
-
-    processingRef.current = false;
-  }, [client, maxRetries, retryDelays]);
-
-  const enqueue = useCallback(
-    (capture: CaptureResult) => {
-      if (bufferRef.current.length >= maxPendingBuffer) {
-        bufferRef.current.shift();
-        setUploads((s) => ({ ...s, pending: s.pending - 1, failed: s.failed + 1 }));
-      }
-      bufferRef.current.push(capture);
-      setUploads((s) => ({ ...s, pending: s.pending + 1 }));
-      processQueue();
     },
-    [maxPendingBuffer, processQueue],
-  );
-
-  const getNextExpectedAt = useCallback(
-    () => nextExpectedAtRef.current,
-    [],
+    [client, maxRetries, retryDelays, config.callbacks],
   );
 
   return {
-    enqueue,
+    captureUploadConfirm,
     uploads,
     trackedSeconds,
     lastScreenshotUrl,
-    nextExpectedAt: nextExpectedAtRef.current,
-    getNextExpectedAt,
     lastError,
     sessionConflict,
     resetConflict,

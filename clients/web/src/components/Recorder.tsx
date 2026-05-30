@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
 import { useScreenCapture } from "../hooks/useScreenCapture.js";
 import { useUploader } from "../hooks/useUploader.js";
@@ -26,19 +26,20 @@ export function Recorder({
 }: RecorderProps) {
   const { isSharing, startSharing, takeScreenshotAsync, stopSharing } =
     useScreenCapture();
-  const uploader = useUploader();
   const {
-    enqueueUpload,
+    captureUploadConfirm,
     uploadState,
     trackedSeconds: uploadTrackedSeconds,
     lastImageUrl,
-  } = uploader;
+  } = useUploader();
   // Holds the latest setTimeout id (self-scheduling chain following
   // server-provided nextExpectedAt) — never a setInterval.
   const intervalRef = useRef<ReturnType<typeof setTimeout>>();
   const hasStartedRef = useRef(false);
-  const uploaderRef = useRef(uploader);
-  uploaderRef.current = uploader;
+  const captureUploadConfirmRef = useRef(captureUploadConfirm);
+  captureUploadConfirmRef.current = captureUploadConfirm;
+  const takeScreenshotRef = useRef(takeScreenshotAsync);
+  takeScreenshotRef.current = takeScreenshotAsync;
   const [error, setError] = useState<string | null>(null);
   const isPaused = sessionStatus === "paused";
   const isActive = sessionStatus === "active" || sessionStatus === "pending";
@@ -50,18 +51,13 @@ export function Recorder({
     }
   }, [uploadTrackedSeconds, onTrackedSecondsUpdate]);
 
-  const captureAndUpload = useCallback(async () => {
-    const result = await takeScreenshotAsync();
-    if (result) {
-      enqueueUpload(result);
-    }
-  }, [takeScreenshotAsync, enqueueUpload]);
-
-  // Capture immediately when screen sharing starts, then schedule each
-  // subsequent capture from the server's `nextExpectedAt`. Falls back to
-  // SCREENSHOT_INTERVAL_MS if the server didn't return one (e.g. first
-  // capture or a network blip). Catch-up-on-miss: if the next target is in
-  // the past, fire immediately rather than waiting another full interval.
+  // Serial capture-upload chain — matches the desktop Rust loop.
+  // Each tick: take screenshot, await full upload+confirm pipeline, read
+  // the FRESH `nextExpectedAt` from THIS capture's confirm response, then
+  // schedule the next tick. No shared ref, no race. As long as the round
+  // trip stays under SCREENSHOT_INTERVAL_MS, captures land exactly on the
+  // server's schedule. If it exceeds the interval, delay clamps to 0 and
+  // we catch up (one tick), then resume on schedule.
   useEffect(() => {
     if (!isSharing || !isActive) {
       hasStartedRef.current = false;
@@ -78,18 +74,30 @@ export function Recorder({
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
-      await captureAndUpload();
-      if (cancelled) return;
-      const nextIso = uploaderRef.current.getNextExpectedAt();
-      let delayMs: number;
-      if (nextIso) {
-        const parsed = Date.parse(nextIso);
-        delayMs = Number.isFinite(parsed) ? parsed - Date.now() : SCREENSHOT_INTERVAL_MS;
-      } else {
-        delayMs = SCREENSHOT_INTERVAL_MS;
+      let nextExpectedAt: string | null = null;
+      try {
+        const capture = await takeScreenshotRef.current();
+        if (capture) {
+          const result = await captureUploadConfirmRef.current(capture);
+          nextExpectedAt = result.nextExpectedAt;
+        }
+      } catch (err) {
+        // Pipeline failed (network/server). Schedule next tick on the
+        // local fallback so the chain stays alive.
+        console.warn("[capture-loop] cycle failed:", err);
       }
-      if (delayMs < 0) delayMs = 0;
-      intervalRef.current = setTimeout(tick, delayMs);
+      if (cancelled) return;
+
+      const target = nextExpectedAt
+        ? Date.parse(nextExpectedAt)
+        : Date.now() + SCREENSHOT_INTERVAL_MS;
+      // Defensive upper bound: never sleep longer than 2x interval.
+      // Matches desktop's same clamp.
+      const delay = Math.min(
+        SCREENSHOT_INTERVAL_MS * 2,
+        Math.max(0, target - Date.now()),
+      );
+      intervalRef.current = setTimeout(tick, delay);
     };
     tick();
 
@@ -100,7 +108,7 @@ export function Recorder({
         intervalRef.current = undefined;
       }
     };
-  }, [isSharing, isActive, captureAndUpload]);
+  }, [isSharing, isActive]);
 
   const handleStartSharing = async () => {
     setError(null);

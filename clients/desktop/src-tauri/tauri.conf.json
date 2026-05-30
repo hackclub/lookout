@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/tags/tauri-v2.3.1/crates/tauri-utils/schema.json",
   "productName": "Lookout",
   "identifier": "com.hackclub.lookout",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",

@@ -30,6 +30,24 @@ async function retry<T>(
   throw new Error("Unreachable");
 }
 
+export interface UploadConfirmResult {
+  trackedSeconds: number;
+  nextExpectedAt: string;
+}
+
+/**
+ * Serial upload pipeline. The caller (the tick chain) `await`s this
+ * function — when it returns, the screenshot has been uploaded AND
+ * confirmed, and the returned `nextExpectedAt` is the FRESH server
+ * value for this specific capture.
+ *
+ * This is the core-loop change introduced in 0.2.4: previously the web
+ * client used a fire-and-forget queue, and the tick chain read a shared
+ * `nextExpectedAt` ref that lagged behind the in-flight upload. That
+ * caused `setTimeout(tick, 0)` bursts whenever the ref was stale (= one
+ * upload-roundtrip behind the chain). Matching the desktop's serial
+ * model eliminates the race entirely.
+ */
 export function useUploader() {
   const [state, setState] = useState<UploadState>({
     pending: 0,
@@ -38,33 +56,19 @@ export function useUploader() {
   });
   const [trackedSeconds, setTrackedSeconds] = useState(0);
   const [lastImageUrl, setLastImageUrl] = useState<string | null>(null);
-  const nextExpectedAtRef = useRef<string | null>(null);
-  const bufferRef = useRef<CaptureResult[]>([]);
-  const processingRef = useRef(false);
 
-  const processQueue = useCallback(async () => {
-    if (processingRef.current) return;
-    processingRef.current = true;
-
-    while (bufferRef.current.length > 0) {
-      const capture = bufferRef.current.shift()!;
-      setState((s) => ({ ...s, pending: s.pending - 1 }));
-
+  const captureUploadConfirm = useCallback(
+    async (capture: CaptureResult): Promise<UploadConfirmResult> => {
+      setState((s) => ({ ...s, pending: s.pending + 1 }));
       try {
-        // Step 1: Get presigned URL (server records timestamp). Send
-        // capturedAt to opt into credit mode; omit for legacy bucket.
         const capturedAt = ENABLE_CREDIT_MODE
           ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
           : undefined;
-        const { uploadUrl, screenshotId, nextExpectedAt } = await retry(() =>
+
+        const { uploadUrl, screenshotId } = await retry(() =>
           api.getUploadUrl({ capturedAt }),
         );
-        nextExpectedAtRef.current = nextExpectedAt;
-
-        // Step 2: Upload to R2
         await retry(() => api.uploadToR2(uploadUrl, capture.blob));
-
-        // Step 3: Confirm upload
         const result = await retry(() =>
           api.confirmScreenshot({
             screenshotId,
@@ -75,48 +79,36 @@ export function useUploader() {
         );
 
         setTrackedSeconds(result.trackedSeconds);
-        nextExpectedAtRef.current = result.nextExpectedAt;
-        // Create a preview URL from the blob
         setLastImageUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev);
           return URL.createObjectURL(capture.blob);
         });
-        setState((s) => ({ ...s, completed: s.completed + 1 }));
-      } catch {
-        setState((s) => ({ ...s, failed: s.failed + 1 }));
-        // Non-fatal: lost screenshot, continue
+        setState((s) => ({
+          ...s,
+          pending: s.pending - 1,
+          completed: s.completed + 1,
+        }));
+
+        return {
+          trackedSeconds: result.trackedSeconds,
+          nextExpectedAt: result.nextExpectedAt,
+        };
+      } catch (err) {
+        setState((s) => ({
+          ...s,
+          pending: s.pending - 1,
+          failed: s.failed + 1,
+        }));
+        throw err;
       }
-    }
-
-    processingRef.current = false;
-  }, []);
-
-  const enqueueUpload = useCallback(
-    (capture: CaptureResult) => {
-      // Cap buffer at 5 pending to avoid memory issues
-      if (bufferRef.current.length >= 5) {
-        bufferRef.current.shift();
-        setState((s) => ({ ...s, pending: s.pending - 1, failed: s.failed + 1 }));
-      }
-
-      bufferRef.current.push(capture);
-      setState((s) => ({ ...s, pending: s.pending + 1 }));
-      processQueue();
     },
-    [processQueue],
-  );
-
-  const getNextExpectedAt = useCallback(
-    () => nextExpectedAtRef.current,
     [],
   );
 
   return {
-    enqueueUpload,
+    captureUploadConfirm,
     uploadState: state,
     trackedSeconds,
     lastImageUrl,
-    nextExpectedAt: nextExpectedAtRef.current,
-    getNextExpectedAt,
   };
 }
