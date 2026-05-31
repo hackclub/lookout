@@ -6,6 +6,7 @@ import { useUploader } from "./useUploader.js";
 import { useSession } from "./useSession.js";
 import { useSessionTimer } from "./useSessionTimer.js";
 import { useSilentAudioKeepAlive } from "./useSilentAudioKeepAlive.js";
+import { computeBestTrackedSeconds } from "./computeBestTracked.js";
 import type { LookoutState, LookoutActions, RecorderStatus } from "../types.js";
 
 /**
@@ -27,20 +28,18 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   const capture = captureMode === "camera" ? cameraCapture : screenCapture;
   const uploader = useUploader();
 
-  // Estimate local tracked seconds from upload count when server hasn't caught up.
-  // Server uses (count(distinct minute_buckets) - 1) * 60, so the first bucket
-  // reports 0. Locally we can estimate: (completed - 1) * intervalSeconds once
-  // we have ≥2 uploads, giving the user an immediate non-zero value.
-  const intervalSeconds = Math.floor(config.capture.intervalMs / 1000);
-  const localEstimate =
-    uploader.uploads.completed >= 2
-      ? (uploader.uploads.completed - 1) * intervalSeconds
-      : 0;
-  const bestTrackedSeconds = Math.max(
-    session.trackedSeconds,
-    uploader.trackedSeconds,
-    localEstimate,
-  );
+  // The timer reads ONLY server-authoritative values. See
+  // computeBestTrackedSeconds for why — the previous code added a
+  // third input derived from `uploads.completed`, which inflated the
+  // display whenever uploads succeeded but didn't credit (e.g. ~90s
+  // upload latency where every other capture lands outside the streak
+  // window). The visible symptom was "timer shows 2x the recording
+  // time", reported by browser users while desktop users were fine
+  // (desktop bypasses this code path entirely).
+  const bestTrackedSeconds = computeBestTrackedSeconds({
+    sessionTrackedSeconds: session.trackedSeconds,
+    uploaderTrackedSeconds: uploader.trackedSeconds,
+  });
 
   const displaySeconds = useSessionTimer(
     bestTrackedSeconds,

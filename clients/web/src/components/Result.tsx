@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api/client.js";
-import { formatTime } from "../hooks/useSessionTimer.js";
+import { formatTime } from "@lookout/react";
 import { VideoPlayer } from "@lookout/react";
 import type { SessionStatus } from "@lookout/shared";
 

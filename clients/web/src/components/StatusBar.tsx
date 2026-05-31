@@ -1,4 +1,4 @@
-import { useSessionTimer, formatTime } from "../hooks/useSessionTimer.js";
+import { useSessionTimer, formatTime } from "@lookout/react";
 
 interface StatusBarProps {
   trackedSeconds: number;
