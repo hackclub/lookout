@@ -123,14 +123,26 @@ untrusted** — all timing and time tracking is validated server-side.
 2. GET /api/sessions/:token          → check session status
 3. User clicks "Start Recording"
 4. Call navigator.mediaDevices.getDisplayMedia() to share screen
-5. LOOP every ~60 seconds:
-   a. Capture canvas screenshot (JPEG, max 1080p)
-   b. GET /api/sessions/:token/upload-url → { uploadUrl, screenshotId, nextExpectedAt }
+5. Capture loop — each iteration is one full pipeline, awaited end-to-end.
+   The cadence (~60s between captures in steady state) emerges from the
+   server's nextExpectedAt, NOT a fixed client setInterval.
+
+   a. Stamp capturedAt = client clock at the moment you grab the frame
+   b. Capture canvas screenshot (JPEG, max 1080p)
+   c. GET /api/sessions/:token/upload-url?capturedAt=<iso8601>
+      → { uploadUrl, screenshotId, nextExpectedAt, trackingMode }
       (First call activates the session: pending → active)
-   c. PUT blob to uploadUrl (presigned R2 URL)
-   d. POST /api/sessions/:token/screenshots { screenshotId, width, height, fileSize }
-      → server verifies R2 upload via HeadObject, then confirms
-   e. Schedule next capture at nextExpectedAt
+      (Presence of capturedAt on the FIRST upload sticks the session to
+       credit mode; absence sticks it to bucket mode. Mode is permanent.)
+   d. PUT blob to uploadUrl (presigned R2 URL)
+   e. POST /api/sessions/:token/screenshots { screenshotId, width, height, fileSize }
+      → { confirmed, trackedSeconds, nextExpectedAt }
+      Display trackedSeconds (server-authoritative) — do NOT compute
+      display time from uploads.completed.
+   f. Schedule the next iteration:
+      delay = max(0, parse(nextExpectedAt) - Date.now())
+      Then setTimeout(loop, delay). Never fire sooner than this — bursts
+      cause streak resets in credit mode.
 6. User clicks "Pause"  → POST /api/sessions/:token/pause
 7. User clicks "Resume" → POST /api/sessions/:token/resume → restart loop
 8. User clicks "Stop"   → POST /api/sessions/:token/stop → token becomes read-only
@@ -143,8 +155,8 @@ untrusted** — all timing and time tracking is validated server-side.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/sessions/:token` | Session status (for recovery after refresh) |
-| GET | `/api/sessions/:token/upload-url` | Get presigned PUT URL. Activates session on first call. Rate limited: 3/min. |
-| POST | `/api/sessions/:token/screenshots` | Confirm upload. Body: `{ screenshotId, width, height, fileSize }`. Server verifies R2 object exists. |
+| GET | `/api/sessions/:token/upload-url` | Get presigned PUT URL. Pass `?capturedAt=<iso8601>` to opt the session into credit mode. Activates session on first call. Rate limited: 10/min per session. |
+| POST | `/api/sessions/:token/screenshots` | Confirm upload. Body: `{ screenshotId, width, height, fileSize }`. Returns `{ confirmed, trackedSeconds, nextExpectedAt }`. Server verifies R2 object exists. Rate limited: 20/min per token. |
 | POST | `/api/sessions/:token/pause` | Pause session |
 | POST | `/api/sessions/:token/resume` | Resume session |
 | POST | `/api/sessions/:token/stop` | Stop session, trigger compilation |
