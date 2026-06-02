@@ -802,6 +802,27 @@ fn take_screenshot(
     capture::take_screenshot(source, max_width, max_height, jpeg_quality, &pipewire_fds)
 }
 
+/// Free-form client telemetry string sent on every upload-url request, e.g.
+/// "Lookout Desktop/0.2.6 (macOS 14.3)". Computed once. NOT the HTTP
+/// User-Agent — explicit info for server-side telemetry/debugging.
+fn client_info() -> &'static str {
+    static CLIENT_INFO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CLIENT_INFO.get_or_init(|| {
+        let info = os_info::get();
+        let os_type = match info.os_type() {
+            os_info::Type::Macos => "macOS".to_string(),
+            other => other.to_string(),
+        };
+        let version = info.version().to_string();
+        let os = if version.is_empty() || version == "Unknown" {
+            os_type
+        } else {
+            format!("{os_type} {version}")
+        };
+        format!("Lookout Desktop/{} ({os})", env!("CARGO_PKG_VERSION"))
+    })
+}
+
 /// Shared upload-and-confirm pipeline: get presigned URL, PUT to R2, POST
 /// confirmation. Used by both `capture_and_upload` (screen/window) and
 /// `upload_frame` (camera).
@@ -828,18 +849,19 @@ async fn upload_and_confirm(
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-    let mut upload_url_url = format!(
+    let upload_url_url = format!(
         "{}/api/sessions/{}/upload-url",
         config.api_base_url, config.token
     );
+    // Build query params; reqwest percent-encodes them correctly (replacing
+    // the old hand-rolled capturedAt encoding). clientInfo is always sent.
+    let mut query: Vec<(&str, &str)> = vec![("clientInfo", client_info())];
     if let Some(c) = captured_at {
-        // url-encode just enough to safely embed an ISO-8601 string
-        // (colons are reserved). reqwest will handle the rest.
-        let encoded = c.replace(':', "%3A").replace('+', "%2B");
-        upload_url_url.push_str(&format!("?capturedAt={encoded}"));
+        query.push(("capturedAt", c));
     }
     let url_response = client
         .get(upload_url_url)
+        .query(&query)
         .send()
         .await
         .map_err(|e| format!("Failed to get upload URL: {e}"))?;

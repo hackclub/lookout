@@ -96,6 +96,7 @@ Context provider that configures the API client and settings for all child hooks
 | `callbacks` | `LookoutCallbacks` | `{}` | Lifecycle event callbacks |
 | `statusPollIntervalMs` | `number` | `3000` | Compilation status poll interval (ms) |
 | `autoStart` | `boolean` | `false` | Auto-start screen sharing on mount |
+| `appName` | `string` | — | Host program embedding Lookout (e.g. `"Fallout"`). Reported in client telemetry as `Lookout Sdk (Fallout)/<version> (…)` and surfaced server-side as the session's `clientInfo`. |
 | `children` | `ReactNode` | *required* | Child components |
 
 #### `TokenProvider`

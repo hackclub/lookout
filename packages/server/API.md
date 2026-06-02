@@ -112,6 +112,27 @@ Pre-0.2.1 the bucket count caused timer jump-back when two captures arrived in t
 
 ---
 
+## Client Info
+
+Recording clients report a free-form **client telemetry string** on every `upload-url` request (query param `clientInfo`). It is **not** the HTTP `User-Agent` — it's explicit info the Lookout client builds for telemetry/debugging. The server stores it opaquely per screenshot (**never parses it**) and surfaces the session's first recorded value on session-info endpoints (`GET /api/sessions/:token`, `GET /api/sessions/:token/timings`, internal admin).
+
+Recommended (not enforced) format — User-Agent–like, encoding Lookout type, version, embedded host app (web/SDK), OS, and browser (web/SDK):
+
+```
+Lookout Desktop/0.2.6 (macOS 14.3)
+Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)
+Lookout Sdk (Stardance)/0.2.6 (Windows 10; Firefox 121.0)
+```
+
+- **Type** — `Desktop`, `Web`, `Sdk`, … (which Lookout client).
+- **Embedded app** — for web/SDK, the host program Lookout runs inside (e.g. `Fallout`), in parentheses after the type.
+- **Version** — the Lookout client version.
+- **Environment** — OS type+version, and for web/SDK the browser type+version.
+
+The value is best-effort: a client that can't detect part of this omits it; the server truncates anything over 1024 chars and never rejects an upload over a malformed `clientInfo`. It is `null` on responses for sessions recorded before this existed or where no client sent one.
+
+---
+
 ## Public Endpoints
 
 ### Get Session Status
@@ -133,6 +154,7 @@ Returns the current state of a session.
   "status": "active",
   "trackedSeconds": 123,
   "screenshotCount": 45,
+  "clientInfo": "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)",
   "startedAt": "2024-01-01T12:00:00.000Z",
   "totalActiveSeconds": 300,
   "createdAt": "2024-01-01T11:50:00.000Z",
@@ -141,6 +163,8 @@ Returns the current state of a session.
   "metadata": {}
 }
 ```
+
+`clientInfo` is the [client telemetry string](#client-info) recorded on the session's **first** screenshot upload. It is `null` for sessions recorded before this was added, or where the client sent none.
 
 ---
 
@@ -195,6 +219,7 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 | Name | Type | Description |
 |------|------|-------------|
 | `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Must fall within ±5 min of server time and must be strictly monotonic across uploads. |
+| `clientInfo` | string (optional) | [Client telemetry string](#client-info) (User-Agent-like). Stored opaquely per screenshot; the session's first non-empty value is surfaced on session-info endpoints. Best-effort — never parsed or validated, silently truncated to 1024 chars; an invalid/oversized value never fails the upload. |
 
 **Response `200 OK`:**
 ```json
@@ -422,6 +447,7 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
   "count": 3,
   "first": "2024-01-01T12:00:00.000Z",
   "last": "2024-01-01T12:02:00.000Z",
+  "clientInfo": "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)",
   "timestamps": [
     "2024-01-01T12:00:00.000Z",
     "2024-01-01T12:01:00.000Z",
@@ -436,7 +462,10 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 | `count` | integer | Number of timestamps returned (= confirmed screenshot count) |
 | `first` | string \| null | Earliest timestamp (= `timestamps[0]`); `null` if no screenshots |
 | `last` | string \| null | Latest timestamp (= last element); `null` if no screenshots |
+| `clientInfo` | string \| null | [Client telemetry string](#client-info) from the session's first screenshot upload; `null` if none recorded |
 | `timestamps` | string[] | ISO-8601 timestamps, ascending |
+
+> **ℹ️ `count` is the number of screenshots, not minutes.** More than one capture can fall within the same minute (retries, resume, clock jitter), so `count` can exceed the number of distinct minutes — it is **not** a count of tracked minutes. For tracked time use `trackedSeconds`.
 
 > **⚠️ `last − first` is not the recorded duration.** A session can be paused and resumed, leaving gaps between consecutive timestamps. The span from `first` to `last` is wall-clock elapsed time, which **overstates** actual capture time whenever the session was paused. To measure recorded time, use `trackedSeconds` from the [status endpoint](#poll-compilation-status), or sum the gaps between consecutive timestamps while excluding any larger than the capture interval.
 
@@ -644,9 +673,12 @@ Returns full session details including internal fields.
     "updatedAt": "..."
   },
   "trackedSeconds": 123,
-  "screenshotCount": 45
+  "screenshotCount": 45,
+  "clientInfo": "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)"
 }
 ```
+
+`clientInfo` is the [client telemetry string](#client-info) from the session's first screenshot upload; `null` if none recorded.
 
 ---
 

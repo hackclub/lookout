@@ -129,11 +129,17 @@ export const PRESIGNED_URL_EXPIRY_SECONDS = 120;
  *  Default: 10 (minutes) */
 export const UNCONFIRMED_CLEANUP_AFTER_MINUTES = 10;
 
-/** Delete screenshot R2 objects and DB records for successfully
- *  compiled sessions (status=complete with a video) after this
- *  many days. Only applies to sessions that have a videoR2Key set.
+/** Delete screenshot R2 image objects for successfully compiled sessions
+ *  (status=complete with a video) after this many days. The screenshot DB
+ *  rows are KEPT (so capture timings stay queryable); only the JPEGs in R2
+ *  are removed. Only applies to sessions that have a videoR2Key set.
  *  Default: 7 (days) */
 export const SCREENSHOT_RETENTION_DAYS = 7;
+
+/** Max byte length of the client-supplied `clientInfo` query param on
+ *  upload-url. Anything larger is ignored (stored as null). Bounds a hostile
+ *  client; real payloads are a few hundred bytes. */
+export const CLIENT_INFO_MAX_BYTES = 1024;
 
 // ──────────────────────────────────────────────────────────
 // Screenshot capture settings

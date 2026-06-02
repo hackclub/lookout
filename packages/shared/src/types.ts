@@ -34,6 +34,21 @@ export interface Screenshot {
   createdAt: string;
 }
 
+/**
+ * Free-form client telemetry string, reported by the recording client on the
+ * `upload-url` request (query param `clientInfo`) and stored opaquely per
+ * screenshot. This is NOT the HTTP User-Agent — it's explicit, for
+ * telemetry/debugging. The server never parses it.
+ *
+ * Recommended (not enforced) format, User-Agent–like, encoding: Lookout type,
+ * version, embedded host app (web/sdk), OS type+version, browser type+version
+ * (web/sdk):
+ *   "Lookout Desktop/0.2.6 (macOS 14.3)"
+ *   "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)"
+ *   "Lookout SDK (Stardance)/0.2.6 (Windows 10; Firefox 121.0)"
+ */
+export type ClientInfo = string;
+
 // -- API request/response types --
 
 export interface CreateSessionRequest {
@@ -60,10 +75,22 @@ export interface SessionResponse {
   /** @deprecated WebM is no longer produced. Populated only for legacy clients —
    * points at a static "please update" message video. */
   videoWebmUrl?: string | null;
+  /** First recorded client telemetry for the session; `null` if none captured. */
+  clientInfo?: ClientInfo | null;
   metadata: Record<string, unknown>;
 }
 
 export type TrackingMode = "bucket" | "credit";
+
+export interface TimingsResponse {
+  status: SessionStatus;
+  count: number;
+  first: string | null;
+  last: string | null;
+  /** First recorded client telemetry for the session; `null` if none captured. */
+  clientInfo: ClientInfo | null;
+  timestamps: string[];
+}
 
 export interface UploadUrlResponse {
   uploadUrl: string;

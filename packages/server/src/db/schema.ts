@@ -103,6 +103,13 @@ export const screenshots = pgTable(
     // it for streak math, bucket-mode rows store it as debug-only data.
     // NULL for pre-migration rows; never backfilled.
     capturedAt: timestamp("captured_at", { withTimezone: true }),
+    // Free-form client telemetry string reported on the upload-url request
+    // (query param `clientInfo`). NOT the HTTP User-Agent — a User-Agent-like
+    // string with Lookout-specific info (type, version, OS, browser, host app).
+    // Stored opaquely (never parsed). NULL for rows created before this column
+    // existed or when the client sent nothing. The session's "first recorded"
+    // clientInfo is derived from the earliest row that has one.
+    clientInfo: text("client_info"),
     // Credit-mode only. 0 or 60. NULL for bucket-mode rows.
     creditedSeconds: integer("credited_seconds"),
     // Credit-mode only. Server-predicted capture time at confirm; lets us

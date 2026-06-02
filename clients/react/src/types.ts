@@ -135,6 +135,9 @@ export interface LookoutConfig {
   statusPollIntervalMs?: number;
   /** Auto-start screen sharing on mount. Default: false */
   autoStart?: boolean;
+  /** Name of the host program embedding Lookout, e.g. "Fallout". Reported in
+   *  client telemetry as "Lookout Web (Fallout)". Optional. */
+  appName?: string;
 }
 
 // ─── Resolved Config (all fields required) ───────────────

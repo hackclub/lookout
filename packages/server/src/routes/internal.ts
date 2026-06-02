@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { eq, sql, and } from "drizzle-orm";
+import { eq, sql, and, isNotNull } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { requireApiKey } from "../middleware/apiKey.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
@@ -105,6 +105,19 @@ export async function internalRoutes(app: FastifyInstance) {
             eq(schema.screenshots.confirmed, true),
           ),
         );
+      // First recorded client telemetry: the clientInfo on the earliest
+      // screenshot row that carries one. NULL for sessions with none captured.
+      const [firstClient] = await db
+        .select({ clientInfo: schema.screenshots.clientInfo })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, sessionId),
+            isNotNull(schema.screenshots.clientInfo),
+          ),
+        )
+        .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
+        .limit(1);
       return {
         session: {
           ...sessionData,
@@ -117,6 +130,7 @@ export async function internalRoutes(app: FastifyInstance) {
         },
         trackedSeconds,
         screenshotCount: Number(confirmedCount),
+        clientInfo: firstClient?.clientInfo ?? null,
       };
     },
   );

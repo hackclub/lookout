@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { eq, sql, and, inArray } from "drizzle-orm";
+import { eq, sql, and, inArray, isNotNull } from "drizzle-orm";
 import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
@@ -20,6 +20,7 @@ import {
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
+  CLIENT_INFO_MAX_BYTES,
 } from "@lookout/shared";
 
 /** Tracked-seconds dispatcher. Routes to bucket-count math for legacy
@@ -90,6 +91,24 @@ async function getScreenshotCount(sessionId: string): Promise<number> {
   return Number(count);
 }
 
+/** First recorded client telemetry for a session — the clientInfo string on
+ *  the earliest screenshot row that has one. NULL for sessions recorded before
+ *  the column existed or where no client info was ever sent. */
+async function getFirstClientInfo(sessionId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ clientInfo: schema.screenshots.clientInfo })
+    .from(schema.screenshots)
+    .where(
+      and(
+        eq(schema.screenshots.sessionId, sessionId),
+        isNotNull(schema.screenshots.clientInfo),
+      ),
+    )
+    .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
+    .limit(1);
+  return row?.clientInfo ?? null;
+}
+
 /** Count total upload-url requests (confirmed + unconfirmed) */
 async function getTotalUploadRequests(sessionId: string): Promise<number> {
   const [{ count }] = await db
@@ -122,6 +141,7 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const liveTrackedSeconds = await getTrackedSecondsForSession(session);
       const screenshotCount = await getScreenshotCount(session.id);
+      const clientInfo = await getFirstClientInfo(session.id);
       // Prefer stored value (survives screenshot cleanup), fall back to live count.
       // For credit mode, both paths read sessions.tracked_seconds so they match.
       const trackedSeconds =
@@ -135,6 +155,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         status: session.status,
         trackedSeconds,
         screenshotCount,
+        clientInfo,
         startedAt: session.startedAt?.toISOString() ?? null,
         totalActiveSeconds: session.totalActiveSeconds,
         createdAt: session.createdAt.toISOString(),
@@ -199,7 +220,7 @@ export async function sessionRoutes(app: FastifyInstance) {
   // is sticky thereafter. See plan doc for details.
   app.get<{
     Params: { token: string };
-    Querystring: { capturedAt?: string };
+    Querystring: { capturedAt?: string; clientInfo?: string };
   }>(
     "/api/sessions/:token/upload-url",
     {
@@ -209,6 +230,10 @@ export async function sessionRoutes(app: FastifyInstance) {
           type: "object" as const,
           properties: {
             capturedAt: { type: "string" as const, format: "date-time" },
+            // Free-form client telemetry (User-Agent-like). Stored opaquely.
+            // Intentionally NOT length-capped here — schema validation failure
+            // would 400 the whole upload. Best-effort: truncated in the handler.
+            clientInfo: { type: "string" as const },
           },
           additionalProperties: false,
         },
@@ -405,6 +430,13 @@ export async function sessionRoutes(app: FastifyInstance) {
       const screenshotId = randomUUID();
       const r2Key = `screenshots/${session.id}/${screenshotId}.jpg`;
 
+      // Optional client telemetry from the query param. Stored opaquely and
+      // never parsed. Truncate (don't reject) so a malformed/oversized value
+      // degrades gracefully instead of breaking the upload; trim() collapses
+      // an all-whitespace value to null.
+      const clientInfo =
+        request.query.clientInfo?.trim().slice(0, CLIENT_INFO_MAX_BYTES) || null;
+
       // Create screenshot record (unconfirmed)
       await db.insert(schema.screenshots).values({
         id: screenshotId,
@@ -414,6 +446,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         minuteBucket,
         confirmed: false,
         capturedAt: rowCapturedAt,
+        clientInfo,
       });
 
       // Generate presigned PUT URL
@@ -985,6 +1018,8 @@ export async function sessionRoutes(app: FastifyInstance) {
         (r.ts instanceof Date ? r.ts : new Date(r.ts)).toISOString(),
       );
 
+      const clientInfo = await getFirstClientInfo(session.id);
+
       // first/last are convenience accessors on the already-ascending array.
       // NOTE: last − first is NOT capture duration — a paused session has gaps
       // between timestamps, so the span overstates actual recorded time.
@@ -993,6 +1028,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         count: timestamps.length,
         first: timestamps[0] ?? null,
         last: timestamps[timestamps.length - 1] ?? null,
+        clientInfo,
         timestamps,
       };
     },

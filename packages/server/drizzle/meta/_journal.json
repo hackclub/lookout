@@ -64,6 +64,13 @@
       "when": 1780430168744,
       "tag": "0008_keep_timings_purge_r2",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1780431577703,
+      "tag": "0009_screenshot_client_info",
+      "breakpoints": true
     }
   ]
 }

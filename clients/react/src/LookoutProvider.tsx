@@ -1,7 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
+import { buildBrowserClientInfo } from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "./api/client.js";
 import { resolveConfig } from "./defaults.js";
 import type { LookoutConfig, ResolvedConfig } from "./types.js";
+
+// Injected at build time by tsup (see tsup.config.ts `define`). Falls back to
+// "0.0.0" if a consumer bundles the source without the define.
+declare const __LOOKOUT_VERSION__: string;
+const SDK_VERSION =
+  typeof __LOOKOUT_VERSION__ === "string" ? __LOOKOUT_VERSION__ : "0.0.0";
 
 interface LookoutContextValue {
   config: ResolvedConfig;
@@ -31,13 +38,25 @@ export function LookoutProvider({
 }: LookoutProviderProps) {
   const resolved = useMemo(() => resolveConfig(config), [config]);
 
+  // Telemetry string, e.g. "Lookout Sdk (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)".
+  const clientInfo = useMemo(
+    () =>
+      buildBrowserClientInfo({
+        type: "sdk",
+        version: SDK_VERSION,
+        embeddedApp: config.appName,
+      }),
+    [config.appName],
+  );
+
   const client = useMemo(
     () =>
       createLookoutClient({
         baseUrl: resolved.apiBaseUrl,
         token: resolved.token,
+        clientInfo,
       }),
-    [resolved.apiBaseUrl, resolved.token],
+    [resolved.apiBaseUrl, resolved.token, clientInfo],
   );
 
   const value = useMemo(() => ({ config: resolved, client }), [resolved, client]);

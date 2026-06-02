@@ -41,6 +41,9 @@ export class HttpError extends Error {
 export interface CreateClientOptions {
   baseUrl: string;
   token: TokenProvider;
+  /** Free-form client telemetry string attached to every upload-url request
+   *  (server query param `clientInfo`). Optional. */
+  clientInfo?: string;
 }
 
 async function resolveTokenValue(provider: TokenProvider): Promise<string> {
@@ -81,7 +84,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export function createLookoutClient(options: CreateClientOptions): LookoutClient {
-  const { baseUrl, token } = options;
+  const { baseUrl, token, clientInfo } = options;
 
   const resolveToken = () => resolveTokenValue(token);
 
@@ -99,10 +102,11 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
 
     async getUploadUrl(opts) {
       const base = await sessionUrl("/upload-url");
-      const url = opts?.capturedAt
-        ? `${base}?capturedAt=${encodeURIComponent(opts.capturedAt)}`
-        : base;
-      return fetchJson<UploadUrlResponse>(url);
+      const params = new URLSearchParams();
+      if (opts?.capturedAt) params.set("capturedAt", opts.capturedAt);
+      if (clientInfo) params.set("clientInfo", clientInfo);
+      const qs = params.toString();
+      return fetchJson<UploadUrlResponse>(qs ? `${base}?${qs}` : base);
     },
 
     async confirmScreenshot(body) {

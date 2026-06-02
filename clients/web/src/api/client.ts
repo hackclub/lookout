@@ -9,6 +9,7 @@ import type {
   StatusResponse,
   VideoResponse,
 } from "@lookout/shared";
+import { CLIENT_INFO } from "../clientInfo";
 
 export class HttpError extends Error {
   status: number;
@@ -60,13 +61,14 @@ export const api = {
   },
 
   /** `capturedAt` is optional — sending it on a session's first request
-   *  opts that session into credit-mode tracking. Omit for legacy behavior. */
+   *  opts that session into credit-mode tracking. Omit for legacy behavior.
+   *  `clientInfo` telemetry is attached automatically on every request. */
   getUploadUrl(opts?: { capturedAt?: string }): Promise<UploadUrlResponse> {
     const base = `${API_BASE}/sessions/${getToken()}/upload-url`;
-    const url = opts?.capturedAt
-      ? `${base}?capturedAt=${encodeURIComponent(opts.capturedAt)}`
-      : base;
-    return fetchJson(url);
+    const params = new URLSearchParams();
+    if (opts?.capturedAt) params.set("capturedAt", opts.capturedAt);
+    params.set("clientInfo", CLIENT_INFO);
+    return fetchJson(`${base}?${params.toString()}`);
   },
 
   confirmScreenshot(

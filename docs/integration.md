@@ -286,6 +286,7 @@ Response:
   "thumbnailUrl": "https://...",
   "videoUrl": "https://...",
   "videoWebmUrl": "https://...",
+  "clientInfo": "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)",
   "metadata": {"userId": "user_123", "projectId": "proj_456"}
 }
 ```
@@ -296,6 +297,7 @@ Key fields for your backend:
 - `videoUrl` — presigned URL to the compiled MP4 timelapse
 - `videoWebmUrl` — legacy URL retained for pre-0.2.0 clients; points at a static "please update" video (WebM encoding was dropped in 0.2.0)
 - `thumbnailUrl` — presigned URL for the session thumbnail
+- `clientInfo` — [client telemetry string](#client-telemetry) (which Lookout client/version/OS/browser recorded the session); `null` if none recorded
 - `metadata` — the metadata you attached when creating the session
 
 **Note:** To fetch multiple sessions at once, use `POST /api/sessions/batch` with a `{"tokens": ["token1", "token2", ...]}` body (max 100).
@@ -315,6 +317,7 @@ Response:
   "count": 59,
   "first": "2024-01-01T12:00:00.000Z",
   "last": "2024-01-01T12:59:00.000Z",
+  "clientInfo": "Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)",
   "timestamps": [
     "2024-01-01T12:00:00.000Z",
     "2024-01-01T12:01:00.000Z",
@@ -325,7 +328,8 @@ Response:
 
 - `timestamps` — ISO-8601, ascending. One entry per confirmed screenshot (~60s apart in steady state).
 - `first` / `last` — convenience accessors (first/last element of the array); `null` for a session with no screenshots.
-- `count` — number of timestamps (= confirmed screenshot count).
+- `count` — number of timestamps (= confirmed screenshot count). **Not a count of minutes** — more than one capture can land in the same minute (retries, resume, jitter), so `count` can exceed the number of distinct minutes. Use `trackedSeconds` for tracked time.
+- `clientInfo` — [client telemetry string](#client-telemetry) from the first screenshot; `null` if none recorded.
 
 **⚠️ `last − first` is not the recorded duration.** Sessions can be paused and resumed, leaving gaps between consecutive timestamps, so that span is wall-clock elapsed time and **overstates** actual capture time. For tamper-proof tracked time use `trackedSeconds` from `GET /api/sessions/:token`.
 
@@ -384,6 +388,26 @@ Notes:
 - Run this once per session (after `complete`). If you must re-run, Hackatime de-dupes identical heartbeats by `time` + `entity`, but don't rely on it — track which sessions you've already forwarded.
 
 > **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps (and the compiled video and thumbnail) are kept.
+
+## Client telemetry
+
+Every recording client reports a free-form **client info** string on each `upload-url` request (query param `clientInfo`). It's like an HTTP User-Agent but with Lookout-specific info — for telemetry and debugging. The server stores it opaquely (never parses it) and surfaces the session's first recorded value as `clientInfo` on `GET /api/sessions/:token`, the timings endpoint, and the internal admin endpoint.
+
+Format (User-Agent–like): `Lookout <Type> [(<EmbeddedApp>)]/<version> (<OS> <version>[; <Browser> <version>])`
+
+```
+Lookout Desktop/0.2.6 (macOS 14.3)
+Lookout Web (Fallout)/0.2.6 (macOS 14.3; Chrome 120.0)
+Lookout Sdk (Stardance)/0.2.6 (Windows 10; Firefox 121.0)
+```
+
+How each client populates it:
+
+- **Desktop** — type `Desktop`, app version + OS detected natively. No browser/embedded-app.
+- **Web** (`@lookout/web`) — type `Web`, version + browser/OS auto-detected. The embedded host program comes from the `?app=` URL param on the recorder link (e.g. `…/session?token=…&app=Fallout`), or the `VITE_LOOKOUT_EMBEDDED_APP` build env var.
+- **React SDK** (`@lookout/react`) — type `Sdk`, version + browser/OS auto-detected. Pass the host program via the `appName` prop on `<LookoutProvider appName="Fallout">`.
+
+It's best-effort: a client omits anything it can't detect, the server truncates over 1024 chars, and a malformed value never fails an upload. `clientInfo` is `null` for sessions recorded before this existed or where no client sent one.
 
 ## Trust Model
 
