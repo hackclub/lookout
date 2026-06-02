@@ -56,6 +56,13 @@ export const sessions = pgTable(
     trackingMode: text("tracking_mode").notNull().default("bucket"),
     streakAnchorAt: timestamp("streak_anchor_at", { withTimezone: true }),
     streakCreditedCount: integer("streak_credited_count").notNull().default(0),
+    // Set when the retention job has deleted this session's screenshot R2
+    // objects (after SCREENSHOT_RETENTION_DAYS). The screenshot *rows* are
+    // kept so capture timings stay queryable; this flag stops the job from
+    // reprocessing already-purged sessions. NULL = R2 objects still present.
+    screenshotsPurgedAt: timestamp("screenshots_purged_at", {
+      withTimezone: true,
+    }),
     videoUrl: text("video_url"),
     videoR2Key: text("video_r2_key"),
     thumbnailUrl: text("thumbnail_url"),

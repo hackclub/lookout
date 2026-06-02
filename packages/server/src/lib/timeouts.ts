@@ -1,4 +1,4 @@
-import { sql, eq, and, lt, isNotNull, inArray } from "drizzle-orm";
+import { sql, eq, and, lt, isNotNull, isNull, inArray } from "drizzle-orm";
 import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { db, schema } from "../db/index.js";
 import { r2Client, R2_BUCKET } from "../config/r2.js";
@@ -266,8 +266,11 @@ async function cleanupCompletedScreenshots() {
     Date.now() - SCREENSHOT_RETENTION_DAYS * 24 * 60 * 60_000,
   );
 
-  // Find completed sessions with a video that stopped more than SCREENSHOT_RETENTION_DAYS ago
-  // and still have screenshot records to clean up
+  // Find completed sessions with a video that stopped more than
+  // SCREENSHOT_RETENTION_DAYS ago and whose R2 objects haven't been purged yet.
+  // We delete the R2 image objects but KEEP the screenshot rows so capture
+  // timings (GET /timings) stay queryable indefinitely; screenshotsPurgedAt
+  // gates this so already-purged sessions aren't reprocessed every run.
   const sessions = await db
     .select({ id: schema.sessions.id })
     .from(schema.sessions)
@@ -276,6 +279,7 @@ async function cleanupCompletedScreenshots() {
         eq(schema.sessions.status, "complete"),
         isNotNull(schema.sessions.videoR2Key),
         lt(schema.sessions.stoppedAt, threshold),
+        isNull(schema.sessions.screenshotsPurgedAt),
       ),
     );
 
@@ -284,8 +288,6 @@ async function cleanupCompletedScreenshots() {
       .select({ id: schema.screenshots.id, r2Key: schema.screenshots.r2Key })
       .from(schema.screenshots)
       .where(eq(schema.screenshots.sessionId, session.id));
-
-    if (screenshots.length === 0) continue;
 
     // Delete R2 objects — DeleteObject is idempotent (204 whether object exists or not)
     for (const ss of screenshots) {
@@ -299,9 +301,11 @@ async function cleanupCompletedScreenshots() {
       }
     }
 
-    // Delete DB records
+    // Keep the screenshot rows (timings); just mark the session purged so we
+    // don't re-issue these R2 deletes on every subsequent run.
     await db
-      .delete(schema.screenshots)
-      .where(eq(schema.screenshots.sessionId, session.id));
+      .update(schema.sessions)
+      .set({ screenshotsPurgedAt: new Date() })
+      .where(eq(schema.sessions.id, session.id));
   }
 }

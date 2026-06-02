@@ -440,21 +440,15 @@ Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the
 
 > **⚠️ `last − first` is not the recorded duration.** A session can be paused and resumed, leaving gaps between consecutive timestamps. The span from `first` to `last` is wall-clock elapsed time, which **overstates** actual capture time whenever the session was paused. To measure recorded time, use `trackedSeconds` from the [status endpoint](#poll-compilation-status), or sum the gaps between consecutive timestamps while excluding any larger than the capture interval.
 
-**Timestamp accuracy (read before trusting these as capture times):**
+**Availability:** Capture timestamps are available for timelapses recorded from **~2026-05-26** onward. Timelapses recorded before then did not have timestamps collected — for those, the endpoint returns `200` with `count: 0` and an empty `timestamps` array, even though the session is `complete` and still has a playable video.
 
-Capture-time storage was added across **all** recording modes in the **0.2.1 release (~2026-05-25)** — a true client capture time for credit-mode clients, and a server-side timestamp for legacy bucket-mode clients. This data is **never backfilled**, so recordings made before that date have no stored capture time at all. What a timestamp represents therefore depends on when and how the recording was made:
-
-| Recording | Timestamp source | Meaning |
-|-----------|------------------|---------|
-| Credit mode (0.2.1+ clients) | `captured_at` | The real moment the frame was grabbed on the client |
-| Bucket mode (legacy clients) | `captured_at` = server time | Server-side time the upload URL was requested — lags true capture by upload latency |
-| Recordings before ~2026-05-25 | server request time (fallback) | Same server-side request time; these rows have no capture time at all |
-
-Every confirmed screenshot yields a timestamp (a server-side request time has been stored since launch and is the fallback), but for **legacy bucket-mode and pre-2026-05-25 recordings these are server-side request times, not precise capture instants** — treat them as approximate (typically within a few seconds, but bounded only by upload latency). Only credit-mode recordings give true capture times.
+**Timestamp precision:** For current recordings these are true capture times — the moment each frame was grabbed. Recordings from older legacy clients report a server-side time instead (when the upload was received), which trails the true capture by upload latency.
 
 **Errors:**
 - `404` — Session not found
 - `429` — Rate limit exceeded
+
+> **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps returned by this endpoint — along with the compiled video and thumbnail — are kept.
 
 ---
 

@@ -30,6 +30,6 @@ Lookout is designed to be simple, resilient, and easy to integrate. Here's how i
 4. When the session finishes, Lookout stitches the screenshots into a time-lapse video.
 5. The Hack Club program can retrieve the session results.
 
-Sessions auto-pause after 5 minutes of inactivity and auto-stop after 30 minutes of being paused.
+Sessions auto-pause after 10 minutes of inactivity and auto-stop after 24 hours of inactivity.
 
-There is no concept of "users" or "accounts" in Lookout. Sessions are created to be shared to users and controlled by the Hack Club program that created it.
+There is no concept of "users" or "accounts" in Lookout. Sessions are controlled by its token, which the Hack Club program saves and passes to the client. The Hack Club program decides when and how to use the data and results (i.e. push to Hackatime, use time directly, etc) with the same token. The concept of associating sessions with users or projects is up to the Hack Club program (A common approach is to store the session token to a user or project in the Hack Club program's database).

@@ -57,6 +57,13 @@
       "when": 1778606892716,
       "tag": "0007_credit_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1780430168744,
+      "tag": "0008_keep_timings_purge_r2",
+      "breakpoints": true
     }
   ]
 }

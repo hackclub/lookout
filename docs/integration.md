@@ -329,7 +329,9 @@ Response:
 
 **⚠️ `last − first` is not the recorded duration.** Sessions can be paused and resumed, leaving gaps between consecutive timestamps, so that span is wall-clock elapsed time and **overstates** actual capture time. For tamper-proof tracked time use `trackedSeconds` from `GET /api/sessions/:token`.
 
-**Timestamp precision:** for credit-mode recordings (clients ≥0.2.1) these are true client capture times. For legacy bucket-mode recordings and anything captured before ~2026-05-25 they're server-side request times — accurate to within upload latency, not the exact capture instant. See the [server API docs](../packages/server/API.md#get-capture-timings) for the full accuracy table.
+**Availability:** timestamps are available for timelapses recorded from **~2026-05-26** onward. Older timelapses did not have timestamps collected and return `count: 0` with an empty `timestamps` array (even though the session is `complete` with a playable video).
+
+**Timestamp precision:** for current recordings these are true capture times — the moment each frame was grabbed. Older legacy clients report a server-side receive time instead, which trails the true capture by upload latency.
 
 ### Hackatime integration
 
@@ -380,6 +382,8 @@ Notes:
 - `time` must be **epoch seconds** (a float), not milliseconds — `Date.parse(iso)` returns millis, so divide by 1000.
 - The `editor` field is what drives the "Lookout" attribution; keep `entity`/`project` stable per user or project so the time lands in one bucket.
 - Run this once per session (after `complete`). If you must re-run, Hackatime de-dupes identical heartbeats by `time` + `entity`, but don't rely on it — track which sessions you've already forwarded.
+
+> **Note:** The original screenshot images are only retained for 7 days after a session stops, after which the JPEGs are deleted from storage. The capture timestamps (and the compiled video and thumbnail) are kept.
 
 ## Trust Model
 
