@@ -26,8 +26,8 @@ In-memory sliding window (60-second windows). Rate-limited responses return:
 | Endpoint | Limit | Key |
 |----------|-------|-----|
 | `GET /api/sessions/:token` | 60 req/min | per token |
-| `GET /api/sessions/:token/upload-url` | 3 req/min (configurable) | per session ID |
-| `POST /api/sessions/:token/screenshots` | 10 req/min | per token |
+| `GET /api/sessions/:token/upload-url` | 10 req/min | per session ID |
+| `POST /api/sessions/:token/screenshots` | 20 req/min | per token |
 | `POST /api/sessions/:token/pause` | 10 req/min | per token |
 | `POST /api/sessions/:token/resume` | 10 req/min | per token |
 | `POST /api/sessions/:token/stop` | 10 req/min | per token |
@@ -73,6 +73,39 @@ State transitions use optimistic locking — if a concurrent request changes the
 
 ---
 
+## Tracking Modes
+
+`trackedSeconds` is computed by one of two server-side algorithms. Mode is decided by the **first** upload of a session and stays sticky for the session's lifetime.
+
+### Bucket mode (legacy, pre-0.2.1 clients)
+
+- Activated when the first `GET /upload-url` request omits `capturedAt`.
+- `trackedSeconds = (distinct confirmed minute buckets − 1) × 60`, where `minuteBucket = floor((serverNow − startedAt) / 60_000)`.
+- Two captures landing in the same server-receive minute count as one bucket.
+- Subsequent uploads can send `capturedAt` — the server stores it for debugging but won't flip the mode.
+
+### Credit mode (0.2.1+ clients)
+
+- Activated when the first `GET /upload-url` request includes `capturedAt`.
+- A **streak anchor** is set to the seed capture's `capturedAt`; the server then expects each subsequent capture at `anchor + (creditedCount + 1) × 60s`.
+- If `|capturedAt − expectedAt| ≤ 30s`: credit 60s, increment `creditedCount`, anchor unchanged.
+- Else: credit 0s, reset anchor to this `capturedAt`, `creditedCount = 0`. Subsequent captures rebuild a streak from there.
+- `trackedSeconds` is maintained incrementally on `sessions.tracked_seconds` — not recomputed from screenshots.
+- Pause + resume clears the streak so the post-resume seed capture doesn't burn a 60s credit.
+- Trust envelope: `capturedAt` must fall within `serverNow ± 5min` and be strictly monotonic.
+
+### Why two modes exist
+
+Pre-0.2.1 the bucket count caused timer jump-back when two captures arrived in the same minute (network jitter, late uploads). Credit mode anchors the math to the client's capture time so jitter that stays inside the ±30s window credits cleanly. Bucket mode is retained for compat with currently-shipped binaries — both run side by side on the same database.
+
+### Client display guidance
+
+- Trust `trackedSeconds` from the confirm response as ground truth. Do not derive a display value from `uploads.completed * intervalSeconds` — in credit mode, not every successful upload credits, and the derivation over-counts.
+- Cap any client-side interpolation at one capture interval (60s) ahead of the last server credit. This bounds the worst-case drop at stop/compile to 60s, never the full session length.
+- Schedule the next capture from each confirm's `nextExpectedAt`; the math behind it stays anchored to the original streak so individual upload jitter doesn't accumulate drift.
+
+---
+
 ## Public Endpoints
 
 ### Get Session Status
@@ -108,7 +141,7 @@ Returns the current state of a session.
 ### Get Presigned Upload URL
 
 ```
-GET /api/sessions/:token/upload-url
+GET /api/sessions/:token/upload-url?capturedAt=<iso8601>
 ```
 
 Generates a presigned PUT URL for uploading a screenshot to R2. Activates pending sessions on first call.
@@ -118,6 +151,11 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 |------|------|-------------|
 | `token` | string | 64-char hex session token |
 
+**Query Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Must fall within ±5 min of server time and must be strictly monotonic across uploads. |
+
 **Response `200 OK`:**
 ```json
 {
@@ -125,19 +163,25 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
   "r2Key": "screenshots/{sessionId}/{screenshotId}.jpg",
   "screenshotId": "uuid",
   "minuteBucket": 1,
-  "nextExpectedAt": "2024-01-01T12:01:00.000Z"
+  "nextExpectedAt": "2024-01-01T12:01:00.000Z",
+  "serverTime": "2024-01-01T12:00:00.000Z",
+  "trackingMode": "credit"
 }
 ```
 
+`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below).
+
 **Errors:**
+- `400` — `captured_at_future`, `captured_at_too_old`, `captured_at_before_session_start`, `captured_at_not_monotonic`, `captured_at_invalid`, or `credit_mode_requires_captured_at`
 - `404` — Session not found
 - `409` — Session not in `pending` or `active` state
-- `429` — Rate limit exceeded, or max upload requests per session reached (1440)
+- `429` — Rate limit exceeded, or max upload requests per session reached (4320)
 
 **Notes:**
 - Presigned URL expires after 2 minutes
 - Client should PUT the JPEG image directly to `uploadUrl`
-- Max 1440 upload requests per session
+- Max 4320 upload requests per session
+- Pre-0.2.1 binaries that don't send `capturedAt` continue to receive a usable response — additive fields (`serverTime`, `trackingMode`) are gracefully ignored
 
 ---
 
@@ -176,9 +220,12 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 {
   "confirmed": true,
   "trackedSeconds": 123,
-  "nextExpectedAt": "2024-01-01T12:01:00.000Z"
+  "nextExpectedAt": "2024-01-01T12:01:00.000Z",
+  "serverTime": "2024-01-01T12:00:00.000Z"
 }
 ```
+
+`trackedSeconds` here is the **server's authoritative count after this capture has been credited (or not)**. Use this value to drive your timer display — see the [Tracking Modes](#tracking-modes) section for client display guidance. `nextExpectedAt` is the target for the next capture's `capturedAt`.
 
 **Errors:**
 - `400` — Invalid content type (must be `image/jpeg`), file too large (max 2 MB), or object not found in R2
@@ -187,7 +234,8 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 - `429` — Rate limit exceeded, or max confirmed screenshots reached (720)
 
 **Notes:**
-- Idempotent — confirming an already-confirmed screenshot returns success
+- Idempotent — confirming an already-confirmed screenshot returns success with current `trackedSeconds` and a freshly computed `nextExpectedAt`
+- In credit mode the credit decision (60 vs 0) is recorded on the row as `credited_seconds`; the response only exposes the cumulative `trackedSeconds`
 
 ---
 
@@ -317,10 +365,10 @@ When complete:
 ### Get Video URL
 
 ```
-GET /api/sessions/:token/video
+GET /api/sessions/:token/video?format=mp4
 ```
 
-Returns a presigned URL to download the compiled timelapse video (MP4 / H.264).
+Returns a URL to the compiled timelapse video. MP4 / H.264 is the only encoded format. The `?format=webm` query parameter is retained for pre-0.2.0 binaries — it returns a URL to a static "please update your client" video instead of an error.
 
 **Path Parameters:**
 | Name | Type | Description |

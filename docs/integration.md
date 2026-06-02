@@ -91,7 +91,7 @@ Response:
 }
 ```
 
-- `trackedSeconds` — tamper-proof tracked time (= distinct confirmed minute buckets × 60)
+- `trackedSeconds` — tamper-proof tracked time. Sessions created post-0.2.1 use **credit mode**: each capture that arrives within ±30s of the streak-anchored expected mark credits 60s; out-of-window captures reset the streak. Pre-0.2.1 sessions remain on **bucket mode** (`distinct confirmed minute buckets × 60`). Mode is sticky per session — clients that send `capturedAt` flip the session to credit on first upload.
 - `screenshotCount` — number of confirmed screenshots
 
 ### Force-stop a session
@@ -155,10 +155,12 @@ untrusted** — all timing and time tracking is validated server-side.
 
 The client should handle network failures gracefully:
 
-1. **Retry each step** — presigned URL request, R2 PUT, confirmation POST — up to 3 times with exponential backoff (2s, 4s, 8s).
-2. **Hedge on failure** — if an R2 PUT fails after all retries, take a fresh screenshot and start the upload flow again. The server accepts multiple screenshots per minute bucket and picks the best one at compilation time.
-3. **Offline detection** — if `navigator.onLine` is false, pause the upload queue and buffer captures (up to 5). Resume when the `online` event fires.
-4. **Idempotent confirmation** — confirming an already-confirmed screenshot is a no-op, so retries are safe.
+1. **Run the upload pipeline serially per capture** — take screenshot, await `GET /upload-url`, await R2 PUT, await `POST /screenshots`, then schedule the next capture from the confirm response's `nextExpectedAt`. This is the pattern the desktop Rust loop and the v0.2.4+ React SDK both use. Fire-and-forget queueing produces stale-ref bursts and is no longer recommended.
+2. **Retry each leg** — presigned URL request, R2 PUT, confirmation POST — up to 3 times with exponential backoff (2s, 4s, 8s). Treat 409 (session paused/stopped) as terminal, not retriable.
+3. **Send `capturedAt` on every upload-url request** (ISO-8601, UTC) — this opts the session into credit-mode tracking. Without it, the session stays on legacy bucket mode for life. Stamp `capturedAt` at the moment the frame is grabbed, not when the request is sent — uploads can be delayed by network without losing credit accuracy.
+4. **Schedule the next capture from `nextExpectedAt`** — every confirm response carries the server's authoritative target for the next capture. Compute `delay = max(0, parse(nextExpectedAt) - now)`. If the delay is 0 (server fell behind), fire immediately to catch up — but never fire sooner than this, or you'll cause streak resets.
+5. **Idempotent confirmation** — confirming an already-confirmed screenshot is a no-op, so retries on the confirm leg are safe.
+6. **Display the server's `trackedSeconds`, not a derived estimate** — do not compute display time from `uploads.completed * intervalSeconds` or similar. In credit mode, not every successful upload credits a minute (out-of-window captures return 200 but `credited_seconds = 0`). Display estimates derived from upload count over-count in those cases; previously this inflated displays by exactly 2× when total round-trip hit ~90s.
 
 ### Session recovery after page refresh
 
@@ -231,9 +233,10 @@ Response:
 ```
 
 Key fields for your backend:
-- `trackedSeconds` — tamper-proof tracked time (= distinct confirmed minute buckets × 60). Use this for time verification.
+- `trackedSeconds` — tamper-proof tracked time. Use this for time verification. Credit-mode sessions (default for clients ≥0.2.1) credit 60s per capture that lands within ±30s of the server-anchored expected mark; bucket-mode sessions use distinct minute-bucket count × 60.
 - `screenshotCount` — number of confirmed screenshots
-- `videoUrl` / `videoWebmUrl` — presigned URLs to the compiled timelapse (MP4 and WebM)
+- `videoUrl` — presigned URL to the compiled MP4 timelapse
+- `videoWebmUrl` — legacy URL retained for pre-0.2.0 clients; points at a static "please update" video (WebM encoding was dropped in 0.2.0)
 - `thumbnailUrl` — presigned URL for the session thumbnail
 - `metadata` — the metadata you attached when creating the session
 
@@ -246,6 +249,6 @@ Key fields for your backend:
 | Session creation | Yes — server-to-server with API key | Only your backend can create sessions |
 | Capture timestamps | No — server records its own timestamp when `GET /upload-url` is called | Client can't fake when a screenshot was taken |
 | Upload verification | No — server calls `HeadObject` on R2 to verify the file exists | Client can't claim uploads it didn't make |
-| Time tracking | No — `trackedSeconds = distinct confirmed minute buckets × 60` | Computed server-side from server timestamps |
-| Pause/resume | Partially trusted | Server auto-pauses after 5 min without uploads, auto-stops after 30 min |
-| Rate limiting | Server-enforced | Max 3 upload-url requests per minute, max 720 confirmed screenshots per session |
+| Time tracking | No — credit-mode sessions credit 60s per capture landing within ±30s of the server's streak anchor; bucket-mode is distinct minute buckets × 60. Mode is sticky per session and decided by the first upload. | Server-side anchor + window math; clients can't fake credits |
+| Pause/resume | Partially trusted | Server auto-pauses after 10 min without uploads, auto-stops after 24 h |
+| Rate limiting | Server-enforced | Max 10 upload-url + 20 confirm requests per minute per session, max 720 confirmed screenshots, max 4320 total upload-url requests per session |

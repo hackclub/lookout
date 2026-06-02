@@ -161,8 +161,8 @@ const { state, actions } = useLookout();
 | `status` | `RecorderStatus` | Current status (see below) |
 | `isSharing` | `boolean` | Whether media capture is active (screen sharing or camera recording) |
 | `isRecording` | `boolean` | `true` when actively capturing (`isSharing && (status === "active" \|\| status === "pending")`). Use this instead of compound checks in UI logic. |
-| `trackedSeconds` | `number` | Best-known tracked time — max of server value, last upload confirmation, and local estimate from completed uploads. Updates per-upload, not just on poll. |
-| `displaySeconds` | `number` | Client-interpolated display time (ticks every second via RAF). Monotonic — never jumps backward on server sync. |
+| `trackedSeconds` | `number` | Server-authoritative tracked time — max of session state and the value returned by the last upload confirmation. Updates per-upload, not just on poll. Bounded by what the server has credited; never inflated by client-side estimation. |
+| `displaySeconds` | `number` | Client-interpolated display time (ticks every second via RAF). Caps interpolation at one capture interval (60s) ahead of the last server credit, so stop/compile reveals at most a 60s drop. The `baseRef` ratchet defends against backward jumps on stale-read sync. |
 | `screenshotCount` | `number` | Number of confirmed screenshots — max of server count and local upload count, so it updates immediately on upload. |
 | `uploads` | `UploadState` | Upload queue: `{ pending, completed, failed }` |
 | `lastScreenshotUrl` | `string \| null` | Object URL of last captured screenshot |
@@ -286,22 +286,23 @@ const {
 
 ### `useUploader()`
 
-Manages the upload queue with retries and backoff. Must be used within `<LookoutProvider>`.
+Runs the serial upload pipeline (`getUploadUrl` → R2 PUT → `confirmScreenshot`) end-to-end with per-leg retries. Must be used within `<LookoutProvider>`. The pre-0.2.4 fire-and-forget queue (`enqueue`/`nextExpectedAt`) was replaced with this synchronous form — matches the desktop Rust capture loop.
 
 ```ts
-const { enqueue, uploads, trackedSeconds, lastScreenshotUrl, nextExpectedAt, lastError } = useUploader();
+const { captureUploadConfirm, uploads, trackedSeconds, lastScreenshotUrl, lastError, sessionConflict, resetConflict } = useUploader();
 ```
 
 **Returns:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `enqueue` | `(capture: CaptureResult) => void` | Add a capture to the upload queue |
-| `uploads` | `UploadState` | `{ pending, completed, failed }` counts |
-| `trackedSeconds` | `number` | Server-reported tracked time after last confirmation |
+| `captureUploadConfirm` | `(capture: CaptureResult) => Promise<{ trackedSeconds, nextExpectedAt }>` | Run the full pipeline. Resolves with the fresh `tracked_seconds` and `next_expected_at` from THIS capture's confirm response. Throws after retries — caller (the tick chain) catches and falls back to the local interval. |
+| `uploads` | `UploadState` | `{ pending, completed, failed }` counts. Note: `completed` reflects successful confirms, not credited captures — a confirm can succeed with `credited_seconds = 0` in credit mode. |
+| `trackedSeconds` | `number` | Server-reported tracked time from the last successful confirm |
 | `lastScreenshotUrl` | `string \| null` | Object URL of last uploaded screenshot |
-| `nextExpectedAt` | `string \| null` | ISO timestamp of when server expects next screenshot |
 | `lastError` | `string \| null` | Last upload error message |
+| `sessionConflict` | `boolean` | `true` when a 409 was received (session paused/stopped server-side) |
+| `resetConflict` | `() => void` | Clear the `sessionConflict` flag after handling |
 
 ---
 
@@ -336,9 +337,13 @@ const session = useSession();
 
 ### `useSessionTimer(serverTrackedSeconds, isActive)`
 
-Client-side interpolated timer. Uses server-provided seconds as a base, ticks every second via `requestAnimationFrame`, and maintains a monotonic ratchet so the display never jumps backward when the server syncs.
+Client-side interpolated timer. Uses the server-provided seconds as ground truth, ticks every second via `requestAnimationFrame`, and **caps interpolation at one capture interval (60s)** ahead of the last server-credited value. Maintains a monotonic ratchet so a stale-read sync returning a lower value doesn't make the display jump backward.
 
-When a new `serverTrackedSeconds` arrives, the timer takes the higher of the current display value and the server value as its new base, then continues counting from there. This prevents visible snaps (e.g., display at 11:05, server reports 11:00 → display stays at 11:05).
+When a new `serverTrackedSeconds` arrives, `baseRef` ratchets to `max(baseRef, serverTrackedSeconds)` and the elapsed-since-sync clock resets. Between credits, the displayed value is `baseRef + min(60, elapsed_seconds)` — so if captures stall, the display freezes 60s ahead of the last credit instead of running unbounded. When the next credit lands, the new server value equals the previously-frozen display (no visible jump).
+
+When `isActive` flips to `false` (pause/stop/compile), the display snaps to `baseRef` — the maximum possible drop the user sees is 60s, never the full session length.
+
+> **Important:** feed this hook only server-authoritative values. Do **not** derive a synthetic value from `uploads.completed` — in credit mode, not every successful upload credits a minute, so derived counts inflate the display. `useLookout` already enforces this via `computeBestTrackedSeconds`.
 
 ```ts
 const displaySeconds = useSessionTimer(trackedSeconds, isActive);
@@ -348,10 +353,10 @@ const displaySeconds = useSessionTimer(trackedSeconds, isActive);
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `serverTrackedSeconds` | `number` | Base tracked time (from server or local estimate) |
-| `isActive` | `boolean` | Whether to tick the timer |
+| `serverTrackedSeconds` | `number` | Server-authoritative tracked time (from `state.trackedSeconds`, an upload-confirm response, or a status poll) |
+| `isActive` | `boolean` | Whether to tick the timer. Set to `false` on pause/stop/compile to snap display to the server value |
 
-**Returns:** `number` — interpolated display seconds (monotonically increasing while active)
+**Returns:** `number` — display seconds (`baseRef + capped interpolated elapsed` while active; `baseRef` when inactive)
 
 ---
 
