@@ -300,6 +300,87 @@ Key fields for your backend:
 
 **Note:** To fetch multiple sessions at once, use `POST /api/sessions/batch` with a `{"tokens": ["token1", "token2", ...]}` body (max 100).
 
+## Timings endpoint
+
+`GET /api/sessions/:token/timings` returns the capture timestamps of every confirmed screenshot in a timelapse — i.e. *when* the session was recorded. It's token-authenticated like the other client endpoints, so the same token you stored in Part 1 works.
+
+```bash
+curl https://lookout.hackclub.com/api/sessions/TOKEN/timings
+```
+
+Response:
+```json
+{
+  "status": "complete",
+  "count": 59,
+  "first": "2024-01-01T12:00:00.000Z",
+  "last": "2024-01-01T12:59:00.000Z",
+  "timestamps": [
+    "2024-01-01T12:00:00.000Z",
+    "2024-01-01T12:01:00.000Z",
+    "2024-01-01T12:02:00.000Z"
+  ]
+}
+```
+
+- `timestamps` — ISO-8601, ascending. One entry per confirmed screenshot (~60s apart in steady state).
+- `first` / `last` — convenience accessors (first/last element of the array); `null` for a session with no screenshots.
+- `count` — number of timestamps (= confirmed screenshot count).
+
+**⚠️ `last − first` is not the recorded duration.** Sessions can be paused and resumed, leaving gaps between consecutive timestamps, so that span is wall-clock elapsed time and **overstates** actual capture time. For tamper-proof tracked time use `trackedSeconds` from `GET /api/sessions/:token`.
+
+**Timestamp precision:** for credit-mode recordings (clients ≥0.2.1) these are true client capture times. For legacy bucket-mode recordings and anything captured before ~2026-05-25 they're server-side request times — accurate to within upload latency, not the exact capture instant. See the [server API docs](../packages/server/API.md#get-capture-timings) for the full accuracy table.
+
+### Hackatime integration
+
+The `timestamps` array is what you forward to [Hackatime](https://hackatime.hackclub.com) as heartbeats. Your program should:
+
+1. Fetch `GET /api/sessions/:token/timings` for the session.
+2. Parse the `timestamps` array and map each ISO-8601 string to a Hackatime heartbeat (`time` = epoch seconds for that timestamp).
+3. Set the **editor to `Lookout`** on every heartbeat, so the recorded time is attributed to that editor in Hackatime.
+4. Forward the heartbeats to Hackatime.
+
+Because captures are ~60s apart, the heartbeats reconstruct the session's active intervals, and Hackatime's own gap handling collapses pauses — so you don't need to special-case the paused gaps yourself. Send each timelapse's heartbeats once (e.g. after the session is `complete`) to avoid duplicates.
+
+```ts
+const LOOKOUT = "https://lookout.hackclub.com";
+// Hackatime is Wakatime-compatible; this is its bulk-heartbeat endpoint.
+const HACKATIME = "https://hackatime.hackclub.com/api/hackatime/v1";
+
+async function forwardTimelapseToHackatime(token: string, hackatimeApiKey: string) {
+  // 1. Pull the capture timestamps for this timelapse.
+  const res = await fetch(`${LOOKOUT}/api/sessions/${token}/timings`);
+  if (!res.ok) throw new Error(`timings request failed: ${res.status}`);
+  const { timestamps } = (await res.json()) as { timestamps: string[] };
+  if (timestamps.length === 0) return; // nothing recorded yet
+
+  // 2. Map each capture to a Hackatime heartbeat.
+  const heartbeats = timestamps.map((iso) => ({
+    type: "file",
+    entity: "timelapse",            // what shows up as the "file" in Hackatime
+    category: "coding",
+    editor: "Lookout",              // attribute the time to the Lookout editor
+    time: Date.parse(iso) / 1000,   // epoch SECONDS (float), not millis
+  }));
+
+  // 3. Bulk-forward to Hackatime. Use the user's Hackatime API key.
+  const post = await fetch(`${HACKATIME}/users/current/heartbeats.bulk`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${hackatimeApiKey}`,
+    },
+    body: JSON.stringify(heartbeats),
+  });
+  if (!post.ok) throw new Error(`hackatime push failed: ${post.status}`);
+}
+```
+
+Notes:
+- `time` must be **epoch seconds** (a float), not milliseconds — `Date.parse(iso)` returns millis, so divide by 1000.
+- The `editor` field is what drives the "Lookout" attribution; keep `entity`/`project` stable per user or project so the time lands in one bucket.
+- Run this once per session (after `complete`). If you must re-run, Hackatime de-dupes identical heartbeats by `time` + `entity`, but don't rely on it — track which sessions you've already forwarded.
+
 ## Trust Model
 
 | What | Trusted? | Why |

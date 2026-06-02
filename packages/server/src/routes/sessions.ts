@@ -941,6 +941,63 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
+  // Get capture timings — public, token-gated.
+  // Returns the ISO-8601 capture timestamps of every confirmed screenshot in
+  // the session, oldest first. Uses captured_at (client-attested capture
+  // moment); pre-migration rows that predate captured_at fall back to
+  // requested_at so the array is never sparse.
+  app.get<{ Params: { token: string } }>(
+    "/api/sessions/:token/timings",
+    {
+      schema: { params: tokenParamSchema },
+    },
+    async (request, reply) => {
+      // Rate limit: 30 req/min per token (read-only, potentially large body)
+      const rl = checkGenericRateLimit("session-timings", request.params.token, 30);
+      if (!rl.allowed) {
+        reply.header(
+          "Retry-After",
+          String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+        );
+        return reply.code(429).send({ error: "Rate limit exceeded" });
+      }
+
+      const session = await findSession(request.params.token);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+
+      const rows = await db
+        .select({
+          ts: sql<Date>`coalesce(${schema.screenshots.capturedAt}, ${schema.screenshots.requestedAt})`,
+        })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, session.id),
+            eq(schema.screenshots.confirmed, true),
+          ),
+        )
+        .orderBy(
+          sql`coalesce(${schema.screenshots.capturedAt}, ${schema.screenshots.requestedAt}) ASC`,
+        );
+
+      // node-postgres may hand timestamps back as strings; coerce before toISOString.
+      const timestamps = rows.map((r) =>
+        (r.ts instanceof Date ? r.ts : new Date(r.ts)).toISOString(),
+      );
+
+      // first/last are convenience accessors on the already-ascending array.
+      // NOTE: last − first is NOT capture duration — a paused session has gaps
+      // between timestamps, so the span overstates actual recorded time.
+      return {
+        status: session.status,
+        count: timestamps.length,
+        first: timestamps[0] ?? null,
+        last: timestamps[timestamps.length - 1] ?? null,
+        timestamps,
+      };
+    },
+  );
+
   // Get video presigned URL.
   // Legacy clients still pass ?format=webm — we no longer encode WebM, but
   // return a static "please update" WebM URL so the old player shows the

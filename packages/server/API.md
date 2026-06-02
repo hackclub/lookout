@@ -33,6 +33,7 @@ In-memory sliding window (60-second windows). Rate-limited responses return:
 | `POST /api/sessions/:token/resume` | 10 req/min | per token |
 | `POST /api/sessions/:token/stop` | 10 req/min | per token |
 | `GET /api/sessions/:token/status` | 60 req/min | per token |
+| `GET /api/sessions/:token/timings` | 30 req/min | per token |
 | `GET /api/sessions/:token/video` | 30 req/min | per token |
 | `GET /api/sessions/:token/thumbnail` | 30 req/min | per token |
 | `POST /api/sessions/batch` | 30 req/min | per IP |
@@ -398,6 +399,62 @@ When complete:
   "trackedSeconds": 123
 }
 ```
+
+---
+
+### Get Capture Timings
+
+```
+GET /api/sessions/:token/timings
+```
+
+Returns the ISO-8601 capture timestamps of **every confirmed screenshot** in the session, oldest first. Token-gated public endpoint. Uses each screenshot's `capturedAt` (client-attested capture moment); rows predating the `captured_at` column fall back to `requestedAt` so the array is never sparse.
+
+**Path Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `token` | string | 64-char hex session token |
+
+**Response `200 OK`:**
+```json
+{
+  "status": "active",
+  "count": 3,
+  "first": "2024-01-01T12:00:00.000Z",
+  "last": "2024-01-01T12:02:00.000Z",
+  "timestamps": [
+    "2024-01-01T12:00:00.000Z",
+    "2024-01-01T12:01:00.000Z",
+    "2024-01-01T12:02:00.000Z"
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Current session status |
+| `count` | integer | Number of timestamps returned (= confirmed screenshot count) |
+| `first` | string \| null | Earliest timestamp (= `timestamps[0]`); `null` if no screenshots |
+| `last` | string \| null | Latest timestamp (= last element); `null` if no screenshots |
+| `timestamps` | string[] | ISO-8601 timestamps, ascending |
+
+> **⚠️ `last − first` is not the recorded duration.** A session can be paused and resumed, leaving gaps between consecutive timestamps. The span from `first` to `last` is wall-clock elapsed time, which **overstates** actual capture time whenever the session was paused. To measure recorded time, use `trackedSeconds` from the [status endpoint](#poll-compilation-status), or sum the gaps between consecutive timestamps while excluding any larger than the capture interval.
+
+**Timestamp accuracy (read before trusting these as capture times):**
+
+Capture-time storage was added across **all** recording modes in the **0.2.1 release (~2026-05-25)** — a true client capture time for credit-mode clients, and a server-side timestamp for legacy bucket-mode clients. This data is **never backfilled**, so recordings made before that date have no stored capture time at all. What a timestamp represents therefore depends on when and how the recording was made:
+
+| Recording | Timestamp source | Meaning |
+|-----------|------------------|---------|
+| Credit mode (0.2.1+ clients) | `captured_at` | The real moment the frame was grabbed on the client |
+| Bucket mode (legacy clients) | `captured_at` = server time | Server-side time the upload URL was requested — lags true capture by upload latency |
+| Recordings before ~2026-05-25 | server request time (fallback) | Same server-side request time; these rows have no capture time at all |
+
+Every confirmed screenshot yields a timestamp (a server-side request time has been stored since launch and is the fallback), but for **legacy bucket-mode and pre-2026-05-25 recordings these are server-side request times, not precise capture instants** — treat them as approximate (typically within a few seconds, but bounded only by upload latency). Only credit-mode recordings give true capture times.
+
+**Errors:**
+- `404` — Session not found
+- `429` — Rate limit exceeded
 
 ---
 
