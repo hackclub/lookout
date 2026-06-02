@@ -234,9 +234,14 @@ const { isSharing, startSharing, takeScreenshot, stopSharing } = useScreenCaptur
 
 ```ts
 interface CaptureResult {
-  blob: Blob;     // JPEG image blob
-  width: number;  // Pixel width
-  height: number; // Pixel height
+  blob: Blob;            // JPEG image blob
+  width: number;         // Pixel width
+  height: number;        // Pixel height
+  capturedAtMs?: number; // Client-clock ms when the frame was grabbed
+                         // (vs. when the upload eventually arrives).
+                         // Forwarded as `capturedAt` to opt into credit
+                         // mode; uploader falls back to Date.now() at
+                         // enqueue if missing.
 }
 ```
 
@@ -330,6 +335,7 @@ const session = useSession();
 | `resume` | `() => Promise<void>` | Resume the session |
 | `stop` | `(name?: string) => Promise<void>` | Stop the session. Optionally name the timelapse before stopping (non-fatal if rename fails). |
 | `reload` | `() => Promise<void>` | Re-fetch session from server |
+| `syncStatus` | `() => Promise<void>` | Best-effort fetch of latest server status (used when a 409 surfaces in the uploader to reconcile local state) |
 | `updateTrackedSeconds` | `(seconds: number) => void` | Update tracked seconds locally |
 | `setError` | `(error: string \| null) => void` | Set error state |
 

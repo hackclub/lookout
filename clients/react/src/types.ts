@@ -161,9 +161,17 @@ export interface LookoutState {
   isSharing: boolean;
   /** True when actively capturing (sharing + pending/active). Convenience for UI logic. */
   isRecording: boolean;
-  /** Best-known tracked seconds (max of server, upload confirms, and local estimate). */
+  /** Server-authoritative tracked seconds — max of session state and the
+   *  value returned by the last upload confirm. Bounded by what the
+   *  server has actually credited; never inflated by client-side
+   *  estimation. */
   trackedSeconds: number;
-  /** Client-interpolated display seconds (smooth ticking, monotonic). */
+  /** Client-interpolated display seconds. Ticks every second via RAF
+   *  using `trackedSeconds + min(60, elapsed_since_last_sync)`, so the
+   *  display can never overshoot the next credit by more than one
+   *  capture interval. Monotonic via baseRef ratchet. Snaps to the
+   *  server value on pause/stop so stop/compile reveals at most a 60s
+   *  drop, never the full session length. */
   displaySeconds: number;
   /** Number of confirmed screenshots. */
   screenshotCount: number;

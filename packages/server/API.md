@@ -26,14 +26,19 @@ In-memory sliding window (60-second windows). Rate-limited responses return:
 | Endpoint | Limit | Key |
 |----------|-------|-----|
 | `GET /api/sessions/:token` | 60 req/min | per token |
+| `PATCH /api/sessions/:token/name` | 20 req/min | per token |
 | `GET /api/sessions/:token/upload-url` | 10 req/min | per session ID |
 | `POST /api/sessions/:token/screenshots` | 20 req/min | per token |
 | `POST /api/sessions/:token/pause` | 10 req/min | per token |
 | `POST /api/sessions/:token/resume` | 10 req/min | per token |
 | `POST /api/sessions/:token/stop` | 10 req/min | per token |
+| `GET /api/sessions/:token/status` | 60 req/min | per token |
 | `GET /api/sessions/:token/video` | 30 req/min | per token |
 | `GET /api/sessions/:token/thumbnail` | 30 req/min | per token |
 | `POST /api/sessions/batch` | 30 req/min | per IP |
+| `GET /api/media/:sessionId/thumbnail.jpg` | 60 req/min | per session ID |
+| `GET /api/media/:sessionId/video.mp4` | 30 req/min | per session ID |
+| `GET /api/media/:sessionId/video.webm` | 30 req/min | per session ID |
 
 ---
 
@@ -135,6 +140,40 @@ Returns the current state of a session.
   "metadata": {}
 }
 ```
+
+---
+
+### Rename Session
+
+```
+PATCH /api/sessions/:token/name
+```
+
+Updates the session's display name. Allowed at any session status.
+
+**Path Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `token` | string | 64-char hex session token |
+
+**Request Body:**
+```json
+{ "name": "My new name" }
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `name` | string | yes | 1–255 chars |
+
+**Response `200 OK`:**
+```json
+{ "name": "My new name" }
+```
+
+**Errors:**
+- `400` — Body missing `name` or out of length range
+- `404` — Session not found
+- `429` — Rate limit exceeded
 
 ---
 
@@ -419,6 +458,24 @@ Returns a presigned URL for the session thumbnail.
 
 **Notes:**
 - Presigned URL expires after 1 hour
+
+---
+
+### Permanent Media Redirects
+
+Three endpoints serve **stable, shareable URLs** that 302-redirect to a short-lived presigned R2 URL. These take a public session ID (UUID) in the path rather than the secret token — safe to embed in `<img>`, `<video>`, or external services.
+
+```
+GET /api/media/:sessionId/thumbnail.jpg   →  302 to presigned JPEG URL (1h)
+GET /api/media/:sessionId/video.mp4       →  302 to presigned MP4 URL (1h)
+GET /api/media/:sessionId/video.webm      →  302 to the static "please update" video
+```
+
+- `Cache-Control: public, max-age=1800` on `thumbnail.jpg` and `video.mp4` (the *redirect itself* is cacheable for 30 min — the presigned URL it points at lives 1 hour).
+- `Cache-Control: public, max-age=86400` on `video.webm` — pre-0.2.0 binaries hit this; we tell them to update. WebM encoding was dropped in 0.2.0.
+- `video.mp4` returns 404 unless the session is `complete` with a stored video.
+- `thumbnail.jpg` returns 404 if no thumbnail has been compiled yet.
+- These are the URLs surfaced in `videoUrl` / `thumbnailUrl` / `videoWebmUrl` response fields elsewhere — never link to the presigned R2 URLs directly because they expire.
 
 ---
 
