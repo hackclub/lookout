@@ -174,6 +174,52 @@ The client should handle network failures gracefully:
 5. **Idempotent confirmation** — confirming an already-confirmed screenshot is a no-op, so retries on the confirm leg are safe.
 6. **Display the server's `trackedSeconds`, not a derived estimate** — do not compute display time from `uploads.completed * intervalSeconds` or similar. In credit mode, not every successful upload credits a minute (out-of-window captures return 200 but `credited_seconds = 0`). Display estimates derived from upload count over-count in those cases; previously this inflated displays by exactly 2× when total round-trip hit ~90s.
 
+### Second-level timer display
+
+The server only updates `trackedSeconds` once per credited capture (~once a minute). For a smoothly-ticking UI, interpolate **locally** between server updates — but cap the interpolation at one capture interval so the display can never overshoot the next credit. This is the same shape `useSessionTimer` ships in the React SDK and the Rust tray ticker uses on desktop.
+
+```ts
+const INTERVAL_S = 60; // SCREENSHOT_INTERVAL_MS / 1000 — the cap
+
+let baseSeconds = 0;        // last server-credited value
+let lastSyncMs = Date.now(); // when we received it
+
+// Call this from each confirm response and from the periodic
+// GET /api/sessions/:token status poll.
+function onServerTrackedSeconds(serverTracked: number) {
+  // Ratchet forward — never let a stale-read response (e.g. an
+  // idempotent retry returning a cached older value) drag the timer back.
+  if (serverTracked > baseSeconds) {
+    baseSeconds = serverTracked;
+    lastSyncMs = Date.now();
+  }
+}
+
+function getDisplaySeconds(): number {
+  const elapsedS = Math.floor((Date.now() - lastSyncMs) / 1000);
+  // Cap at one interval. If captures stall, the display freezes at
+  // base + 60 instead of running unbounded. When the next credit
+  // lands it equals the frozen value — no visible jump.
+  return baseSeconds + Math.min(INTERVAL_S, elapsedS);
+}
+
+// Tick the UI once per second while recording.
+const tickId = setInterval(() => {
+  ui.timer.textContent = formatTime(getDisplaySeconds());
+}, 1000);
+
+// On pause/stop/compile: stop ticking and snap to the server value.
+// Worst-case drop the user sees is one interval, never the full session.
+function onSessionInactive() {
+  clearInterval(tickId);
+  ui.timer.textContent = formatTime(baseSeconds);
+}
+```
+
+**Why the cap matters:** without it, the display runs at wall-clock rate forever and reveals the true (smaller) `trackedSeconds` only when the user clicks Stop. Users have reported this as "timer ran to 20 min, then dropped to 5 min on compile." With the 60s cap, the maximum visible drop is one capture interval.
+
+**On stop:** read `trackedSeconds` from the `/stop` response and assign it to `baseSeconds` so the final display matches the server's committed value exactly.
+
 ### Session recovery after page refresh
 
 On page load, read the token from the URL and call `GET /api/sessions/:token`:
