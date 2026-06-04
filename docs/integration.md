@@ -419,3 +419,34 @@ It's best-effort: a client omits anything it can't detect, the server truncates 
 | Time tracking | No — credit-mode sessions credit 60s per capture landing within ±30s of the server's streak anchor; bucket-mode is distinct minute buckets × 60. Mode is sticky per session and decided by the first upload. | Server-side anchor + window math; clients can't fake credits |
 | Pause/resume | Partially trusted | Server auto-pauses after 10 min without uploads, auto-stops after 24 h |
 | Rate limiting | Server-enforced | Max 10 upload-url + 20 confirm requests per minute per session, max 720 confirmed screenshots, max 4320 total upload-url requests per session |
+
+## API Reference
+
+This guide covers the **integration flow and client responsibilities**. For the complete HTTP API — every endpoint, request/response shape, query param, error code, and rate limit — see the server package's reference, which is the source of truth:
+
+**→ [`packages/server/API.md`](../packages/server/API.md)**
+
+## Requirements for all clients
+
+Now that you've seen the full flow: whatever you build or embed — the desktop app, the web recorder, the React SDK, or your own client — it **must** follow these. They are not optional polish; skipping them is the difference between "it works" and silent, unexplained failures that are miserable to debug.
+
+1. **Never fail silently — surface every error and warning.** If getting an upload URL, the R2 PUT, or the confirm fails, either show it to the user **or** log it with enough detail to diagnose: the HTTP status, the endpoint, and the response body. The single worst outcome is a user watching a recording that isn't actually capturing while **nothing reports an error**. A stalled capture loop must be a loud, visible problem — not a quiet one people only discover when the timelapse comes out empty. **The session token is a secret credential** — it grants full control of the session, so never log it in full or expose it in user-facing errors; log a session ID or a truncated/redacted token instead.
+
+2. **Use credit mode — do not use bucket mode.** Send `capturedAt` (ISO-8601, stamped at the instant the frame is grabbed) on **every** `upload-url` request. Its presence on a session's first upload sticks it into **credit mode** for life; its absence drops the session into legacy **bucket mode**, which miscounts time whenever two captures land in the same minute (jitter, retries, late uploads). Bucket mode exists only for compatibility with old shipped binaries — new clients must not rely on it. See [Tracking Modes](../packages/server/API.md#tracking-modes).
+
+3. **Retry every network leg, with reasonable backoff.** Each of the three legs (get upload URL, R2 PUT, confirm) should retry on transient failure with exponential backoff (e.g. 2s → 4s → 8s, ~3 attempts). Treat `409` (session paused/stopped) as terminal, not retriable. Confirmation is idempotent, so retrying it is safe. Don't hammer on failure, and don't give up after one try. See [Upload resilience](#upload-resilience).
+
+4. **Use the batch API when reading multiple sessions.** For gallery/dashboard views, fetch with a single `POST /api/sessions/batch` (up to 100 tokens) instead of N separate `GET /api/sessions/:token` calls — fewer round trips and one shared rate-limit bucket.
+
+5. **Keep the client clock accurate.** `capturedAt` must be within **±5 minutes of server time and strictly monotonic** across uploads, or the server rejects it with a `400` (`captured_at_future`, `captured_at_too_old`, `captured_at_not_monotonic`, …). A skewed device clock silently breaks credit-mode tracking. Every `upload-url`/confirm response carries `serverTime` — use it to detect skew, and schedule the next capture from `nextExpectedAt` (never a fixed `setInterval`).
+
+6. **Honor `429` and the `Retry-After` header.** Endpoints are rate-limited (upload-url 10/min, confirm 20/min, etc.) and a throttled response sets `Retry-After: <seconds>`. Back off for exactly that long rather than retrying blindly — blind retries dig you deeper into the limit. See [Rate Limiting](../packages/server/API.md#rate-limiting).
+
+7. **Expect the server to pause/stop sessions on its own.** A session with no uploads is **auto-paused after 10 minutes** and **auto-stopped after 24 hours**. So "captures stopped" can be the server's doing, not a bug in your client — poll `GET /api/sessions/:token` and reconcile when the session changed state underneath you (see [Session recovery](#session-recovery-after-page-refresh)).
+
+### Good to know
+
+- **Sessions have a hard ceiling.** Max **720 confirmed screenshots** (~12 h at 60 s) and **4320** upload-url requests per session; screenshots must be **`image/jpeg` ≤ 2 MB**. Past these, requests return `429`/`400` — long recorders should expect the session to end.
+- **Embed the permanent media URLs, never the presigned R2 URLs.** Use `GET /api/media/:sessionId/video.mp4` and `…/thumbnail.jpg` (stable, safe in `<img>`/`<video>`). Presigned R2 URLs expire (2 min upload, 1 h media). See [Permanent Media Redirects](../packages/server/API.md#permanent-media-redirects).
+- **CORS is allowlisted** to `*.hackclub.com`, `localhost:*`, and `tauri://`. A web client served from any other origin will be blocked — host apps embedding the recorder need to be on an allowed origin.
+- **Report `clientInfo` telemetry** so a broken integration isn't blind to debug. See [Client telemetry](#client-telemetry).

@@ -766,7 +766,7 @@ The server uses **PG Boss** for background job processing.
 | Job | Schedule | Description |
 |-----|----------|-------------|
 | `compile-timelapse` | On demand | Compiles screenshots into an H.264 MP4 timelapse. Retries 3x with backoff. |
-| `check-timeouts` | Every 1 min | Auto-pauses sessions idle >5 min, auto-stops sessions idle >30 min, resets stuck compilations >60 min. |
+| `check-timeouts` | Every 1 min | Auto-pauses sessions idle >10 min, auto-stops sessions idle >24 h, resets stuck compilations >60 min. |
 | `cleanup-unconfirmed` | Every 5 min | Deletes unconfirmed screenshot records older than 10 minutes. |
 
 ---
