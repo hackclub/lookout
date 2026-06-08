@@ -42,6 +42,8 @@ export async function internalRoutes(app: FastifyInstance) {
         .values({
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
+          // Attribution: tag with the creating program (null for global key).
+          program: request.program ?? null,
         })
         .returning();
 

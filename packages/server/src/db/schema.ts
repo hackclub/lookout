@@ -41,6 +41,10 @@ export const sessions = pgTable(
           `untitled-${new Date().toISOString().slice(0, 10)}`,
       ),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+    // Name of the program (api_keys.name) whose key created this session.
+    // Attribution/tracking only — NOT access control. NULL when the session
+    // was created with the global key or a legacy caller.
+    program: text("program"),
     status: sessionStatusEnum("status").notNull().default("pending"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
@@ -135,3 +139,21 @@ export const screenshots = pgTable(
     ),
   ],
 );
+
+// Per-program API keys. Each row is one program's credential, granting the
+// same access as the global key; the only difference is that sessions created
+// with a program key are tagged with `name` (see sessions.program). Keys are
+// stored in plaintext — this data isn't highly sensitive and the admin
+// dashboard displays/copies them on demand.
+export const apiKeys = pgTable("api_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  key: text("key")
+    .notNull()
+    .unique()
+    .$defaultFn(() => `lk_${randomHex(24)}`),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});

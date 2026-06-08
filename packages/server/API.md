@@ -11,7 +11,20 @@
 Public endpoints use a 64-character hex **session token** as a path parameter. No header-based auth required.
 
 ### Internal Routes (API Key)
-Internal endpoints require the `X-API-Key` header matching the `INTERNAL_API_KEY` environment variable. Uses constant-time comparison.
+Internal endpoints require the `X-API-Key` header. Two kinds of key are accepted, both granting identical access:
+
+- **Global key** — the `GLOBAL_API_KEY` environment variable (formerly `INTERNAL_API_KEY`, which is still accepted as a fallback). Compared in constant time. Sessions it creates are **not** tagged with a program.
+- **Program keys** — per-program keys managed in the admin dashboard. Sessions created with a program key are tagged with that program's name (`session.program`), for attribution/tracking only.
+
+### Admin Dashboard (`/admin`)
+A minimal HTTP Basic Auth dashboard for CRUD over program keys, gated by `ADMIN_USERNAME` / `ADMIN_PASSWORD`. If either is unset, all admin routes return `503 { "error": "admin disabled" }`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/admin` | HTML dashboard |
+| `GET` | `/api/admin/keys` | List keys `{ id, name, key, lastUsedAt, createdAt }` |
+| `POST` | `/api/admin/keys` | Create a program key `{ name }` → `{ id, name, key }` (409 on duplicate name) |
+| `DELETE` | `/api/admin/keys/:id` | Delete a key (404 if missing) |
 
 ---
 
@@ -790,7 +803,9 @@ The server uses **PG Boss** for background job processing.
 |---------------------|---------|-------------|
 | `PORT` | 3000 | Server port |
 | `DATABASE_URL` | — | PostgreSQL connection string |
-| `INTERNAL_API_KEY` | — | API key for internal endpoints |
+| `GLOBAL_API_KEY` | — | Global API key for internal endpoints (falls back to legacy `INTERNAL_API_KEY`) |
+| `ADMIN_USERNAME` | — | Basic-auth username for the `/admin` dashboard (admin disabled if unset) |
+| `ADMIN_PASSWORD` | — | Basic-auth password for the `/admin` dashboard (admin disabled if unset) |
 | `BASE_URL` | `http://localhost:3000` | Base URL for generated links |
 | `R2_ACCOUNT_ID` | — | Cloudflare R2 account ID |
 | `R2_ACCESS_KEY_ID` | — | R2 access key |

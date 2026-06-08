@@ -71,6 +71,13 @@
       "when": 1780431577703,
       "tag": "0009_screenshot_client_info",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780951754822,
+      "tag": "0010_mighty_gressill",
+      "breakpoints": true
     }
   ]
 }

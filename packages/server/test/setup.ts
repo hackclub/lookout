@@ -22,8 +22,10 @@ process.env.R2_SECRET_ACCESS_KEY =
   process.env.R2_SECRET_ACCESS_KEY ?? "test-secret";
 process.env.R2_BUCKET_NAME = process.env.R2_BUCKET_NAME ?? "test-bucket";
 process.env.BASE_URL = process.env.BASE_URL ?? "http://localhost:3000";
-process.env.INTERNAL_API_KEY =
-  process.env.INTERNAL_API_KEY ?? "test-internal-key";
+process.env.GLOBAL_API_KEY =
+  process.env.GLOBAL_API_KEY ?? "test-global-key";
+process.env.ADMIN_USERNAME = process.env.ADMIN_USERNAME ?? "admin";
+process.env.ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "admin-secret";
 
 // AWS S3 / R2 — make every HEAD / PUT succeed silently. The integration
 // tests don't care about R2; they care about session + screenshot state.

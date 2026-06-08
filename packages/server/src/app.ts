@@ -2,6 +2,7 @@ import Fastify, { FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import { sessionRoutes } from "./routes/sessions.js";
 import { internalRoutes } from "./routes/internal.js";
+import { adminRoutes } from "./routes/admin.js";
 
 /**
  * Build a Fastify instance with our routes registered. Used by:
@@ -20,6 +21,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, { origin: true });
   await app.register(internalRoutes);
   await app.register(sessionRoutes);
+  await app.register(adminRoutes);
 
   return app;
 }

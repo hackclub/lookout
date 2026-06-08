@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { internalRoutes } from "./routes/internal.js";
 import { sessionRoutes } from "./routes/sessions.js";
+import { adminRoutes } from "./routes/admin.js";
 import { boss } from "./lib/queue.js";
 import { registerTimeoutJobs } from "./lib/timeouts.js";
 
@@ -72,6 +73,7 @@ app.addHook("onSend", async (_request, reply) => {
 // Register API routes
 await app.register(internalRoutes);
 await app.register(sessionRoutes);
+await app.register(adminRoutes);
 
 // Serve React SPA in production
 const publicDir = join(__dirname, "..", "public");
