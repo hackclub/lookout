@@ -1,6 +1,6 @@
 /**
  * Integration tests for program-based API keys and the admin dashboard.
- * Covers: global-key backward compat, program-key auth + session tagging,
+ * Covers: program-key auth + session tagging, rejection of unknown keys,
  * admin basic-auth gating, and key CRUD. Drives buildApp() via app.inject;
  * requires the docker test postgres on port 5434 (see test/setup.ts).
  */
@@ -12,7 +12,6 @@ import { db } from "../src/db/index.js";
 
 let app: FastifyInstance;
 
-const GLOBAL_KEY = process.env.GLOBAL_API_KEY!; // "test-global-key" (setup.ts)
 const ADMIN_AUTH =
   "Basic " +
   Buffer.from(
@@ -53,19 +52,6 @@ async function createKey(name: string): Promise<string> {
 }
 
 describe("internal auth", () => {
-  it("global key authorizes and tags no program", async () => {
-    const r = await createSession(GLOBAL_KEY);
-    expect(r.statusCode).toBe(201);
-    const sessionId = r.json().sessionId;
-
-    const detail = await app.inject({
-      method: "GET",
-      url: `/api/internal/sessions/${sessionId}`,
-      headers: { "x-api-key": GLOBAL_KEY },
-    });
-    expect(detail.json().session.program).toBeNull();
-  });
-
   it("rejects a missing or invalid key with 401", async () => {
     expect((await createSession()).statusCode).toBe(401);
     expect((await createSession("nope")).statusCode).toBe(401);
@@ -80,7 +66,7 @@ describe("internal auth", () => {
     const detail = await app.inject({
       method: "GET",
       url: `/api/internal/sessions/${sessionId}`,
-      headers: { "x-api-key": GLOBAL_KEY },
+      headers: { "x-api-key": key },
     });
     expect(detail.json().session.program).toBe("arcade");
   });

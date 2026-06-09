@@ -11,10 +11,7 @@
 Public endpoints use a 64-character hex **session token** as a path parameter. No header-based auth required.
 
 ### Internal Routes (API Key)
-Internal endpoints require the `X-API-Key` header. Two kinds of key are accepted, both granting identical access:
-
-- **Global key** — the `GLOBAL_API_KEY` environment variable (formerly `INTERNAL_API_KEY`, which is still accepted as a fallback). Compared in constant time. Sessions it creates are **not** tagged with a program.
-- **Program keys** — per-program keys managed in the admin dashboard. Sessions created with a program key are tagged with that program's name (`session.program`), for attribution/tracking only.
+Internal endpoints require the `X-API-Key` header carrying a **per-program key** managed in the admin dashboard. Sessions created with a program key are tagged with that program's name (`session.program`), for attribution/tracking only — all keys grant identical access. There is no global/shared key (the legacy `INTERNAL_API_KEY` / `GLOBAL_API_KEY` has been retired); an unrecognized key is rejected with `401`.
 
 ### Admin Dashboard (`/admin`)
 A minimal HTTP Basic Auth dashboard for CRUD over program keys, gated by `ADMIN_USERNAME` / `ADMIN_PASSWORD`. If either is unset, all admin routes return `503 { "error": "admin disabled" }`.
@@ -803,7 +800,6 @@ The server uses **PG Boss** for background job processing.
 |---------------------|---------|-------------|
 | `PORT` | 3000 | Server port |
 | `DATABASE_URL` | — | PostgreSQL connection string |
-| `GLOBAL_API_KEY` | — | Global API key for internal endpoints (falls back to legacy `INTERNAL_API_KEY`) |
 | `ADMIN_USERNAME` | — | Basic-auth username for the `/admin` dashboard (admin disabled if unset) |
 | `ADMIN_PASSWORD` | — | Basic-auth password for the `/admin` dashboard (admin disabled if unset) |
 | `BASE_URL` | `http://localhost:3000` | Base URL for generated links |

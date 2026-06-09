@@ -48,7 +48,6 @@ jobs:
       R2_ACCESS_KEY_ID: test-key
       R2_SECRET_ACCESS_KEY: test-secret
       R2_BUCKET_NAME: test-bucket
-      GLOBAL_API_KEY: test-global-key
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: admin-secret
       # Subprocess test that spawns `cargo test --test legacy_client` against
