@@ -59,18 +59,28 @@ export function useGallery({ apiBaseUrl, tokens }: UseGalleryOptions): UseGaller
       setLoading(true);
     }
 
-    fetch(`${apiBaseUrl}/api/sessions/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tokens: validTokens }),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status} ${res.statusText}\n${text.slice(0, 500)}`);
-        }
-        return res.json();
-      })
+    const BATCH_SIZE = 100;
+    const chunks: string[][] = [];
+    for (let i = 0; i < validTokens.length; i += BATCH_SIZE) {
+      chunks.push(validTokens.slice(i, i + BATCH_SIZE));
+    }
+
+    Promise.all(
+      chunks.map((chunk) =>
+        fetch(`${apiBaseUrl}/api/sessions/batch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tokens: chunk }),
+        }).then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`HTTP ${res.status} ${res.statusText}\n${text.slice(0, 500)}`);
+          }
+          return res.json() as Promise<{ sessions: SessionSummary[] }>;
+        })
+      )
+    )
+      .then((results) => ({ sessions: results.flatMap((r) => r.sessions ?? []) }))
       .then((data: { sessions: SessionSummary[] }) => {
         if (!cancelled) {
           const now = Date.now();
