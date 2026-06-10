@@ -6,7 +6,7 @@ opt-level = 1
 
 [package]
 name = "lookout-desktop"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 
 [lib]
