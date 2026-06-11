@@ -9,6 +9,7 @@ if (!DATABASE_URL) {
 
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
+  max: 10,
 });
 
 export const db = drizzle(pool, { schema });

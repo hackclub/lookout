@@ -7,6 +7,7 @@ if (!DATABASE_URL) {
 
 export const boss = new PgBoss({
   connectionString: DATABASE_URL,
+  max: 5,
   retryLimit: 3,
   retryDelay: 60,
   retryBackoff: true,

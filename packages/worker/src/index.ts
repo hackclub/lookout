@@ -22,11 +22,15 @@ if (!DATABASE_URL) {
 const COMPILE_JOB = "compile-timelapse";
 const RETRY_LIMIT = 3;
 
-const pool = new pg.Pool({ connectionString: DATABASE_URL });
+// Pools are sized for horizontal scaling: each replica opens this Drizzle pool
+// AND pg-boss's own pool. Keep (replicas × (5 + 5)) + server well under
+// Postgres max_connections (100). See queue.ts / server db for the budget.
+const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 5 });
 const db = drizzle(pool, { schema });
 
 const boss = new PgBoss({
   connectionString: DATABASE_URL,
+  max: 5,
 });
 
 await boss.start();
@@ -67,20 +71,61 @@ await boss.work<{ sessionId: string }>(
   },
 );
 
-// Uptime ping — runs as a scheduled pgBoss job so it also validates the job system is healthy
-const UPTIME_PING_JOB = "uptime-ping";
-const uptimePushUrl = process.env.UPTIME_PUSH_URL;
-if (uptimePushUrl) {
-  await boss.createQueue(UPTIME_PING_JOB);
-  await boss.schedule(UPTIME_PING_JOB, "* * * * *");
-  await boss.work(UPTIME_PING_JOB, async () => {
-    await fetch(uptimePushUrl);
-  });
+// Heartbeat — each replica enqueues its OWN heartbeat through pg-boss on a local
+// timer, and whichever worker dequeues it pings the URL carried in the payload.
+// Routing through the queue makes one mechanism verify two things, using only the
+// per-replica URLs (UPTIME_PUSH_URL is distinct per replica):
+//   - This replica is alive   → it stops enqueuing when down, so ITS URL goes stale.
+//   - pg-boss is processing    → if jobs enqueue but never run, ALL URLs go stale.
+// Monitor read: one URL stale = that replica; all URLs stale = pg-boss/DB down.
+// (The tick is a local interval, not a pg-boss cron, because cron is global — one
+// job per tick claimed by one worker — and so can't drive 3 per-replica URLs.)
+const HEARTBEAT_QUEUE = "heartbeat";
+const HEARTBEAT_INTERVAL_MS = 60_000;
+const heartbeatUrl = process.env.UPTIME_PUSH_URL;
+
+await boss.createQueue(HEARTBEAT_QUEUE);
+await boss.work<{ url: string }>(HEARTBEAT_QUEUE, async (jobs) => {
+  for (const job of jobs) {
+    try {
+      const res = await fetch(job.data.url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.warn(`Heartbeat ping to ${job.data.url} returned ${res.status}`);
+      }
+    } catch (err) {
+      // Swallow rather than throw: a failed ping must NOT be retried, or pg-boss
+      // would later fire a stale, backdated heartbeat. The next 60s tick is the
+      // correct signal — let this one die.
+      console.warn(`Heartbeat ping failed for ${job.data.url}:`, err);
+    }
+  }
+});
+
+let heartbeatTimer: NodeJS.Timeout | undefined;
+if (heartbeatUrl) {
+  heartbeatTimer = setInterval(() => {
+    boss
+      // expireInSeconds < interval: an unprocessed heartbeat is dropped before the
+      // next one, so a recovered queue never replays a burst of backdated pings.
+      // retryLimit 0: same reasoning — never retry a now-stale tick.
+      // retentionMinutes: heartbeats are high-frequency and disposable; don't bloat.
+      .send(
+        HEARTBEAT_QUEUE,
+        { url: heartbeatUrl },
+        { expireInSeconds: 50, retryLimit: 0, retentionMinutes: 10 },
+      )
+      .catch((err) => console.error("Failed to enqueue heartbeat:", err));
+  }, HEARTBEAT_INTERVAL_MS);
+} else {
+  console.warn("UPTIME_PUSH_URL not set — this replica will not emit a heartbeat");
 }
 
 // Graceful shutdown
 const shutdown = async () => {
   console.log("Worker shutting down...");
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   await boss.stop();
   process.exit(0);
 };
