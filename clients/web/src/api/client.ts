@@ -35,7 +35,16 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   if (init?.body) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(url, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers });
+  } catch (err) {
+    // Network-level failure (DNS, connection refused, CORS, SSL). The raw
+    // browser message is uselessly vague ("Load failed" on WebKit,
+    // "Failed to fetch" on Chrome) — add the URL so it's debuggable.
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Network error fetching ${url}: ${msg}`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let detail = "";

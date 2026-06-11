@@ -823,6 +823,87 @@ fn client_info() -> &'static str {
     })
 }
 
+/// reqwest's `Display` is generic boilerplate ("error sending request for
+/// url (...)") that gives zero debugging signal. The real reason — DNS
+/// failure, connection refused, TLS handshake error, timeout, or an HTTP
+/// status — is either in the `source()` chain or in `.status()`. Skip the
+/// boilerplate and return just the signal: an HTTP code, or a short
+/// category plus the innermost cause (e.g. "connection failed: Connection
+/// refused (os error 61)").
+///
+/// This runs on the error path, so it must never make things worse: the
+/// extraction is best-effort, and we always fall back to the raw error
+/// string (never an empty or missing message) if it yields nothing useful.
+fn describe_reqwest_error(err: &reqwest::Error) -> String {
+    let signal = extract_reqwest_signal(err);
+    if !signal.trim().is_empty() {
+        return signal;
+    }
+    // Fallback: report the raw error, never nothing.
+    let raw = err.to_string();
+    if raw.trim().is_empty() {
+        "unknown request error".to_string()
+    } else {
+        raw
+    }
+}
+
+/// Compact, consistent message for an HTTP error response: the step that
+/// failed, the status code (+ reason phrase, which `StatusCode` Displays),
+/// and the response body when there is one. No filler.
+fn http_error(step: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        format!("{step} HTTP {status}")
+    } else {
+        format!("{step} HTTP {status}: {body}")
+    }
+}
+
+/// Best-effort signal extraction for [`describe_reqwest_error`]. Returns an
+/// empty string when nothing better than the raw boilerplate is available,
+/// signalling the caller to fall back. Pure string work — never panics.
+fn extract_reqwest_signal(err: &reqwest::Error) -> String {
+    use std::error::Error;
+    // Walk to the innermost cause — the most specific reason (OS error,
+    // TLS detail, etc.).
+    let mut deepest: Option<String> = None;
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let s = cause.to_string();
+        if !s.trim().is_empty() {
+            deepest = Some(s);
+        }
+        source = cause.source();
+    }
+    // Status-class error (from `error_for_status`): the code is the signal.
+    if let Some(status) = err.status() {
+        return match deepest {
+            Some(d) => format!("HTTP {}: {d}", status.as_u16()),
+            None => format!("HTTP {}", status.as_u16()),
+        };
+    }
+    let (kind, known) = if err.is_timeout() {
+        ("timed out", true)
+    } else if err.is_connect() {
+        ("connection failed", true)
+    } else if err.is_decode() {
+        ("malformed response", true)
+    } else if err.is_body() {
+        ("request body error", true)
+    } else {
+        ("request failed", false)
+    };
+    match deepest {
+        Some(detail) => format!("{kind}: {detail}"),
+        // A known category with no cause chain (e.g. a bare timeout) stands
+        // on its own. Otherwise return empty so the caller falls back to the
+        // raw error rather than the vague "request failed".
+        None if known => kind.to_string(),
+        None => String::new(),
+    }
+}
+
 /// Shared upload-and-confirm pipeline: get presigned URL, PUT to R2, POST
 /// confirmation. Used by both `capture_and_upload` (screen/window) and
 /// `upload_frame` (camera).
@@ -864,18 +945,16 @@ async fn upload_and_confirm(
         .query(&query)
         .send()
         .await
-        .map_err(|e| format!("Failed to get upload URL: {e}"))?;
+        .map_err(|e| format!("upload-url: {}", describe_reqwest_error(&e)))?;
     let url_status = url_response.status();
     if !url_status.is_success() {
         let body = url_response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Server rejected upload-url request (HTTP {url_status}): {body}"
-        ));
+        return Err(http_error("upload-url", url_status, &body));
     }
     let upload_url_resp: UploadUrlResponse = url_response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse upload URL response: {e}"))?;
+        .map_err(|e| format!("upload-url: {}", describe_reqwest_error(&e)))?;
     let _ = app.emit(
         "capture-progress",
         format!(
@@ -895,9 +974,9 @@ async fn upload_and_confirm(
         .body(jpeg_bytes)
         .send()
         .await
-        .map_err(|e| format!("R2 upload failed: {e}"))?
+        .map_err(|e| format!("r2-upload: {}", describe_reqwest_error(&e)))?
         .error_for_status()
-        .map_err(|e| format!("R2 upload rejected: {e}"))?;
+        .map_err(|e| format!("r2-upload: {}", describe_reqwest_error(&e)))?;
     let _ = app.emit("capture-progress", "uploaded to R2 successfully");
 
     // Step 3: Confirm upload with server
@@ -915,18 +994,16 @@ async fn upload_and_confirm(
         }))
         .send()
         .await
-        .map_err(|e| format!("Confirmation failed: {e}"))?;
+        .map_err(|e| format!("confirm: {}", describe_reqwest_error(&e)))?;
     let confirm_status = confirm_response.status();
     if !confirm_status.is_success() {
         let body = confirm_response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Server rejected confirmation (HTTP {confirm_status}): {body}"
-        ));
+        return Err(http_error("confirm", confirm_status, &body));
     }
     let confirm_resp: ConfirmResponse = confirm_response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse confirmation: {e}"))?;
+        .map_err(|e| format!("confirm: {}", describe_reqwest_error(&e)))?;
     let _ = app.emit(
         "capture-progress",
         format!(
