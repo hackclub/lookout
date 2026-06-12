@@ -95,6 +95,13 @@ export async function adminRoutes(app: FastifyInstance) {
     // sessions.program = api_keys.name; NULL-program rows (global/legacy key)
     // aren't shown. count(*) returns bigint, so cast the scalars to a JS number.
     const status = schema.sessions.status;
+    // The DB lumps two very different outcomes under 'failed': real compile
+    // failures (the session had screenshots but compilation gave up) and
+    // sessions that never captured a single confirmed screenshot, so there was
+    // nothing to compile. Split them in the admin stats only — a 'failed' row
+    // with no confirmed screenshots is reported as "empty". The persisted
+    // session status is untouched; this is purely a reporting distinction.
+    const hasConfirmedShot = sql`exists (select 1 from ${schema.screenshots} where ${schema.screenshots.sessionId} = ${schema.sessions.id} and ${schema.screenshots.confirmed})`;
     const aggCols = {
       sessionCount: sql<number>`count(*)::int`,
       trackedSeconds: sql<number>`coalesce(sum(coalesce(${schema.sessions.trackedSeconds}, ${schema.sessions.totalActiveSeconds})), 0)::float8`,
@@ -104,7 +111,8 @@ export async function adminRoutes(app: FastifyInstance) {
       stopped: sql<number>`(count(*) filter (where ${status} = 'stopped'))::int`,
       compiling: sql<number>`(count(*) filter (where ${status} = 'compiling'))::int`,
       complete: sql<number>`(count(*) filter (where ${status} = 'complete'))::int`,
-      failed: sql<number>`(count(*) filter (where ${status} = 'failed'))::int`,
+      empty: sql<number>`(count(*) filter (where ${status} = 'failed' and not ${hasConfirmedShot}))::int`,
+      failed: sql<number>`(count(*) filter (where ${status} = 'failed' and ${hasConfirmedShot}))::int`,
     };
     const statsRows = await db
       .select({ program: schema.sessions.program, ...aggCols })
@@ -130,6 +138,7 @@ export async function adminRoutes(app: FastifyInstance) {
           stopped: s?.stopped ?? 0,
           compiling: s?.compiling ?? 0,
           complete: s?.complete ?? 0,
+          empty: s?.empty ?? 0,
           failed: s?.failed ?? 0,
         },
       };
@@ -147,6 +156,7 @@ export async function adminRoutes(app: FastifyInstance) {
           stopped: totals?.stopped ?? 0,
           compiling: totals?.compiling ?? 0,
           complete: totals?.complete ?? 0,
+          empty: totals?.empty ?? 0,
           failed: totals?.failed ?? 0,
         },
       },

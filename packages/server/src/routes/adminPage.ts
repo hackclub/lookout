@@ -89,6 +89,7 @@ var STATUS_META = [
   ["stopped", "#64748b"],
   ["compiling", "#7c3aed"],
   ["complete", "#16a34a"],
+  ["empty", "#a8a29e"],
   ["failed", "#dc2626"],
 ];
 

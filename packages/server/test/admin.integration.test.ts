@@ -139,15 +139,40 @@ describe("admin dashboard", () => {
     await createKey("arcade");
     await createKey("blog");
 
-    // arcade: 2 complete (3600s + null→fall back to active 1800s), 1 failed.
-    // blog: 1 active. One NULL-program session (global key) counts only in totals.
-    await db.insert(schema.sessions).values([
-      { program: "arcade", status: "complete", trackedSeconds: 3600 },
-      { program: "arcade", status: "complete", totalActiveSeconds: 1800 },
-      { program: "arcade", status: "failed", trackedSeconds: 600 },
-      { program: "blog", status: "active", trackedSeconds: 120 },
-      { program: null, status: "complete", trackedSeconds: 7200 },
-    ]);
+    // arcade: 2 complete (3600s + null→fall back to active 1800s), plus two
+    // 'failed' rows that the admin stats split apart — one with no confirmed
+    // screenshots (reported as "empty") and one with a confirmed screenshot
+    // (a real "failed"). blog: 1 active. One NULL-program session (global key)
+    // counts only in totals.
+    const inserted = await db
+      .insert(schema.sessions)
+      .values([
+        { program: "arcade", status: "complete", trackedSeconds: 3600 },
+        { program: "arcade", status: "complete", totalActiveSeconds: 1800 },
+        { program: "arcade", status: "failed", trackedSeconds: 600 },
+        { program: "arcade", status: "failed", trackedSeconds: 300 },
+        { program: "blog", status: "active", trackedSeconds: 120 },
+        { program: null, status: "complete", trackedSeconds: 7200 },
+      ])
+      .returning({
+        id: schema.sessions.id,
+        program: schema.sessions.program,
+        status: schema.sessions.status,
+        trackedSeconds: schema.sessions.trackedSeconds,
+      });
+
+    // Give the 300s arcade 'failed' session a confirmed screenshot so it counts
+    // as a real failure; the 600s one stays screenshot-less → "empty".
+    const realFailed = inserted.find(
+      (s) => s.program === "arcade" && s.status === "failed" && s.trackedSeconds === 300,
+    );
+    await db.insert(schema.screenshots).values({
+      sessionId: realFailed!.id,
+      r2Key: "test/shot.jpg",
+      requestedAt: new Date(),
+      minuteBucket: 0,
+      confirmed: true,
+    });
 
     const res = await app.inject({
       method: "GET",
@@ -157,19 +182,25 @@ describe("admin dashboard", () => {
     const body = res.json();
 
     const arcade = body.keys.find((k: any) => k.name === "arcade");
-    expect(arcade.sessionCount).toBe(3);
-    expect(arcade.trackedSeconds).toBe(3600 + 1800 + 600);
-    expect(arcade.statusCounts).toMatchObject({ complete: 2, failed: 1, active: 0 });
+    expect(arcade.sessionCount).toBe(4);
+    expect(arcade.trackedSeconds).toBe(3600 + 1800 + 600 + 300);
+    expect(arcade.statusCounts).toMatchObject({
+      complete: 2,
+      empty: 1,
+      failed: 1,
+      active: 0,
+    });
 
     const blog = body.keys.find((k: any) => k.name === "blog");
     expect(blog.sessionCount).toBe(1);
     expect(blog.statusCounts.active).toBe(1);
 
     // Totals span every session, including the NULL-program one.
-    expect(body.totals.sessionCount).toBe(5);
-    expect(body.totals.trackedSeconds).toBe(3600 + 1800 + 600 + 120 + 7200);
+    expect(body.totals.sessionCount).toBe(6);
+    expect(body.totals.trackedSeconds).toBe(3600 + 1800 + 600 + 300 + 120 + 7200);
     expect(body.totals.statusCounts).toMatchObject({
       complete: 3,
+      empty: 1,
       failed: 1,
       active: 1,
     });
