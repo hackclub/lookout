@@ -39,6 +39,20 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
     background: #8881; padding: .15rem .4rem; border-radius: 4px;
   }
   .muted { opacity: .55; font-size: .85rem; }
+  .num { font-variant-numeric: tabular-nums; }
+  .stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+    background: #8882; border: 1px solid #8882; border-radius: 8px;
+    overflow: hidden; margin-bottom: 1.5rem;
+  }
+  .stat { background: Canvas; padding: .9rem 1.1rem; }
+  .stat .label { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .55; }
+  .stat .value { font-size: 1.5rem; font-weight: 600; margin-top: .2rem; font-variant-numeric: tabular-nums; }
+  .stat .value.prog { font-size: 1.3rem; }
+  .prog { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  .prog .sep, .legend .sep { opacity: .3; margin: 0 1px; font-weight: 400; }
+  .legend { font-size: .8rem; margin-bottom: 1.25rem; }
+  .legend .sep { margin: 0 4px; }
   .row-actions { display: flex; gap: .4rem; justify-content: flex-end; }
   #msg { margin-bottom: 1rem; min-height: 1.2rem; color: #16a34a; }
   #msg.error { color: #dc2626; }
@@ -48,14 +62,16 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
 <body>
   <h1>Lookout — Program API Keys</h1>
   <div id="msg"></div>
+  <div id="stats" class="stats"></div>
   <form id="create-form">
     <input type="text" id="name" placeholder="Program name (e.g. arcade)" required
            autocomplete="off" maxlength="255" />
     <button type="submit">Create key</button>
   </form>
+  <div id="legend" class="legend"></div>
   <table>
     <thead>
-      <tr><th>Program</th><th>Key</th><th>Last used</th><th>Created</th><th></th></tr>
+      <tr><th>Program</th><th>Key</th><th>Sessions</th><th>Hours</th><th>Progress</th><th>Last used</th><th>Created</th><th></th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
@@ -63,6 +79,24 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
 <script>
 var rows = document.getElementById("rows");
 var msg = document.getElementById("msg");
+
+// Session statuses in lifecycle order, each with a color. Mirrors the
+// session_status pg enum; drives both the Progress column and the legend.
+var STATUS_META = [
+  ["pending", "#9ca3af"],
+  ["active", "#2563eb"],
+  ["paused", "#d97706"],
+  ["stopped", "#64748b"],
+  ["compiling", "#7c3aed"],
+  ["complete", "#16a34a"],
+  ["failed", "#dc2626"],
+];
+
+document.getElementById("legend").innerHTML =
+  '<span class="muted">Progress: </span>' +
+  STATUS_META.map(function (m) {
+    return '<span style="color:' + m[1] + '">' + m[0] + "</span>";
+  }).join('<span class="sep">/</span>');
 
 function flash(text, isError) {
   msg.textContent = text;
@@ -94,11 +128,27 @@ async function api(method, path, body) {
   return data;
 }
 
+function hours(sec) {
+  return '<span class="num">' + ((sec || 0) / 3600).toFixed(1) + "</span>";
+}
+
+// CI-style compacted, color-coded per-status counts, e.g. 12/24/42/44.
+function progress(counts) {
+  counts = counts || {};
+  return '<span class="prog">' + STATUS_META.map(function (m) {
+    return '<span style="color:' + m[1] + '" title="' + m[0] + '">' +
+      (counts[m[0]] || 0) + "</span>";
+  }).join('<span class="sep">/</span>') + "</span>";
+}
+
 function rowHtml(k) {
   return "<tr>" +
     "<td>" + esc(k.name) + "</td>" +
     "<td><code>" + esc(k.key) + "</code> " +
       '<button class="secondary" data-copy="' + esc(k.key) + '">copy</button></td>' +
+    '<td class="num">' + (k.sessionCount || 0) + "</td>" +
+    "<td>" + hours(k.trackedSeconds) + "</td>" +
+    "<td>" + progress(k.statusCounts) + "</td>" +
     "<td>" + fmt(k.lastUsedAt) + "</td>" +
     "<td>" + fmt(k.createdAt) + "</td>" +
     '<td class="row-actions">' +
@@ -107,12 +157,25 @@ function rowHtml(k) {
     "</tr>";
 }
 
+function renderStats(totals) {
+  totals = totals || { statusCounts: {} };
+  var stats = document.getElementById("stats");
+  stats.innerHTML =
+    '<div class="stat"><div class="label">Total sessions</div>' +
+      '<div class="value">' + (totals.sessionCount || 0) + "</div></div>" +
+    '<div class="stat"><div class="label">Cumulative hours</div>' +
+      '<div class="value">' + ((totals.trackedSeconds || 0) / 3600).toFixed(1) + "</div></div>" +
+    '<div class="stat"><div class="label">Session progress</div>' +
+      '<div class="value prog">' + progress(totals.statusCounts) + "</div></div>";
+}
+
 async function load() {
   try {
     var result = await api("GET", "/api/admin/keys");
     var keys = result.keys || [];
+    renderStats(result.totals);
     if (!keys.length) {
-      rows.innerHTML = '<tr><td colspan="5" class="empty">No keys yet.</td></tr>';
+      rows.innerHTML = '<tr><td colspan="8" class="empty">No keys yet.</td></tr>';
       return;
     }
     rows.innerHTML = keys.map(rowHtml).join("");

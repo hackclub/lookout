@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { ADMIN_PAGE_HTML } from "./adminPage.js";
 
@@ -74,7 +74,8 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.type("text/html").send(ADMIN_PAGE_HTML);
   });
 
-  // List keys (plaintext storage — full key returned)
+  // List keys (plaintext storage — full key returned), each enriched with its
+  // program's session aggregates for the dashboard.
   app.get("/api/admin/keys", async () => {
     const keys = await db
       .select({
@@ -86,7 +87,70 @@ export async function adminRoutes(app: FastifyInstance) {
       })
       .from(schema.apiKeys)
       .orderBy(schema.apiKeys.createdAt);
-    return { keys };
+
+    // Per-program session aggregates: total count, cumulative tracked time, and
+    // a per-status breakdown. tracked_seconds is the authoritative tracked
+    // length but is NULL for bucket-mode sessions, so fall back to
+    // total_active_seconds. Sessions attribute to a key via
+    // sessions.program = api_keys.name; NULL-program rows (global/legacy key)
+    // aren't shown. count(*) returns bigint, so cast the scalars to a JS number.
+    const status = schema.sessions.status;
+    const aggCols = {
+      sessionCount: sql<number>`count(*)::int`,
+      trackedSeconds: sql<number>`coalesce(sum(coalesce(${schema.sessions.trackedSeconds}, ${schema.sessions.totalActiveSeconds})), 0)::float8`,
+      pending: sql<number>`(count(*) filter (where ${status} = 'pending'))::int`,
+      active: sql<number>`(count(*) filter (where ${status} = 'active'))::int`,
+      paused: sql<number>`(count(*) filter (where ${status} = 'paused'))::int`,
+      stopped: sql<number>`(count(*) filter (where ${status} = 'stopped'))::int`,
+      compiling: sql<number>`(count(*) filter (where ${status} = 'compiling'))::int`,
+      complete: sql<number>`(count(*) filter (where ${status} = 'complete'))::int`,
+      failed: sql<number>`(count(*) filter (where ${status} = 'failed'))::int`,
+    };
+    const statsRows = await db
+      .select({ program: schema.sessions.program, ...aggCols })
+      .from(schema.sessions)
+      .where(sql`${schema.sessions.program} is not null`)
+      .groupBy(schema.sessions.program);
+
+    // Global totals across ALL sessions, including those with no program
+    // (created with the global/legacy key).
+    const [totals] = await db.select(aggCols).from(schema.sessions);
+
+    const statsByProgram = new Map(statsRows.map((s) => [s.program, s]));
+    const enriched = keys.map((k) => {
+      const s = statsByProgram.get(k.name);
+      return {
+        ...k,
+        sessionCount: s?.sessionCount ?? 0,
+        trackedSeconds: s?.trackedSeconds ?? 0,
+        statusCounts: {
+          pending: s?.pending ?? 0,
+          active: s?.active ?? 0,
+          paused: s?.paused ?? 0,
+          stopped: s?.stopped ?? 0,
+          compiling: s?.compiling ?? 0,
+          complete: s?.complete ?? 0,
+          failed: s?.failed ?? 0,
+        },
+      };
+    });
+
+    return {
+      keys: enriched,
+      totals: {
+        sessionCount: totals?.sessionCount ?? 0,
+        trackedSeconds: totals?.trackedSeconds ?? 0,
+        statusCounts: {
+          pending: totals?.pending ?? 0,
+          active: totals?.active ?? 0,
+          paused: totals?.paused ?? 0,
+          stopped: totals?.stopped ?? 0,
+          compiling: totals?.compiling ?? 0,
+          complete: totals?.complete ?? 0,
+          failed: totals?.failed ?? 0,
+        },
+      },
+    };
   });
 
   // Create a key for a program

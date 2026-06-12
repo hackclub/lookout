@@ -8,7 +8,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
-import { db } from "../src/db/index.js";
+import { db, schema } from "../src/db/index.js";
 
 let app: FastifyInstance;
 
@@ -133,6 +133,46 @@ describe("admin dashboard", () => {
       payload: { name: "blog" },
     });
     expect(dup.statusCode).toBe(409);
+  });
+
+  it("reports per-program session aggregates and global totals", async () => {
+    await createKey("arcade");
+    await createKey("blog");
+
+    // arcade: 2 complete (3600s + null→fall back to active 1800s), 1 failed.
+    // blog: 1 active. One NULL-program session (global key) counts only in totals.
+    await db.insert(schema.sessions).values([
+      { program: "arcade", status: "complete", trackedSeconds: 3600 },
+      { program: "arcade", status: "complete", totalActiveSeconds: 1800 },
+      { program: "arcade", status: "failed", trackedSeconds: 600 },
+      { program: "blog", status: "active", trackedSeconds: 120 },
+      { program: null, status: "complete", trackedSeconds: 7200 },
+    ]);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/keys",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    const body = res.json();
+
+    const arcade = body.keys.find((k: any) => k.name === "arcade");
+    expect(arcade.sessionCount).toBe(3);
+    expect(arcade.trackedSeconds).toBe(3600 + 1800 + 600);
+    expect(arcade.statusCounts).toMatchObject({ complete: 2, failed: 1, active: 0 });
+
+    const blog = body.keys.find((k: any) => k.name === "blog");
+    expect(blog.sessionCount).toBe(1);
+    expect(blog.statusCounts.active).toBe(1);
+
+    // Totals span every session, including the NULL-program one.
+    expect(body.totals.sessionCount).toBe(5);
+    expect(body.totals.trackedSeconds).toBe(3600 + 1800 + 600 + 120 + 7200);
+    expect(body.totals.statusCounts).toMatchObject({
+      complete: 3,
+      failed: 1,
+      active: 1,
+    });
   });
 
   it("serves the dashboard page behind basic auth", async () => {
