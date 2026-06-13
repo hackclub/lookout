@@ -1,6 +1,7 @@
 {
   "name": "@lookout/web",
   "version": "0.2.9",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",
   "scripts": {
