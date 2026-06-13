@@ -200,7 +200,7 @@ jobs:
 
       - name: Sign Windows binaries with Trusted Signing
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows' && !contains(matrix.args, 'aarch64')
-        uses: azure/trusted-signing-action@v1.1.0
+        uses: azure/trusted-signing-action@v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -217,7 +217,7 @@ jobs:
 
       - name: Sign Windows ARM binaries with Trusted Signing
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows' && contains(matrix.args, 'aarch64')
-        uses: azure/trusted-signing-action@v1.1.0
+        uses: azure/trusted-signing-action@v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
