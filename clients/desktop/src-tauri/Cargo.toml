@@ -47,7 +47,7 @@ objc2-core-graphics = "0.3.2"
 objc2-foundation = { version = "0.3.2", features = ["NSProcessInfo", "NSString"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-webview2-com = "0.38"
+webview2-com = "0.39"
 
 [target."cfg(target_os = \"linux\")".dependencies]
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
