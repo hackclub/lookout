@@ -43,7 +43,10 @@ export async function internalRoutes(app: FastifyInstance) {
           ...(name ? { name } : {}),
           metadata: metadata ?? {},
           // Attribution: tag with the creating program (null for global key).
+          // `program` (name) is dual-written for backward compatibility;
+          // `programId` is the canonical attribution.
           program: request.program ?? null,
+          programId: request.programId ?? null,
         })
         .returning();
 

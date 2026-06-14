@@ -78,6 +78,13 @@
       "when": 1780951754822,
       "tag": "0010_mighty_gressill",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781477283454,
+      "tag": "0011_normalize_programs",
+      "breakpoints": true
     }
   ]
 }

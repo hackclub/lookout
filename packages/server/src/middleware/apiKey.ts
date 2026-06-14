@@ -8,9 +8,14 @@ import { db, schema } from "../db/index.js";
 
 declare module "fastify" {
   interface FastifyRequest {
-    // Name of the program whose key authorized this request. Set by
-    // requireApiKey; read by routes that tag created data (e.g. sessions).
+    // Legacy program name whose key authorized this request. Set by
+    // requireApiKey; kept for backward compat (dual-written), superseded by
+    // programId.
     program: string | null;
+    // Canonical program id whose key authorized this request. Set by
+    // requireApiKey. May be null for keys that predate the FK and aren't yet
+    // backfilled.
+    programId: string | null;
   }
 }
 
@@ -32,6 +37,7 @@ export async function requireApiKey(
   }
 
   request.program = row.name;
+  request.programId = row.programId;
   // Fire-and-forget last-used bookkeeping — never block or fail the request.
   void db
     .update(schema.apiKeys)

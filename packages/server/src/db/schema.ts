@@ -26,6 +26,22 @@ export const sessionStatusEnum = pgEnum("session_status", [
   "failed",
 ]);
 
+// A program is a brand/integration that issues recording sessions (e.g.
+// "Fallout"). It owns a public new-session URL used by the desktop app's
+// program picker, and is the canonical entity that api_keys belong to (one
+// program → many keys). Session attribution points here via program_id.
+export const programs = pgTable("programs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  // Full URL the desktop app opens to start a session for this program (e.g.
+  // https://fallout.hackclub.com/lookout_session/new?desktop=true). NULL means
+  // the program isn't listed in the desktop picker.
+  newSessionUrl: text("new_session_url"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 export const sessions = pgTable(
   "sessions",
   {
@@ -41,10 +57,14 @@ export const sessions = pgTable(
           `untitled-${new Date().toISOString().slice(0, 10)}`,
       ),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
-    // Name of the program (api_keys.name) whose key created this session.
-    // Attribution/tracking only — NOT access control. NULL when the session
-    // was created with the global key or a legacy caller.
+    // Legacy program name (api_keys.name) whose key created this session.
+    // Attribution/tracking only — NOT access control. NULL when created with
+    // the global/legacy key. Superseded by programId; kept in sync via
+    // dual-write so it can be removed once nothing reads it.
     program: text("program"),
+    // Canonical program attribution. Nullable while existing rows and any
+    // pre-FK callers may not set it. NULL = global/legacy key.
+    programId: uuid("program_id").references(() => programs.id),
     status: sessionStatusEnum("status").notNull().default("pending"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
@@ -147,7 +167,14 @@ export const screenshots = pgTable(
 // dashboard displays/copies them on demand.
 export const apiKeys = pgTable("api_keys", {
   id: uuid("id").primaryKey().defaultRandom(),
+  // Legacy program identifier. The canonical program now lives in `programs`;
+  // `name` is retained (and still unique) for backward compatibility until
+  // everything reads programId. Dropping its unique constraint later lets one
+  // program own many keys, with `name` becoming an optional per-key label.
   name: text("name").notNull().unique(),
+  // The program this key belongs to. Nullable until all keys are backfilled
+  // and all writers set it.
+  programId: uuid("program_id").references(() => programs.id),
   key: text("key")
     .notNull()
     .unique()
