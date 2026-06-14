@@ -1802,6 +1802,19 @@ mod base64_engine {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's accelerated compositing crashes on launch under Wayland with
+    // some drivers (notably NVIDIA), bailing out with
+    // "Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display."
+    // Disabling compositing avoids the crash. Scope it to Wayland sessions so
+    // X11 users keep GPU acceleration, set it before the webview is created,
+    // and only when the user hasn't already chosen a value.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+
     // Keep _sentry_guard alive for the lifetime of the app so events flush on exit.
     let _sentry_guard = option_env!("SENTRY_DSN").map(|dsn| {
         sentry::init((dsn, sentry::ClientOptions {
