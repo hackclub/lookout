@@ -4,6 +4,7 @@ import { sessionRoutes } from "./routes/sessions.js";
 import { internalRoutes } from "./routes/internal.js";
 import { adminRoutes } from "./routes/admin.js";
 import { programRoutes } from "./routes/programs.js";
+import { announcementRoutes } from "./routes/announcements.js";
 
 /**
  * Build a Fastify instance with our routes registered. Used by:
@@ -24,6 +25,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(sessionRoutes);
   await app.register(adminRoutes);
   await app.register(programRoutes);
+  await app.register(announcementRoutes);
 
   return app;
 }

@@ -21,7 +21,7 @@ const ADMIN_AUTH =
 
 beforeEach(async () => {
   await db.execute(
-    sql`TRUNCATE screenshots, sessions, api_keys, programs RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE screenshots, sessions, api_keys, programs, announcements RESTART IDENTITY CASCADE`,
   );
   if (!app) {
     app = await buildApp();
@@ -345,5 +345,113 @@ describe("public programs registry", () => {
     const res = await app.inject({ method: "GET", url: "/api/programs" });
     expect(res.statusCode).toBe(200);
     expect(res.json().programs).toEqual([]);
+  });
+});
+
+describe("announcements", () => {
+  async function setAnnouncement(body: Record<string, unknown>) {
+    return app.inject({
+      method: "POST",
+      url: "/api/admin/announcement",
+      headers: { authorization: ADMIN_AUTH },
+      payload: body,
+    });
+  }
+
+  it("returns null when nothing is set (public + admin)", async () => {
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.statusCode).toBe(200);
+    expect(pub.json().announcement).toBeNull();
+
+    const adm = await app.inject({
+      method: "GET",
+      url: "/api/admin/announcement",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(adm.json().announcement).toBeNull();
+  });
+
+  it("requires admin auth for the public endpoint to stay open but admin to be gated", async () => {
+    const unauth = await app.inject({ method: "GET", url: "/api/admin/announcement" });
+    expect(unauth.statusCode).toBe(401);
+    // Public read needs no auth.
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.statusCode).toBe(200);
+  });
+
+  it("sets an announcement and serves it publicly", async () => {
+    const set = await setAnnouncement({
+      level: "warning",
+      message: "Scheduled maintenance tonight.",
+      url: "https://status.example.com",
+    });
+    expect(set.statusCode).toBe(201);
+    expect(set.json()).toMatchObject({
+      level: "warning",
+      message: "Scheduled maintenance tonight.",
+      url: "https://status.example.com",
+    });
+
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.json().announcement).toMatchObject({
+      level: "warning",
+      message: "Scheduled maintenance tonight.",
+      url: "https://status.example.com",
+    });
+  });
+
+  it("keeps only the latest active announcement", async () => {
+    await setAnnouncement({ level: "info", message: "First" });
+    await setAnnouncement({ level: "danger", message: "Second" });
+
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.json().announcement).toMatchObject({ level: "danger", message: "Second" });
+  });
+
+  it("clears the announcement (idempotently)", async () => {
+    await setAnnouncement({ level: "info", message: "Hello" });
+
+    const cleared = await app.inject({
+      method: "DELETE",
+      url: "/api/admin/announcement",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(cleared.statusCode).toBe(200);
+
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.json().announcement).toBeNull();
+
+    // Clearing again is a no-op, not an error.
+    const again = await app.inject({
+      method: "DELETE",
+      url: "/api/admin/announcement",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(again.statusCode).toBe(200);
+  });
+
+  it("rejects an unknown level and a non-http url", async () => {
+    const badLevel = await setAnnouncement({ level: "critical", message: "x" });
+    expect(badLevel.statusCode).toBe(400);
+
+    const badUrl = await setAnnouncement({
+      level: "info",
+      message: "x",
+      url: "javascript:alert(1)",
+    });
+    expect(badUrl.statusCode).toBe(400);
+  });
+
+  it("allows an announcement without a url (null)", async () => {
+    const set = await setAnnouncement({ level: "success", message: "All good!" });
+    expect(set.statusCode).toBe(201);
+    expect(set.json().url).toBeNull();
+
+    const pub = await app.inject({ method: "GET", url: "/api/announcement" });
+    expect(pub.json().announcement).toMatchObject({
+      level: "success",
+      message: "All good!",
+      url: null,
+    });
   });
 });

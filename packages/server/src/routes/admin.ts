@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import { eq, sql, or } from "drizzle-orm";
+import { eq, sql, or, desc } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { ADMIN_PAGE_HTML } from "./adminPage.js";
 
@@ -90,6 +90,20 @@ const patchProgramBodySchema = {
   additionalProperties: false,
 };
 
+const ANNOUNCEMENT_LEVELS = ["info", "success", "warning", "danger"] as const;
+type AnnouncementLevel = (typeof ANNOUNCEMENT_LEVELS)[number];
+
+const setAnnouncementBodySchema = {
+  type: "object" as const,
+  properties: {
+    level: { type: "string" as const, enum: ANNOUNCEMENT_LEVELS },
+    message: { type: "string" as const, minLength: 1, maxLength: 500 },
+    url: { type: "string" as const, maxLength: 2048 },
+  },
+  required: ["level", "message"] as const,
+  additionalProperties: false,
+};
+
 const programIdParamSchema = {
   type: "object" as const,
   properties: {
@@ -109,6 +123,71 @@ export async function adminRoutes(app: FastifyInstance) {
   // Dashboard page
   app.get("/admin", async (_request, reply) => {
     return reply.type("text/html").send(ADMIN_PAGE_HTML);
+  });
+
+  // Current announcement (latest active), or null.
+  app.get("/api/admin/announcement", async () => {
+    const [a] = await db
+      .select({
+        id: schema.announcements.id,
+        level: schema.announcements.level,
+        message: schema.announcements.message,
+        url: schema.announcements.url,
+        updatedAt: schema.announcements.updatedAt,
+      })
+      .from(schema.announcements)
+      .where(eq(schema.announcements.active, true))
+      .orderBy(desc(schema.announcements.updatedAt))
+      .limit(1);
+
+    return { announcement: a ?? null };
+  });
+
+  // Set the announcement. Deactivates any prior active one and inserts the new
+  // one, so there's always at most one active row (history is preserved).
+  app.post<{ Body: { level: AnnouncementLevel; message: string; url?: string } }>(
+    "/api/admin/announcement",
+    { schema: { body: setAnnouncementBodySchema } },
+    async (request, reply) => {
+      const message = request.body.message.trim();
+      if (!message) {
+        return reply.code(400).send({ error: "message is required" });
+      }
+      let url: string | null;
+      try {
+        url = normalizeNewSessionUrl(request.body.url) ?? null;
+      } catch {
+        return reply.code(400).send({ error: "url must be an http(s) URL" });
+      }
+
+      const announcement = await db.transaction(async (tx) => {
+        await tx
+          .update(schema.announcements)
+          .set({ active: false })
+          .where(eq(schema.announcements.active, true));
+        const [created] = await tx
+          .insert(schema.announcements)
+          .values({ level: request.body.level, message, url })
+          .returning({
+            id: schema.announcements.id,
+            level: schema.announcements.level,
+            message: schema.announcements.message,
+            url: schema.announcements.url,
+          });
+        return created;
+      });
+
+      return reply.code(201).send(announcement);
+    },
+  );
+
+  // Clear the announcement (deactivate the active one). Idempotent.
+  app.delete("/api/admin/announcement", async () => {
+    await db
+      .update(schema.announcements)
+      .set({ active: false })
+      .where(eq(schema.announcements.active, true));
+    return { cleared: true };
   });
 
   // List programs, each with its API keys and session aggregates.

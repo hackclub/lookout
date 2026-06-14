@@ -11,6 +11,7 @@ import {
   useTokenStore,
   useGallery,
   useHashRouter,
+  spacing,
 } from "@lookout/react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isValidToken, extractToken } from "./utils.js";
@@ -22,8 +23,10 @@ import { TrayApp } from "./components/TrayApp.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
 import { useBackgroundUpdate } from "./hooks/useBackgroundUpdate.js";
+import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 import { UpdateBanner } from "./components/UpdateBanner.js";
+import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 
 const API_BASE = "https://lookout.hackclub.com";
 
@@ -84,6 +87,9 @@ function MainWindowApp() {
   // Poll the update server in the background once past the launch update gate;
   // surfaces a "restart to update" banner on the gallery when a build ships.
   const backgroundUpdate = useBackgroundUpdate(updateSettled);
+
+  // Admin-authored announcement banner; checked on open and every 15 min.
+  const announcement = useAnnouncement();
 
   // Detect Wayland — filter apps feature is unsupported there
   useEffect(() => {
@@ -321,12 +327,18 @@ function MainWindowApp() {
             onAdd={() => navigate({ page: "add" })}
             onSettings={isWayland ? undefined : () => navigate({ page: "settings" })}
             banner={
-              backgroundUpdate.availableVersion ? (
-                <UpdateBanner
-                  version={backgroundUpdate.availableVersion}
-                  restarting={backgroundUpdate.restarting}
-                  onRestart={backgroundUpdate.restart}
-                />
+              announcement || backgroundUpdate.availableVersion ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm }}>
+                  {/* Announcement sits above the update banner. */}
+                  {announcement && <AnnouncementBanner announcement={announcement} />}
+                  {backgroundUpdate.availableVersion && (
+                    <UpdateBanner
+                      version={backgroundUpdate.availableVersion}
+                      restarting={backgroundUpdate.restarting}
+                      onRestart={backgroundUpdate.restart}
+                    />
+                  )}
+                </div>
               ) : undefined
             }
           />

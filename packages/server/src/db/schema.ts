@@ -26,6 +26,34 @@ export const sessionStatusEnum = pgEnum("session_status", [
   "failed",
 ]);
 
+// Severity/style of an admin announcement banner shown in the desktop app.
+export const announcementLevelEnum = pgEnum("announcement_level", [
+  "info",
+  "success",
+  "warning",
+  "danger",
+]);
+
+// Admin-authored banner shown in the desktop app's gallery. At most one row is
+// `active` at a time (the desktop app reads the latest active one); older rows
+// are kept inactive as history. `url`, when set, is opened in the OS browser.
+export const announcements = pgTable("announcements", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  level: announcementLevelEnum("level").notNull().default("info"),
+  message: text("message").notNull(),
+  // Optional http(s) URL the banner's action button opens. NULL = no button.
+  url: text("url"),
+  // Only the latest active row is surfaced; clearing sets this false rather
+  // than deleting, so the announcement history is preserved.
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 // A program is a brand/integration that issues recording sessions (e.g.
 // "Fallout"). It owns a public new-session URL used by the desktop app's
 // program picker, and is the canonical entity that api_keys belong to (one

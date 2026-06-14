@@ -20,10 +20,24 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   }
   h1 { font-size: 1.4rem; margin: 0 0 1.5rem; }
   form { display: flex; gap: .5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-  input[type=text], input[type=url] {
+  input[type=text], input[type=url], select {
     padding: .55rem .7rem; border: 1px solid #8884; border-radius: 6px;
     font: inherit; background: transparent; color: inherit;
   }
+  h2.section { font-size: 1rem; margin: 0 0 .75rem; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
+  input#ann-message { flex: 3; min-width: 16rem; }
+  input#ann-url { flex: 2; min-width: 14rem; }
+  /* Current-announcement preview, colored by level via inline border/bg. */
+  .ann-current {
+    display: flex; align-items: center; gap: .6rem; padding: .6rem .8rem;
+    border: 1px solid #8884; border-radius: 8px; margin-bottom: .75rem;
+  }
+  .ann-current .badge {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+    font-weight: 600; padding: .1rem .45rem; border-radius: 999px; color: #fff;
+  }
+  .ann-current .ann-msg { flex: 1; min-width: 0; }
+  .ann-current .ann-link { font-size: .82rem; opacity: .8; word-break: break-all; }
   input#name { flex: 1; min-width: 12rem; }
   input#display-name { flex: 1; min-width: 12rem; }
   input#url { flex: 2; min-width: 16rem; }
@@ -79,6 +93,25 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   <h1>Lookout — Programs</h1>
   <div id="msg"></div>
   <div id="stats" class="stats"></div>
+
+  <h2 class="section">Announcement</h2>
+  <div id="announcement-current"></div>
+  <form id="announcement-form">
+    <select id="ann-level" aria-label="Level">
+      <option value="info">Info</option>
+      <option value="success">Success</option>
+      <option value="warning">Warning</option>
+      <option value="danger">Danger</option>
+    </select>
+    <input type="text" id="ann-message" placeholder="Message (shown in the desktop app)"
+           autocomplete="off" maxlength="500" />
+    <input type="url" id="ann-url" placeholder="URL (optional, opens in browser)"
+           autocomplete="off" maxlength="2048" />
+    <button type="submit">Set announcement</button>
+    <button type="button" id="ann-clear" class="danger">Clear</button>
+  </form>
+
+  <h2 class="section">Programs</h2>
   <form id="create-form">
     <input type="text" id="name" placeholder="Program name (e.g. arcade)" required
            autocomplete="off" maxlength="255" />
@@ -263,6 +296,75 @@ document.getElementById("create-form").addEventListener("submit", async function
   }
 });
 
+// ── Announcement banner ─────────────────────────────────────
+// Level → color, mirroring the desktop theme's status palette.
+var ANN_COLORS = {
+  info: "#3b82f6",
+  success: "#22c55e",
+  warning: "#f59e0b",
+  danger: "#ef4444",
+};
+
+function renderAnnouncement(a) {
+  var box = document.getElementById("announcement-current");
+  if (!a) {
+    box.innerHTML = '<div class="muted" style="margin-bottom:.75rem">No announcement set.</div>';
+    return;
+  }
+  var color = ANN_COLORS[a.level] || ANN_COLORS.info;
+  box.innerHTML =
+    '<div class="ann-current" style="border-color:' + color + ';background:' + color + '1a">' +
+      '<span class="badge" style="background:' + color + '">' + esc(a.level) + "</span>" +
+      '<span class="ann-msg">' + esc(a.message) +
+        (a.url ? ' <span class="ann-link">(' + esc(a.url) + ")</span>" : "") +
+      "</span></div>";
+}
+
+async function loadAnnouncement() {
+  try {
+    var data = await api("GET", "/api/admin/announcement");
+    var a = data.announcement;
+    renderAnnouncement(a);
+    // Prefill the form with the current values for easy edits.
+    if (a) {
+      document.getElementById("ann-level").value = a.level;
+      document.getElementById("ann-message").value = a.message;
+      document.getElementById("ann-url").value = a.url || "";
+    }
+  } catch (e) {
+    flash(e.message, true);
+  }
+}
+
+document.getElementById("announcement-form").addEventListener("submit", async function (ev) {
+  ev.preventDefault();
+  var message = document.getElementById("ann-message").value.trim();
+  var url = document.getElementById("ann-url").value.trim();
+  if (!message) return;
+  try {
+    var body = { level: document.getElementById("ann-level").value, message: message };
+    if (url) body.url = url;
+    await api("POST", "/api/admin/announcement", body);
+    flash("Announcement set.");
+    await loadAnnouncement();
+  } catch (e) {
+    flash(e.message, true);
+  }
+});
+
+document.getElementById("ann-clear").addEventListener("click", async function () {
+  if (!confirm("Clear the current announcement?")) return;
+  try {
+    await api("DELETE", "/api/admin/announcement");
+    document.getElementById("ann-message").value = "";
+    document.getElementById("ann-url").value = "";
+    flash("Announcement cleared.");
+    await loadAnnouncement();
+  } catch (e) {
+    flash(e.message, true);
+  }
+});
+
 rows.addEventListener("click", async function (ev) {
   var revealBtn = ev.target.closest("[data-reveal]");
   if (revealBtn) {
@@ -347,6 +449,7 @@ rows.addEventListener("click", async function (ev) {
 });
 
 load();
+loadAnnouncement();
 </script>
 </body>
 </html>`;

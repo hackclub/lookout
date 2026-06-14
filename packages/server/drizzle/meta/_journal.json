@@ -92,6 +92,13 @@
       "when": 1781479979981,
       "tag": "0012_program_display_name",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781480504163,
+      "tag": "0013_announcements",
+      "breakpoints": true
     }
   ]
 }
