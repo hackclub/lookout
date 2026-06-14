@@ -741,6 +741,22 @@ fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
 }
 
+/// Open a URL in the user's default browser (foreground). Used by the program
+/// picker to start a session on the program's website, where the user is
+/// already logged in. Foreground is required: the lookout:// deep-link handoff
+/// shows a browser confirmation prompt the user must click. Restricted to
+/// http(s) so the frontend can't open arbitrary schemes.
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("only http(s) URLs are allowed".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn request_screencast(
     #[allow(unused_variables)] state: State<'_, AppState>,
@@ -1969,6 +1985,7 @@ pub fn run() {
             enable_vibrancy,
             disable_vibrancy,
             is_wayland,
+            open_external_url,
             request_screencast,
             add_screencast,
             set_blacklisted_apps,
