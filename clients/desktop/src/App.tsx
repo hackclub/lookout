@@ -21,7 +21,9 @@ import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
+import { useBackgroundUpdate } from "./hooks/useBackgroundUpdate.js";
 import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
+import { UpdateBanner } from "./components/UpdateBanner.js";
 
 const API_BASE = "https://lookout.hackclub.com";
 
@@ -78,6 +80,10 @@ function MainWindowApp() {
   useEffect(() => {
     if (updateSettled) void ensureNotificationPermission();
   }, [updateSettled]);
+
+  // Poll the update server in the background once past the launch update gate;
+  // surfaces a "restart to update" banner on the gallery when a build ships.
+  const backgroundUpdate = useBackgroundUpdate(updateSettled);
 
   // Detect Wayland — filter apps feature is unsupported there
   useEffect(() => {
@@ -314,6 +320,15 @@ function MainWindowApp() {
             }}
             onAdd={() => navigate({ page: "add" })}
             onSettings={isWayland ? undefined : () => navigate({ page: "settings" })}
+            banner={
+              backgroundUpdate.availableVersion ? (
+                <UpdateBanner
+                  version={backgroundUpdate.availableVersion}
+                  restarting={backgroundUpdate.restarting}
+                  onRestart={backgroundUpdate.restart}
+                />
+              ) : undefined
+            }
           />
         );
       case "settings":

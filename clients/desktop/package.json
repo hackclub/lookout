@@ -1,6 +1,6 @@
 {
   "name": "@lookout/desktop",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",

@@ -10,7 +10,7 @@ type UpdateStatus =
   | { state: "done" }
   | { state: "idle" };
 
-const LAST_UPDATE_KEY = "lookout_last_update_ts";
+export const LAST_UPDATE_KEY = "lookout_last_update_ts";
 const UPDATE_COOLDOWN_MS = 60_000;
 const FAIL_DISPLAY_MS = 1500; // Show failure message briefly before continuing
 

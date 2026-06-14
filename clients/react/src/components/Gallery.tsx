@@ -15,6 +15,8 @@ export interface GalleryProps {
   onRefresh?: () => void;
   onAdd?: () => void;
   onSettings?: () => void;
+  /** Optional content rendered just below the header (e.g. an update banner). */
+  banner?: React.ReactNode;
 }
 
 const addButtonStyle: React.CSSProperties = {
@@ -59,6 +61,7 @@ export function Gallery({
   onRefresh,
   onAdd,
   onSettings,
+  banner,
 }: GalleryProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showTopMask, setShowTopMask] = useState(false);
@@ -94,6 +97,7 @@ export function Gallery({
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+      {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }}>
           <ErrorDisplay error={error} variant="inline" />
           {onRefresh && (
@@ -110,6 +114,7 @@ export function Gallery({
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+      {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }}>
           <p style={{ marginBottom: spacing.md }}>
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke={colors.text.primary} strokeWidth="1.5" style={{ opacity: 0.2 }}>
@@ -130,6 +135,7 @@ export function Gallery({
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <GalleryHeader onAdd={onAdd} onSettings={onSettings} />
+      {banner && <div style={{ padding: spacing.lg, paddingBottom: 0 }}>{banner}</div>}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
