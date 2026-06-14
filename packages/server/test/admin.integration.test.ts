@@ -184,6 +184,43 @@ describe("admin dashboard", () => {
     expect(clear.json().newSessionUrl).toBeNull();
   });
 
+  it("sets a display name on create and via patch (set + clear)", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/admin/programs",
+      headers: { authorization: ADMIN_AUTH },
+      payload: { name: "arcade", displayName: "Arcade" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().displayName).toBe("Arcade");
+    const id = created.json().id;
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/admin/programs",
+      headers: { authorization: ADMIN_AUTH },
+    });
+    expect(list.json().programs[0].displayName).toBe("Arcade");
+
+    const set = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { displayName: "The Arcade" },
+    });
+    expect(set.statusCode).toBe(200);
+    expect(set.json().displayName).toBe("The Arcade");
+
+    const clear = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { displayName: "" },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(clear.json().displayName).toBeNull();
+  });
+
   it("reports per-program session aggregates and global totals", async () => {
     await createProgram("arcade");
     await createProgram("blog");
@@ -278,7 +315,28 @@ describe("public programs registry", () => {
     expect(programs).toHaveLength(1);
     expect(programs[0]).toMatchObject({
       name: "withurl",
+      // No display name set → falls back to the raw name.
+      displayName: "withurl",
       newSessionUrl: "https://withurl.example.com/new?desktop=true",
+    });
+  });
+
+  it("exposes the display name (when set) in the public registry", async () => {
+    const { id } = await createProgram(
+      "arcade",
+      "https://arcade.example.com/new?desktop=true",
+    );
+    await app.inject({
+      method: "PATCH",
+      url: `/api/admin/programs/${id}`,
+      headers: { authorization: ADMIN_AUTH },
+      payload: { displayName: "Arcade" },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/programs" });
+    expect(res.json().programs[0]).toMatchObject({
+      name: "arcade",
+      displayName: "Arcade",
     });
   });
 

@@ -85,6 +85,13 @@
       "when": 1781477283454,
       "tag": "0011_normalize_programs",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781479979981,
+      "tag": "0012_program_display_name",
+      "breakpoints": true
     }
   ]
 }

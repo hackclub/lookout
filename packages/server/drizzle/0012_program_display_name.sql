@@ -1,0 +1,1 @@
+ALTER TABLE "programs" ADD COLUMN "display_name" text;

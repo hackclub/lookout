@@ -33,6 +33,10 @@ export const sessionStatusEnum = pgEnum("session_status", [
 export const programs = pgTable("programs", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
+  // Human-friendly label shown to users (e.g. "Fallout"). `name` is the raw
+  // slug-like identifier (often lowercase/dashed) used for attribution; this is
+  // what the desktop picker and other UIs display. NULL falls back to `name`.
+  displayName: text("display_name"),
   // Full URL the desktop app opens to start a session for this program (e.g.
   // https://fallout.hackclub.com/lookout_session/new?desktop=true). NULL means
   // the program isn't listed in the desktop picker.

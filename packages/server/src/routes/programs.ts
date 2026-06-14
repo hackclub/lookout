@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { isNotNull } from "drizzle-orm";
+import { isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 
 // Public, unauthenticated registry of programs the desktop app can start a
@@ -12,6 +12,9 @@ export async function programRoutes(app: FastifyInstance) {
     const rows = await db
       .select({
         name: schema.programs.name,
+        // Prefer the human-friendly display name; fall back to the raw name so
+        // older programs without one still render sensibly.
+        displayName: sql<string>`coalesce(${schema.programs.displayName}, ${schema.programs.name})`,
         newSessionUrl: schema.programs.newSessionUrl,
       })
       .from(schema.programs)

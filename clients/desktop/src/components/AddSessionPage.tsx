@@ -17,6 +17,9 @@ const API_BASE = "https://lookout.hackclub.com";
 
 interface Program {
   name: string;
+  // Human-friendly label to show users; the server falls back to `name` when
+  // unset, so this is always present, but guard anyway for older servers.
+  displayName?: string;
   newSessionUrl: string;
 }
 
@@ -117,9 +120,11 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
     };
   }, []);
 
+  const programLabel = (p: Program) => p.displayName || p.name;
+
   const handleOpenProgram = async (program: Program) => {
     setError(null);
-    setLaunched(program.name);
+    setLaunched(programLabel(program));
     try {
       await invoke("open_external_url", { url: program.newSessionUrl });
     } catch (e) {
@@ -236,11 +241,11 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
                   variant="primary"
                   size="lg"
                   fullWidth
-                  loading={launched === p.name}
-                  disabled={loading || (launched !== null && launched !== p.name)}
+                  loading={launched === programLabel(p)}
+                  disabled={loading || (launched !== null && launched !== programLabel(p))}
                   onClick={() => handleOpenProgram(p)}
                 >
-                  {p.name}
+                  {programLabel(p)}
                 </Button>
               ))}
             </div>

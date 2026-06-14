@@ -25,6 +25,7 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
     font: inherit; background: transparent; color: inherit;
   }
   input#name { flex: 1; min-width: 12rem; }
+  input#display-name { flex: 1; min-width: 12rem; }
   input#url { flex: 2; min-width: 16rem; }
   button {
     padding: .5rem .8rem; border: 1px solid #8884; border-radius: 6px;
@@ -80,6 +81,8 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   <div id="stats" class="stats"></div>
   <form id="create-form">
     <input type="text" id="name" placeholder="Program name (e.g. arcade)" required
+           autocomplete="off" maxlength="255" />
+    <input type="text" id="display-name" placeholder="Display name (optional, e.g. Arcade)"
            autocomplete="off" maxlength="255" />
     <input type="url" id="url" placeholder="New-session URL (optional, e.g. https://arcade.hackclub.com/lookout_session/new?desktop=true)"
            autocomplete="off" maxlength="2048" />
@@ -185,8 +188,13 @@ function rowHtml(p) {
     if (k.lastUsedAt && (!acc || new Date(k.lastUsedAt) > new Date(acc))) return k.lastUsedAt;
     return acc;
   }, null);
+  // Show the display name prominently (what users see) with the raw name as a
+  // muted subtitle, since attribution and the API key key off the raw name.
+  var nameCell = p.displayName
+    ? esc(p.displayName) + '<br><span class="muted">' + esc(p.name) + "</span>"
+    : esc(p.name);
   return "<tr>" +
-    "<td>" + esc(p.name) + "</td>" +
+    "<td>" + nameCell + "</td>" +
     "<td>" + urlHtml(p.newSessionUrl) + "</td>" +
     "<td>" + keysHtml(p.keys) + "</td>" +
     '<td class="num">' + (p.sessionCount || 0) + "</td>" +
@@ -195,6 +203,8 @@ function rowHtml(p) {
     "<td>" + fmt(lastUsed) + "</td>" +
     "<td>" + fmt(p.createdAt) + "</td>" +
     '<td class="row-actions">' +
+      '<button class="secondary" data-name-edit="' + esc(p.id) + '" data-name="' + esc(p.name) +
+        '" data-current="' + esc(p.displayName || "") + '">set name</button>' +
       '<button class="secondary" data-url="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '" data-current="' + esc(p.newSessionUrl || "") + '">set URL</button>' +
       '<button class="danger" data-del="' + esc(p.id) + '" data-name="' + esc(p.name) +
@@ -232,15 +242,19 @@ async function load() {
 document.getElementById("create-form").addEventListener("submit", async function (ev) {
   ev.preventDefault();
   var nameInput = document.getElementById("name");
+  var displayNameInput = document.getElementById("display-name");
   var urlInput = document.getElementById("url");
   var name = nameInput.value.trim();
+  var displayName = displayNameInput.value.trim();
   var url = urlInput.value.trim();
   if (!name) return;
   try {
     var body = { name: name };
+    if (displayName) body.displayName = displayName;
     if (url) body.newSessionUrl = url;
     var created = await api("POST", "/api/admin/programs", body);
     nameInput.value = "";
+    displayNameInput.value = "";
     urlInput.value = "";
     flash('Created program "' + created.name + '".');
     await load();
@@ -272,6 +286,27 @@ rows.addEventListener("click", async function (ev) {
       flash("Copied to clipboard.");
     } catch (e) {
       flash("Copy failed.", true);
+    }
+    return;
+  }
+
+  var nameEditBtn = ev.target.closest("[data-name-edit]");
+  if (nameEditBtn) {
+    var currentName = nameEditBtn.getAttribute("data-current");
+    var nextName = prompt(
+      'Display name for "' + nameEditBtn.getAttribute("data-name") +
+        '" (leave blank to clear — falls back to the raw name):',
+      currentName,
+    );
+    if (nextName === null) return; // cancelled
+    try {
+      await api("PATCH", "/api/admin/programs/" + nameEditBtn.getAttribute("data-name-edit"), {
+        displayName: nextName.trim(),
+      });
+      flash("Updated display name.");
+      await load();
+    } catch (e) {
+      flash(e.message, true);
     }
     return;
   }

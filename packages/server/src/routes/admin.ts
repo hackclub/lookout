@@ -58,10 +58,21 @@ function normalizeNewSessionUrl(raw: unknown): string | null | undefined {
   return trimmed;
 }
 
+// Trim a display name; empty/whitespace means "unset" (NULL → falls back to
+// the raw program name). `undefined` means "leave unchanged" on patch.
+function normalizeDisplayName(raw: unknown): string | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : null;
+}
+
 const createProgramBodySchema = {
   type: "object" as const,
   properties: {
     name: { type: "string" as const, minLength: 1, maxLength: 255 },
+    displayName: { type: "string" as const, maxLength: 255 },
     newSessionUrl: { type: "string" as const, maxLength: 2048 },
   },
   required: ["name"] as const,
@@ -73,6 +84,8 @@ const patchProgramBodySchema = {
   properties: {
     // Pass "" to clear the URL (program drops out of the desktop picker).
     newSessionUrl: { type: ["string", "null"] as const, maxLength: 2048 },
+    // Pass "" to clear the display name (UIs fall back to the raw name).
+    displayName: { type: ["string", "null"] as const, maxLength: 255 },
   },
   additionalProperties: false,
 };
@@ -104,6 +117,7 @@ export async function adminRoutes(app: FastifyInstance) {
       .select({
         id: schema.programs.id,
         name: schema.programs.name,
+        displayName: schema.programs.displayName,
         newSessionUrl: schema.programs.newSessionUrl,
         createdAt: schema.programs.createdAt,
       })
@@ -167,6 +181,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return {
         id: p.id,
         name: p.name,
+        displayName: p.displayName,
         newSessionUrl: p.newSessionUrl,
         createdAt: p.createdAt,
         keys: (keysByProgram.get(p.id) ?? []).map((k) => ({
@@ -210,7 +225,7 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // Create a program and its first API key.
-  app.post<{ Body: { name: string; newSessionUrl?: string } }>(
+  app.post<{ Body: { name: string; displayName?: string; newSessionUrl?: string } }>(
     "/api/admin/programs",
     { schema: { body: createProgramBodySchema } },
     async (request, reply) => {
@@ -218,6 +233,7 @@ export async function adminRoutes(app: FastifyInstance) {
       if (!name) {
         return reply.code(400).send({ error: "name is required" });
       }
+      const displayName = normalizeDisplayName(request.body.displayName) ?? null;
       let newSessionUrl: string | null;
       try {
         newSessionUrl = normalizeNewSessionUrl(request.body.newSessionUrl) ?? null;
@@ -243,7 +259,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const result = await db.transaction(async (tx) => {
         const [program] = await tx
           .insert(schema.programs)
-          .values({ name, newSessionUrl })
+          .values({ name, displayName, newSessionUrl })
           .returning();
         const [key] = await tx
           .insert(schema.apiKeys)
@@ -255,14 +271,18 @@ export async function adminRoutes(app: FastifyInstance) {
       return reply.code(201).send({
         id: result.program.id,
         name: result.program.name,
+        displayName: result.program.displayName,
         newSessionUrl: result.program.newSessionUrl,
         key: result.key.key,
       });
     },
   );
 
-  // Update a program's new-session URL (set or clear).
-  app.patch<{ Params: { id: string }; Body: { newSessionUrl?: string | null } }>(
+  // Update a program's display name and/or new-session URL (set or clear each).
+  app.patch<{
+    Params: { id: string };
+    Body: { newSessionUrl?: string | null; displayName?: string | null };
+  }>(
     "/api/admin/programs/:id",
     { schema: { params: programIdParamSchema, body: patchProgramBodySchema } },
     async (request, reply) => {
@@ -274,17 +294,26 @@ export async function adminRoutes(app: FastifyInstance) {
           .code(400)
           .send({ error: e instanceof Error ? e.message : "invalid newSessionUrl" });
       }
-      if (newSessionUrl === undefined) {
-        return reply.code(400).send({ error: "newSessionUrl is required" });
+      const displayName = normalizeDisplayName(request.body.displayName);
+
+      // Build a partial update from only the fields the caller provided.
+      const set: { newSessionUrl?: string | null; displayName?: string | null } = {};
+      if (newSessionUrl !== undefined) set.newSessionUrl = newSessionUrl;
+      if (displayName !== undefined) set.displayName = displayName;
+      if (Object.keys(set).length === 0) {
+        return reply
+          .code(400)
+          .send({ error: "Provide newSessionUrl and/or displayName" });
       }
 
       const [updated] = await db
         .update(schema.programs)
-        .set({ newSessionUrl })
+        .set(set)
         .where(eq(schema.programs.id, request.params.id))
         .returning({
           id: schema.programs.id,
           name: schema.programs.name,
+          displayName: schema.programs.displayName,
           newSessionUrl: schema.programs.newSessionUrl,
         });
 
