@@ -16,7 +16,7 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   * { box-sizing: border-box; }
   body {
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    margin: 0; padding: 2rem; max-width: 1280px; margin-inline: auto;
+    margin: 0; padding: 2rem; max-width: 1400px; margin-inline: auto;
   }
   h1 { font-size: 1.4rem; margin: 0 0 1.5rem; }
   form { display: flex; gap: .5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
@@ -27,27 +27,34 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   input#name { flex: 1; min-width: 12rem; }
   input#url { flex: 2; min-width: 16rem; }
   button {
-    padding: .55rem .9rem; border: 1px solid #8884; border-radius: 6px;
+    padding: .5rem .8rem; border: 1px solid #8884; border-radius: 6px;
     background: #2563eb; color: #fff; font: inherit; cursor: pointer;
+    white-space: nowrap;
   }
-  button.secondary { background: transparent; color: inherit; }
+  button.secondary { background: transparent; color: inherit; padding: .35rem .6rem; font-size: .85rem; }
   button.danger { background: transparent; color: #dc2626; border-color: #dc26264d; }
   button:hover { filter: brightness(1.08); }
-  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  /* Content-sized columns; only the URL and key cells wrap (everything else
+     stays on its natural line so labels/timestamps/counts don't fracture). */
+  table { width: 100%; border-collapse: collapse; }
   th, td {
     text-align: left; padding: .6rem .5rem; border-bottom: 1px solid #8882;
-    vertical-align: top; overflow-wrap: anywhere; word-break: break-word;
+    vertical-align: top;
   }
-  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; opacity: .6; }
+  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; opacity: .6; white-space: nowrap; }
   code {
     font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #8881; padding: .15rem .4rem; border-radius: 4px; word-break: break-all;
+    background: #8881; padding: .15rem .4rem; border-radius: 4px;
   }
   .muted { opacity: .55; font-size: .85rem; }
-  .url { font-size: .82rem; max-width: 18rem; word-break: break-all; }
-  .num { font-variant-numeric: tabular-nums; }
-  .keylist { display: flex; flex-direction: column; gap: .3rem; }
-  .keyrow { display: flex; gap: .3rem; align-items: center; }
+  .url { font-size: .82rem; display: inline-block; max-width: 15rem; word-break: break-all; }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .keylist { display: flex; flex-direction: column; gap: .35rem; }
+  .keyrow { display: flex; gap: .35rem; align-items: center; }
+  /* Masked key stays on one line; only the revealed (long) key wraps. */
+  .keyrow code.key { display: inline-block; white-space: nowrap; }
+  .keyrow code.key[data-shown="1"] { white-space: normal; word-break: break-all; max-width: 30ch; }
+  .keyrow button { flex-shrink: 0; }
   .stats {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
     background: #8882; border: 1px solid #8882; border-radius: 8px;
@@ -155,7 +162,7 @@ function progress(counts) {
 
 // Keys are masked by default so they aren't accidentally exposed (e.g. while
 // screen-sharing the dashboard); "reveal" toggles the plaintext on demand.
-var KEY_MASK = "lk_••••••••••••";
+var KEY_MASK = "lk_••••••••";
 function keysHtml(keys) {
   if (!keys || !keys.length) return '<span class="muted">no key</span>';
   return '<div class="keylist">' + keys.map(function (k) {
