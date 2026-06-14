@@ -22,6 +22,7 @@ import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
+import { useSessionNotifications } from "../hooks/useSessionNotifications.js";
 
 interface DesktopRecorderProps {
   token: string;
@@ -122,6 +123,14 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     isCamera ? cameraFrameCapture : undefined,
     handleSessionTerminated,
   );
+
+  // Native OS notifications: alert the user when a session pauses, errors,
+  // or fails — useful when the app is in the background.
+  useSessionNotifications({
+    isCapturing: capture.isCapturing,
+    captureError: capture.error,
+    status: session.status,
+  });
 
 
   // Stale capture detection — warn if no successful capture for 3+ minutes

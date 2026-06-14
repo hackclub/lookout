@@ -1,6 +1,6 @@
 {
   "name": "@lookout/shared",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",

@@ -21,6 +21,7 @@ import { SettingsPage } from "./components/SettingsPage.js";
 import { TrayApp } from "./components/TrayApp.js";
 import { useBlacklistedApps } from "./hooks/useBlacklistedApps.js";
 import { useUpdateCheck } from "./hooks/useUpdateCheck.js";
+import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
 
 const API_BASE = "https://lookout.hackclub.com";
 
@@ -70,6 +71,13 @@ function MainWindowApp() {
 
   // Initialize blacklisted apps sync from localStorage to Rust backend
   useBlacklistedApps();
+
+  // Request notification permission as soon as the app is past the update
+  // gate — so the OS prompt appears at launch, not deferred to recording start.
+  const updateSettled = updateStatus.state === "idle";
+  useEffect(() => {
+    if (updateSettled) void ensureNotificationPermission();
+  }, [updateSettled]);
 
   // Detect Wayland — filter apps feature is unsupported there
   useEffect(() => {

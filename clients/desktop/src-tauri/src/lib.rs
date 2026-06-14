@@ -1929,6 +1929,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_liquid_glass::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             config: Mutex::new(None),
             cold_start_urls: Mutex::new(None),

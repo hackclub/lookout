@@ -17,6 +17,7 @@
     "deep-link:default",
     "macos-permissions:default",
     "updater:default",
+    "notification:default",
     {
       "identifier": "http:default",
       "allow": [
