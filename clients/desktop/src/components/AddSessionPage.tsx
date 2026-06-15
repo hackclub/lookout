@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Button,
   Spinner,
@@ -28,14 +29,39 @@ interface AddSessionPageProps {
   onStart: (token: string) => void;
 }
 
-/** Small info "i" with a hover tooltip. */
+const TOOLTIP_WIDTH = 240;
+
+/**
+ * Small info "i" with a hover tooltip. The tooltip is rendered through a portal
+ * on document.body with fixed positioning so it floats above everything —
+ * the page lives inside an animated, overflow:auto scroll container whose
+ * stacking/clipping context would otherwise trap an in-tree tooltip behind the
+ * header.
+ */
 function InfoTooltip({ text }: { text: string }) {
-  const [show, setShow] = useState(false);
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
+
+  const showTooltip = () => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Center horizontally on the icon, anchor the tooltip's bottom 6px above it;
+    // clamp so the 240px-wide box never spills past the window edges.
+    const half = TOOLTIP_WIDTH / 2;
+    const left = Math.min(
+      Math.max(r.left + r.width / 2, half + 8),
+      window.innerWidth - half - 8,
+    );
+    setCoords({ left, top: r.top - 6 });
+  };
+
   return (
     <span
+      ref={triggerRef}
       style={{ position: "relative", display: "inline-flex", verticalAlign: "middle" }}
-      onMouseEnter={() => setShow(true)}
-      onMouseLeave={() => setShow(false)}
+      onMouseEnter={showTooltip}
+      onMouseLeave={() => setCoords(null)}
     >
       <span
         aria-label={text}
@@ -57,33 +83,35 @@ function InfoTooltip({ text }: { text: string }) {
       >
         i
       </span>
-      {show && (
-        <span
-          role="tooltip"
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 6px)",
-            left: "50%",
-            transform: "translateX(-50%)",
-            width: 240,
-            padding: `${spacing.sm}px ${spacing.md}px`,
-            background: colors.bg.surface,
-            border: `1px solid ${colors.border.default}`,
-            borderRadius: radii.md,
-            fontSize: fontSize.xs,
-            fontWeight: fontWeight.normal,
-            fontStyle: "normal",
-            color: colors.text.secondary,
-            lineHeight: 1.5,
-            textAlign: "center",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-            zIndex: 10,
-            pointerEvents: "none",
-          }}
-        >
-          {text}
-        </span>
-      )}
+      {coords &&
+        createPortal(
+          <span
+            role="tooltip"
+            style={{
+              position: "fixed",
+              left: coords.left,
+              top: coords.top,
+              transform: "translate(-50%, -100%)",
+              width: TOOLTIP_WIDTH,
+              padding: `${spacing.sm}px ${spacing.md}px`,
+              background: colors.bg.surface,
+              border: `1px solid ${colors.border.default}`,
+              borderRadius: radii.md,
+              fontSize: fontSize.xs,
+              fontWeight: fontWeight.normal,
+              fontStyle: "normal",
+              color: colors.text.secondary,
+              lineHeight: 1.5,
+              textAlign: "center",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+              zIndex: 9999,
+              pointerEvents: "none",
+            }}
+          >
+            {text}
+          </span>,
+          document.body,
+        )}
     </span>
   );
 }
