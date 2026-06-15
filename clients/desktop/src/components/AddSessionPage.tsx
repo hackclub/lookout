@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
+import { useState, useEffect, type CSSProperties } from "react";
 import {
   Button,
   Spinner,
@@ -27,93 +26,6 @@ interface Program {
 interface AddSessionPageProps {
   onBack: () => void;
   onStart: (token: string) => void;
-}
-
-const TOOLTIP_WIDTH = 240;
-
-/**
- * Small info "i" with a hover tooltip. The tooltip is rendered through a portal
- * on document.body with fixed positioning so it floats above everything —
- * the page lives inside an animated, overflow:auto scroll container whose
- * stacking/clipping context would otherwise trap an in-tree tooltip behind the
- * header.
- */
-function InfoTooltip({ text }: { text: string }) {
-  const triggerRef = useRef<HTMLSpanElement>(null);
-  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
-
-  const showTooltip = () => {
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    // Center horizontally on the icon, anchor the tooltip's bottom 6px above it;
-    // clamp so the 240px-wide box never spills past the window edges.
-    const half = TOOLTIP_WIDTH / 2;
-    const left = Math.min(
-      Math.max(r.left + r.width / 2, half + 8),
-      window.innerWidth - half - 8,
-    );
-    setCoords({ left, top: r.top - 6 });
-  };
-
-  return (
-    <span
-      ref={triggerRef}
-      style={{ position: "relative", display: "inline-flex", verticalAlign: "middle" }}
-      onMouseEnter={showTooltip}
-      onMouseLeave={() => setCoords(null)}
-    >
-      <span
-        aria-label={text}
-        style={{
-          width: 16,
-          height: 16,
-          borderRadius: "50%",
-          border: `1px solid ${colors.border.default}`,
-          color: colors.text.tertiary,
-          fontSize: 11,
-          fontWeight: fontWeight.bold,
-          fontStyle: "italic",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          cursor: "help",
-          userSelect: "none",
-        }}
-      >
-        i
-      </span>
-      {coords &&
-        createPortal(
-          <span
-            role="tooltip"
-            style={{
-              position: "fixed",
-              left: coords.left,
-              top: coords.top,
-              transform: "translate(-50%, -100%)",
-              width: TOOLTIP_WIDTH,
-              padding: `${spacing.sm}px ${spacing.md}px`,
-              background: colors.bg.surface,
-              border: `1px solid ${colors.border.default}`,
-              borderRadius: radii.md,
-              fontSize: fontSize.xs,
-              fontWeight: fontWeight.normal,
-              fontStyle: "normal",
-              color: colors.text.secondary,
-              lineHeight: 1.5,
-              textAlign: "center",
-              boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-              zIndex: 9999,
-              pointerEvents: "none",
-            }}
-          >
-            {text}
-          </span>,
-          document.body,
-        )}
-    </span>
-  );
 }
 
 export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
@@ -175,6 +87,14 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
     onStart(token);
   };
 
+  const note: CSSProperties = {
+    fontSize: fontSize.sm,
+    color: colors.text.tertiary,
+    margin: 0,
+    textAlign: "center",
+    lineHeight: 1.5,
+  };
+
   const hasPrograms = programs.length > 0;
 
   return (
@@ -185,9 +105,7 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
       actions={
         <>
           {error && (
-            <p style={{ fontSize: fontSize.sm, color: colors.status.danger, margin: 0, textAlign: "center" }}>
-              {error}
-            </p>
+            <p style={{ ...note, color: colors.status.danger }}>{error}</p>
           )}
           {/* Backup: paste a lookout:// link, for when the deep link doesn't fire. */}
           {showLink ? (
@@ -251,18 +169,26 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
         </>
       }
     >
-      <div style={{ width: "100%", marginTop: spacing.lg, display: "flex", flexDirection: "column", gap: spacing.md }}>
+      <div
+        style={{
+          width: "100%",
+          marginTop: spacing.lg,
+          display: "flex",
+          flexDirection: "column",
+          gap: spacing.md,
+        }}
+      >
         {programsLoading ? (
-          <div style={{ display: "flex", justifyContent: "center", padding: spacing.xl }}>
-            <Spinner size="md" />
-          </div>
+          <Spinner size="md" />
         ) : hasPrograms ? (
           <>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: spacing.xs }}>
-              <span style={{ fontSize: fontSize.sm, color: colors.text.tertiary }}>Programs</span>
-              <InfoTooltip text="Not all programs support this feature. You may need to start the session on the program's website." />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: spacing.sm, maxHeight: 280, overflowY: "auto" }}>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: spacing.sm,
+              }}
+            >
               {programs.map((p) => (
                 <Button
                   key={p.name}
@@ -277,15 +203,20 @@ export function AddSessionPage({ onBack, onStart }: AddSessionPageProps) {
                 </Button>
               ))}
             </div>
-            {launched && (
-              <p style={{ fontSize: fontSize.sm, color: colors.text.secondary, margin: 0, textAlign: "center", lineHeight: 1.5 }}>
+            {launched ? (
+              <p style={{ ...note, color: colors.text.secondary }}>
                 Opened <strong>{launched}</strong> in your browser — finish there and
                 you'll be sent back here to start recording.
+              </p>
+            ) : (
+              <p style={note}>
+                Not all programs support this. You may need to start the session on
+                the program's website.
               </p>
             )}
           </>
         ) : (
-          <p style={{ fontSize: fontSize.sm, color: colors.text.tertiary, margin: 0, textAlign: "center", lineHeight: 1.5 }}>
+          <p style={note}>
             No programs available right now. Open Lookout from a Hack Club site, or
             paste a link below.
           </p>
