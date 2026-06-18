@@ -7,12 +7,16 @@ export interface ErrorDisplayProps {
   error: string;
   variant?: "banner" | "inline" | "page";
   title?: string;
+  /** Calm, plain-language note shown under the technical error (e.g. "Your
+   *  earlier progress is saved."). Kept separate so the copyable error text
+   *  stays purely diagnostic. */
+  reassurance?: string;
   onDismiss?: () => void;
   onCopy?: () => void;
   action?: { label: string; onClick: () => void };
 }
 
-export function ErrorDisplay({ error, variant = "banner", title, onDismiss, onCopy, action }: ErrorDisplayProps) {
+export function ErrorDisplay({ error, variant = "banner", title, reassurance, onDismiss, onCopy, action }: ErrorDisplayProps) {
   if (variant === "page") {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl, textAlign: "center" }}>
@@ -35,9 +39,10 @@ export function ErrorDisplay({ error, variant = "banner", title, onDismiss, onCo
   // banner (default)
   return (
     <div style={{ padding: `${spacing.md}px ${spacing.lg}px`, marginBottom: spacing.md, background: "rgba(239,68,68,0.15)", border: `1px solid ${colors.status.danger}`, borderRadius: radii.md, color: colors.text.error, fontSize: fontSize.md, display: "flex", alignItems: "flex-start", gap: spacing.sm }}>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, margin: 0, fontSize: fontSize.xs, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflowY: "auto" }}>
         {title && <strong style={{ display: "block", marginBottom: spacing.xs }}>{title}</strong>}
-        <pre style={{ margin: 0, fontSize: fontSize.xs, fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflowY: "auto" }}>{error}</pre>
+        <span style={{ fontFamily: "monospace" }}>{error}</span>
+        {reassurance && <span style={{ opacity: 0.8 }}>{`\n\n${reassurance}`}</span>}
       </div>
       {onCopy && (
         <motion.button 

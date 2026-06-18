@@ -572,7 +572,12 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
       )}
 
       {capture.error && (
-        <ErrorDisplay variant="banner" error={capture.error} onCopy={() => navigator.clipboard.writeText(getReport(capture.error ?? undefined))} />
+        <ErrorDisplay
+          variant="banner"
+          error={capture.error}
+          reassurance="Your earlier progress is saved. Restart the app if this keeps happening."
+          onCopy={() => navigator.clipboard.writeText(getReport(capture.error ?? undefined))}
+        />
       )}
 
       {/* Buttons — half-and-half at bottom */}
