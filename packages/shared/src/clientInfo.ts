@@ -42,6 +42,46 @@ export function formatClientInfo(parts: ClientInfoParts): ClientInfo {
   return `Lookout ${titleCase(parts.type)}${app}/${parts.version}${envStr}`;
 }
 
+/**
+ * Inverse of {@link formatClientInfo}: best-effort parse of a stored
+ * `clientInfo` string back into its parts. The format is a convention (the
+ * server never enforces it), so this is lenient — anything that doesn't match
+ * the "Lookout …" shape yields `null`. Missing optional fields are omitted.
+ */
+export function parseClientInfo(info: string): ClientInfoParts | null {
+  // Lookout <Type>[ (<embeddedApp>)]/<version>[ (<env>)]
+  const m = info.match(/^Lookout (\S+)(?: \(([^)]*)\))?\/(\S+)(?: \((.+)\))?$/);
+  if (!m) return null;
+  const [, type, embeddedApp, version, env] = m;
+  const parts: ClientInfoParts = { type: type.toLowerCase(), version };
+  if (embeddedApp) parts.embeddedApp = embeddedApp;
+  if (env) {
+    // env is "OS [version]" optionally followed by "; Browser [version]".
+    const [osPart, browserPart] = env.split("; ");
+    if (osPart) {
+      const sp = osPart.lastIndexOf(" ");
+      // Treat the trailing token as a version only when it looks numeric;
+      // single-word OS families (e.g. "Linux") have no version.
+      if (sp > 0 && /^[\d.]+$/.test(osPart.slice(sp + 1))) {
+        parts.osType = osPart.slice(0, sp);
+        parts.osVersion = osPart.slice(sp + 1);
+      } else {
+        parts.osType = osPart;
+      }
+    }
+    if (browserPart) {
+      const sp = browserPart.lastIndexOf(" ");
+      if (sp > 0 && /^[\d.]+$/.test(browserPart.slice(sp + 1))) {
+        parts.browserType = browserPart.slice(0, sp);
+        parts.browserVersion = browserPart.slice(sp + 1);
+      } else {
+        parts.browserType = browserPart;
+      }
+    }
+  }
+  return parts;
+}
+
 /** Best-effort browser family + version from a User-Agent string. Heuristic;
  *  order matters (Edge/Opera masquerade as Chrome). Returns {} if unknown. */
 export function detectBrowser(

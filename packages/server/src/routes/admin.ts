@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { eq, sql, or, desc } from "drizzle-orm";
+import { parseClientInfo } from "@lookout/shared";
 import { db, schema } from "../db/index.js";
 import { ADMIN_PAGE_HTML } from "./adminPage.js";
 
