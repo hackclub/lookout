@@ -864,15 +864,16 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
     }
 }
 
-/// Compact, consistent message for an HTTP error response: the step that
-/// failed, the status code (+ reason phrase, which `StatusCode` Displays),
-/// and the response body when there is one. No filler.
-fn http_error(step: &str, status: reqwest::StatusCode, body: &str) -> String {
+/// Compact, consistent message for an HTTP error response: the status code
+/// (+ reason phrase, which `StatusCode` Displays) and the response body when
+/// there is one. No filler. The failing step is supplied by the retry
+/// wrapper's label, so it isn't repeated here.
+fn http_error(status: reqwest::StatusCode, body: &str) -> String {
     let body = body.trim();
     if body.is_empty() {
-        format!("{step} HTTP {status}")
+        format!("HTTP {status}")
     } else {
-        format!("{step} HTTP {status}: {body}")
+        format!("HTTP {status}: {body}")
     }
 }
 
@@ -920,9 +921,116 @@ fn extract_reqwest_signal(err: &reqwest::Error) -> String {
     }
 }
 
+/// Outcome of a single upload-pipeline attempt, used by [`retry_upload_step`]
+/// to decide whether a failure is worth retrying.
+enum StepError {
+    /// Transient failure (timeout, connection error, 5xx, …) — retry with
+    /// backoff.
+    Retryable(String),
+    /// Permanent failure — fail fast, no retry. Currently only HTTP 409
+    /// (session paused/stopped server-side): retrying would just burn the
+    /// backoff window before the capture loop runs sleep-recovery.
+    Terminal(String),
+}
+
+/// Classify an HTTP error response into a [`StepError`]. Mirrors the react
+/// client's special-case (clients/react/src/hooks/useUploader.ts): 409 is
+/// terminal, everything else is retryable.
+fn classify_http(status: reqwest::StatusCode, msg: String) -> StepError {
+    if status == reqwest::StatusCode::CONFLICT {
+        StepError::Terminal(msg)
+    } else {
+        StepError::Retryable(msg)
+    }
+}
+
+/// Collapse the per-attempt failure history into one diagnostic string, led by
+/// the step `label` (e.g. `r2-upload 84KB → acct.r2.cloudflarestorage.com`).
+/// The goal: make an intermittent failure legible at a glance.
+///
+/// - If every attempt failed the same way, report the cause once with all the
+///   elapsed times (a steady outage): `… failed after 3 attempts: timed out
+///   (30.0s, 30.0s, 30.0s)`.
+/// - If the causes differ, list each attempt (flapping connectivity): `…
+///   failed after 3 attempts: #1 timed out (30.0s); #2 connection refused
+///   (1.2s); #3 timed out (30.0s)`.
+///
+/// Each entry is `(attempt_number, cause, elapsed_seconds)`. Per-attempt
+/// timing is the one thing the breadcrumb log can't reconstruct — it tells a
+/// read-timeout (R2 stalled mid-transfer) apart from a connect-timeout
+/// (couldn't reach it at all).
+fn summarize_attempts(label: &str, history: &[(usize, String, f64)]) -> String {
+    match history {
+        [] => format!("{label}: unknown error"),
+        [(_, cause, secs)] => format!("{label}: {cause} ({secs:.1}s)"),
+        [(_, first_cause, _), rest @ ..] => {
+            let n = history.len();
+            if rest.iter().all(|(_, c, _)| c == first_cause) {
+                let times = history
+                    .iter()
+                    .map(|(_, _, s)| format!("{s:.1}s"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{label} failed after {n} attempts: {first_cause} ({times})")
+            } else {
+                let parts = history
+                    .iter()
+                    .map(|(i, c, s)| format!("#{i} {c} ({s:.1}s)"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("{label} failed after {n} attempts: {parts}")
+            }
+        }
+    }
+}
+
+/// Retry an upload step with exponential backoff, mirroring the web client's
+/// `retry()` (clients/web/src/hooks/useUploader.ts): up to `MAX_RETRIES`
+/// attempts, sleeping `RETRY_DELAYS_MS[i]` between them. The body must
+/// evaluate to `Result<T, StepError>`; a `StepError::Terminal` short-circuits
+/// without retrying, and the macro yields `Result<T, String>`.
+///
+/// Takes a `label` describing the step (carried into the final error) and the
+/// attempt `block`. On exhaustion the error is the full per-attempt history
+/// with timing (via [`summarize_attempts`]) rather than just the last failure
+/// — that's what tells a steady outage apart from flapping connectivity. A
+/// `Terminal` error is labelled (`{label}: {msg}`) and returned immediately.
+///
+/// Expanded inline (rather than a generic async helper) so the body can
+/// freely borrow locals — an `FnMut` returning a borrowing future runs into
+/// lifetime gymnastics that aren't worth it here.
+macro_rules! retry_upload_step {
+    ($label:expr, $attempt:block) => {{
+        const MAX_RETRIES: usize = 3;
+        const RETRY_DELAYS_MS: [u64; 3] = [2_000, 4_000, 8_000];
+        let __label: String = ($label).to_string();
+        let mut __attempt: usize = 0;
+        let mut __history: Vec<(usize, String, f64)> = Vec::new();
+        loop {
+            let __start = tokio::time::Instant::now();
+            match (async $attempt).await {
+                Ok(__v) => break Ok::<_, String>(__v),
+                Err(StepError::Terminal(__msg)) => break Err(format!("{__label}: {__msg}")),
+                Err(StepError::Retryable(__msg)) => {
+                    __history.push((__attempt + 1, __msg, __start.elapsed().as_secs_f64()));
+                    if __attempt + 1 >= MAX_RETRIES {
+                        break Err(summarize_attempts(&__label, &__history));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        RETRY_DELAYS_MS[__attempt],
+                    ))
+                    .await;
+                    __attempt += 1;
+                }
+            }
+        }
+    }};
+}
+
 /// Shared upload-and-confirm pipeline: get presigned URL, PUT to R2, POST
 /// confirmation. Used by both `capture_and_upload` (screen/window) and
-/// `upload_frame` (camera).
+/// `upload_frame` (camera). Each network step is retried with exponential
+/// backoff (see [`retry_upload_step`]).
 ///
 /// `captured_at` is the ISO-8601 timestamp (in client clock) of when the
 /// screenshot was actually taken. Optional — when `None`, the request
@@ -956,21 +1064,25 @@ async fn upload_and_confirm(
     if let Some(c) = captured_at {
         query.push(("capturedAt", c));
     }
-    let url_response = client
-        .get(upload_url_url)
-        .query(&query)
-        .send()
-        .await
-        .map_err(|e| format!("upload-url: {}", describe_reqwest_error(&e)))?;
-    let url_status = url_response.status();
-    if !url_status.is_success() {
-        let body = url_response.text().await.unwrap_or_default();
-        return Err(http_error("upload-url", url_status, &body));
-    }
-    let upload_url_resp: UploadUrlResponse = url_response
-        .json()
-        .await
-        .map_err(|e| format!("upload-url: {}", describe_reqwest_error(&e)))?;
+    // Each attempt re-requests a FRESH presigned URL (it has a 120s expiry).
+    let upload_url_resp: UploadUrlResponse = retry_upload_step!("upload-url", {
+        let url_response = client
+            .get(upload_url_url.as_str())
+            .query(&query)
+            .send()
+            .await
+            .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
+        let url_status = url_response.status();
+        if !url_status.is_success() {
+            let body = url_response.text().await.unwrap_or_default();
+            Err(classify_http(url_status, http_error(url_status, &body)))
+        } else {
+            url_response
+                .json::<UploadUrlResponse>()
+                .await
+                .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))
+        }
+    })?;
     let _ = app.emit(
         "capture-progress",
         format!(
@@ -984,42 +1096,56 @@ async fn upload_and_confirm(
         "capture-progress",
         format!("uploading {}KB to R2...", size_bytes / 1024),
     );
-    client
-        .put(&upload_url_resp.upload_url)
-        .header("Content-Type", "image/jpeg")
-        .body(jpeg_bytes)
-        .send()
-        .await
-        .map_err(|e| format!("r2-upload: {}", describe_reqwest_error(&e)))?
-        .error_for_status()
-        .map_err(|e| format!("r2-upload: {}", describe_reqwest_error(&e)))?;
+    // Retried against the same presigned URL (still valid within its expiry).
+    // Label carries the payload size and target host so an "r2 timed out"
+    // report isolates the bucket/account and flags oversized frames.
+    let r2_host = reqwest::Url::parse(&upload_url_resp.upload_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "r2".to_string());
+    let r2_label = format!("r2-upload {}KB → {}", size_bytes / 1024, r2_host);
+    retry_upload_step!(r2_label, {
+        client
+            .put(upload_url_resp.upload_url.as_str())
+            .header("Content-Type", "image/jpeg")
+            .body(jpeg_bytes.clone())
+            .send()
+            .await
+            .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?
+            .error_for_status()
+            .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
+        Ok(())
+    })?;
     let _ = app.emit("capture-progress", "uploaded to R2 successfully");
 
     // Step 3: Confirm upload with server
     let _ = app.emit("capture-progress", "confirming upload with server...");
-    let confirm_response = client
-        .post(format!(
-            "{}/api/sessions/{}/screenshots",
-            config.api_base_url, config.token
-        ))
-        .json(&serde_json::json!({
-            "screenshotId": upload_url_resp.screenshot_id,
-            "width": width,
-            "height": height,
-            "fileSize": size_bytes,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("confirm: {}", describe_reqwest_error(&e)))?;
-    let confirm_status = confirm_response.status();
-    if !confirm_status.is_success() {
-        let body = confirm_response.text().await.unwrap_or_default();
-        return Err(http_error("confirm", confirm_status, &body));
-    }
-    let confirm_resp: ConfirmResponse = confirm_response
-        .json()
-        .await
-        .map_err(|e| format!("confirm: {}", describe_reqwest_error(&e)))?;
+    let confirm_resp: ConfirmResponse = retry_upload_step!("confirm", {
+        let confirm_response = client
+            .post(format!(
+                "{}/api/sessions/{}/screenshots",
+                config.api_base_url, config.token
+            ))
+            .json(&serde_json::json!({
+                "screenshotId": upload_url_resp.screenshot_id,
+                "width": width,
+                "height": height,
+                "fileSize": size_bytes,
+            }))
+            .send()
+            .await
+            .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))?;
+        let confirm_status = confirm_response.status();
+        if !confirm_status.is_success() {
+            let body = confirm_response.text().await.unwrap_or_default();
+            Err(classify_http(confirm_status, http_error(confirm_status, &body)))
+        } else {
+            confirm_response
+                .json::<ConfirmResponse>()
+                .await
+                .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))
+        }
+    })?;
     let _ = app.emit(
         "capture-progress",
         format!(
@@ -1036,6 +1162,148 @@ async fn upload_and_confirm(
         preview_width: width,
         preview_height: height,
     })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{classify_http, summarize_attempts, StepError};
+    use std::cell::Cell;
+
+    #[test]
+    fn summarize_handles_edge_cases() {
+        assert_eq!(summarize_attempts("upload-url", &[]), "upload-url: unknown error");
+        // A lone failure is labelled and timed, no "failed after N" wrapper.
+        assert_eq!(
+            summarize_attempts("r2-upload", &[(1, "timed out".into(), 30.0)]),
+            "r2-upload: timed out (30.0s)"
+        );
+    }
+
+    #[test]
+    fn summarize_collapses_identical_causes_with_all_times() {
+        // Steady outage: one cause, every attempt's elapsed time listed.
+        let history = [
+            (1, "timed out".to_string(), 30.0),
+            (2, "timed out".to_string(), 30.0),
+            (3, "timed out".to_string(), 30.0),
+        ];
+        assert_eq!(
+            summarize_attempts("r2-upload 84KB → acct.r2.dev", &history),
+            "r2-upload 84KB → acct.r2.dev failed after 3 attempts: timed out (30.0s, 30.0s, 30.0s)"
+        );
+    }
+
+    #[test]
+    fn summarize_lists_distinct_causes_with_times() {
+        // Flapping: each attempt's cause and elapsed time preserved.
+        let history = [
+            (1, "timed out".to_string(), 30.0),
+            (2, "connection refused".to_string(), 1.2),
+        ];
+        assert_eq!(
+            summarize_attempts("r2-upload", &history),
+            "r2-upload failed after 2 attempts: #1 timed out (30.0s); #2 connection refused (1.2s)"
+        );
+    }
+
+    #[test]
+    fn classify_409_conflict_is_terminal() {
+        // 409 = session paused/stopped server-side → must not retry.
+        let e = classify_http(reqwest::StatusCode::CONFLICT, "paused".into());
+        assert!(matches!(e, StepError::Terminal(_)));
+    }
+
+    #[test]
+    fn classify_5xx_is_retryable() {
+        let e = classify_http(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom".into());
+        assert!(matches!(e, StepError::Retryable(_)));
+    }
+
+    #[test]
+    fn classify_other_4xx_is_retryable() {
+        // Only 409 is special; everything else (incl. 404) retries, matching
+        // the web client.
+        let e = classify_http(reqwest::StatusCode::NOT_FOUND, "missing".into());
+        assert!(matches!(e, StepError::Retryable(_)));
+    }
+
+    // `start_paused` makes tokio auto-advance virtual time, so the backoff
+    // sleeps complete instantly and we still exercise the real sleep path.
+
+    // Under the paused clock no real time elapses between an attempt's start
+    // and its failure, so per-attempt timing renders as "0.0s".
+
+    #[tokio::test(start_paused = true)]
+    async fn first_attempt_success_does_not_retry() {
+        let attempts = Cell::new(0usize);
+        let result: Result<&str, String> = retry_upload_step!("test", {
+            attempts.set(attempts.get() + 1);
+            Ok("ok")
+        });
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(result.unwrap(), "ok");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retryable_failure_recovers_within_max_attempts() {
+        let attempts = Cell::new(0usize);
+        let result: Result<u32, String> = retry_upload_step!("test", {
+            let n = attempts.get() + 1;
+            attempts.set(n);
+            if n < 3 {
+                Err(StepError::Retryable(format!("transient {n}")))
+            } else {
+                Ok(42u32)
+            }
+        });
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retryable_failure_exhausts_after_three_attempts() {
+        let attempts = Cell::new(0usize);
+        let result: Result<(), String> = retry_upload_step!("upload-url", {
+            attempts.set(attempts.get() + 1);
+            Err::<(), StepError>(StepError::Retryable("timed out".into()))
+        });
+        // MAX_RETRIES = 3 → three attempts; identical causes collapse to one
+        // line, led by the label, with every elapsed time listed.
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            result.unwrap_err(),
+            "upload-url failed after 3 attempts: timed out (0.0s, 0.0s, 0.0s)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn distinct_failures_are_all_listed() {
+        // A flapping failure must stay distinguishable from a steady outage:
+        // each attempt's cause is preserved in the summary.
+        let attempts = Cell::new(0usize);
+        let result: Result<(), String> = retry_upload_step!("r2-upload", {
+            let n = attempts.get() + 1;
+            attempts.set(n);
+            Err::<(), StepError>(StepError::Retryable(format!("cause {n}")))
+        });
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            result.unwrap_err(),
+            "r2-upload failed after 3 attempts: #1 cause 1 (0.0s); #2 cause 2 (0.0s); #3 cause 3 (0.0s)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_failure_short_circuits_without_retry() {
+        let attempts = Cell::new(0usize);
+        let result: Result<(), String> = retry_upload_step!("confirm", {
+            attempts.set(attempts.get() + 1);
+            Err::<(), StepError>(StepError::Terminal("paused".into()))
+        });
+        assert_eq!(attempts.get(), 1);
+        // Terminal errors are labelled too, so the step is never lost.
+        assert_eq!(result.unwrap_err(), "confirm: paused");
+    }
 }
 
 /// Build an ISO-8601 timestamp in UTC for the current instant. Used as the

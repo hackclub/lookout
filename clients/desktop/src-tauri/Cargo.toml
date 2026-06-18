@@ -41,6 +41,11 @@ tauri-plugin-updater = "2"
 tauri-plugin-notification = "2"
 sentry = "0.38"
 
+[dev-dependencies]
+# `test-util` enables tokio's paused-clock (`start_paused`) so retry-backoff
+# tests run instantly instead of actually sleeping 2s+4s between attempts.
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"

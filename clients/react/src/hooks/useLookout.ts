@@ -52,6 +52,17 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   const capturingRef = useRef(false);
   const prevStatusRef = useRef<RecorderStatus>(session.status);
   const intentionalPauseRef = useRef(false);
+  // Per-action re-entrancy guards. A pause/resume/stop request is a single
+  // POST to a rate-limited endpoint (10 req/min per token). When the button
+  // feels unresponsive, users rage-click — and without a guard each click
+  // fired its own request, bursting past the limit and tripping 429s. These
+  // suppress duplicate invocations of the *same* action while one is in
+  // flight; distinct actions (e.g. pause then stop) are unaffected. Refs, not
+  // state: the dedup must take effect synchronously within the same tick, and
+  // it never needs to trigger a re-render.
+  const pauseInFlightRef = useRef(false);
+  const resumeInFlightRef = useRef(false);
+  const stopInFlightRef = useRef(false);
 
   // Sync best tracked seconds to session
   useEffect(() => {
@@ -246,34 +257,52 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   }, [capture.stopSharing]);
 
   const pause = useCallback(async () => {
+    if (pauseInFlightRef.current) return;
+    pauseInFlightRef.current = true;
     intentionalPauseRef.current = true;
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
     capturingRef.current = false;
-    await session.pause();
-    callbacksRef.current.onPause?.({ totalActiveSeconds: session.totalActiveSeconds });
+    try {
+      await session.pause();
+      callbacksRef.current.onPause?.({ totalActiveSeconds: session.totalActiveSeconds });
+    } finally {
+      pauseInFlightRef.current = false;
+    }
   }, [session.pause, session.totalActiveSeconds]);
 
   const resume = useCallback(async () => {
+    if (resumeInFlightRef.current) return;
+    resumeInFlightRef.current = true;
     intentionalPauseRef.current = false;
-    await session.resume();
-    callbacksRef.current.onResume?.();
+    try {
+      await session.resume();
+      callbacksRef.current.onResume?.();
+    } finally {
+      resumeInFlightRef.current = false;
+    }
   }, [session.resume]);
 
   const stop = useCallback(async (options?: { name?: string }) => {
+    if (stopInFlightRef.current) return;
+    stopInFlightRef.current = true;
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
     capturingRef.current = false;
     capture.stopSharing();
-    await session.stop(options?.name);
-    callbacksRef.current.onStop?.({
-      trackedSeconds: session.trackedSeconds,
-      totalActiveSeconds: session.totalActiveSeconds,
-    });
+    try {
+      await session.stop(options?.name);
+      callbacksRef.current.onStop?.({
+        trackedSeconds: session.trackedSeconds,
+        totalActiveSeconds: session.totalActiveSeconds,
+      });
+    } finally {
+      stopInFlightRef.current = false;
+    }
   }, [session.stop, session.trackedSeconds, session.totalActiveSeconds, capture.stopSharing]);
 
   // Fetch video URL when session reaches "complete"

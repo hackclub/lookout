@@ -182,12 +182,16 @@ function render() {
 // Report generation (for copy-paste)
 // ---------------------------------------------------------------------------
 
-export function getReport(): string {
+export function getReport(headline?: string): string {
   const now = new Date().toISOString();
   const platform = navigator.platform || "unknown";
   const ua = navigator.userAgent || "";
 
-  const lines = [`Lookout Desktop v${appVersion} | ${platform} | ${now}`, `UA: ${ua}`, "---"];
+  const lines: string[] = [];
+  // Surface the specific error first so a copied report leads with what
+  // actually went wrong, rather than burying it in the log buffer below.
+  if (headline) lines.push(`Error: ${headline}`, "");
+  lines.push(`Lookout Desktop v${appVersion} | ${platform} | ${now}`, `UA: ${ua}`, "---");
 
   // Last 100 entries
   const recent = entries.slice(-100);
