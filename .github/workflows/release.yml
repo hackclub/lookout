@@ -232,6 +232,34 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      # Authenticode signing above rewrites the .exe bytes, which invalidates
+      # the updater .sig that `tauri build` generated over the unsigned exe.
+      # Regenerate the .sig against the final signed installer so it matches
+      # what we upload — otherwise the updater's signature check fails on the
+      # client and auto-update is rejected even though the download succeeds.
+      - name: Regenerate updater signatures (Windows, after Authenticode signing)
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: bash
+        working-directory: clients/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          signed=0
+          for exe in \
+            src-tauri/target/release/bundle/nsis/*-setup.exe \
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe; do
+            echo "Re-signing updater signature for $exe"
+            npm run --silent tauri -- signer sign "$exe"
+            signed=$((signed + 1))
+          done
+          if [ "$signed" -eq 0 ]; then
+            echo "::error::No NSIS installer matched the updater re-signing globs. The uploaded .sig would be stale (generated over the unsigned exe) and auto-update would fail verification. Check the NSIS bundle path/filename." >&2
+            exit 1
+          fi
+          echo "Re-signed $signed updater signature(s)."
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
