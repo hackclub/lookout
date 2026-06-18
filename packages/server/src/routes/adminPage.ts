@@ -81,6 +81,17 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   .stat .value.prog { font-size: 1.3rem; }
   .prog { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
   .prog .sep, .legend .sep { opacity: .3; margin: 0 1px; font-weight: 400; }
+  /* Horizontal bar chart inside a stat card (client-info breakdowns). */
+  .bars { display: flex; flex-direction: column; gap: .45rem; margin-top: .6rem; }
+  .bar-row {
+    display: grid; grid-template-columns: 4.75rem 1fr 2.5rem;
+    align-items: center; gap: .5rem; font-size: .82rem;
+  }
+  .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .8; }
+  .bar-track { display: block; width: 100%; background: #8883; border-radius: 999px; height: .55rem; overflow: hidden; }
+  .bar-fill { display: block; min-width: 2px; height: 100%; border-radius: 999px; background: #2563eb; }
+  .bar-n { font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; }
+  .bar-empty { opacity: .4; font-size: .9rem; margin-top: .5rem; }
   .legend { font-size: .8rem; margin-bottom: 1.25rem; }
   .legend .sep { margin: 0 4px; }
   .row-actions { display: flex; gap: .4rem; justify-content: flex-end; flex-wrap: wrap; }
@@ -196,6 +207,44 @@ function progress(counts) {
   }).join('<span class="sep">/</span>') + "</span>";
 }
 
+// Per-category bar colors for the client-info charts; unmapped labels fall back
+// to the default accent, and the rolled-up "Other" bar is always muted.
+var TYPE_COLORS = { Desktop: "#2563eb", Web: "#7c3aed", SDK: "#0d9488" };
+var OS_COLORS = { macOS: "#64748b", Windows: "#2563eb", Linux: "#d97706", iOS: "#16a34a", Android: "#7c3aed" };
+
+// Sort [["macOS",690],...] pairs descending, keep the top "cap", and roll the
+// long tail plus "otherSeed" (sessions with no named bucket in this dimension,
+// e.g. unparsable clientInfo) into a single trailing "Other" bar.
+function rollup(pairs, cap, otherSeed) {
+  var sorted = (pairs || []).slice().sort(function (a, b) { return b[1] - a[1]; });
+  var other = otherSeed || 0;
+  if (cap && sorted.length > cap) {
+    other += sorted.slice(cap).reduce(function (s, p) { return s + p[1]; }, 0);
+    sorted = sorted.slice(0, cap);
+  }
+  if (other > 0) sorted.push(["Other", other]);
+  return sorted;
+}
+
+// Render a horizontal bar chart from [["macOS",690],...] pairs, scaled to the
+// largest value in the set. "colors" maps a label to a color; "cap" limits
+// named bars; "otherSeed" seeds the trailing "Other" bucket.
+function barChart(pairs, colors, cap, otherSeed) {
+  pairs = rollup(pairs, cap, otherSeed);
+  if (!pairs.length) return '<div class="bar-empty">no data yet</div>';
+  var max = pairs.reduce(function (m, p) { return Math.max(m, p[1]); }, 0) || 1;
+  return '<div class="bars">' + pairs.map(function (p) {
+    var pct = Math.round((p[1] / max) * 100);
+    var c = p[0] === "Other" ? "#9ca3af" : (colors && colors[p[0]]) || "#2563eb";
+    return '<div class="bar-row">' +
+      '<span class="bar-label" title="' + esc(p[0]) + '">' + esc(p[0]) + "</span>" +
+      '<span class="bar-track"><span class="bar-fill" style="width:' + pct +
+        "%;background:" + c + '"></span></span>' +
+      '<span class="bar-n">' + p[1] + "</span>" +
+    "</div>";
+  }).join("") + "</div>";
+}
+
 // Keys are masked by default so they aren't accidentally exposed (e.g. while
 // screen-sharing the dashboard); "reveal" toggles the plaintext on demand.
 var KEY_MASK = "lk_••••••••";
@@ -247,6 +296,7 @@ function rowHtml(p) {
 
 function renderStats(totals) {
   totals = totals || { statusCounts: {} };
+  var cs = totals.clientStats || {};
   var stats = document.getElementById("stats");
   stats.innerHTML =
     '<div class="stat"><div class="label">Total sessions</div>' +
@@ -254,7 +304,14 @@ function renderStats(totals) {
     '<div class="stat"><div class="label">Cumulative hours</div>' +
       '<div class="value">' + ((totals.trackedSeconds || 0) / 3600).toFixed(1) + "</div></div>" +
     '<div class="stat"><div class="label">Session progress</div>' +
-      '<div class="value prog">' + progress(totals.statusCounts) + "</div></div>";
+      '<div class="value prog">' + progress(totals.statusCounts) + "</div></div>" +
+    // Client-info breakdowns, keyed off each session's first reported clientInfo.
+    '<div class="stat"><div class="label">Client types</div>' +
+      barChart(cs.types, TYPE_COLORS, 4, cs.typesOther) + "</div>" +
+    '<div class="stat"><div class="label">Operating systems</div>' +
+      barChart(cs.oses, OS_COLORS, 4, cs.osesOther) + "</div>" +
+    '<div class="stat"><div class="label">Top app versions</div>' +
+      barChart(cs.versions, null, 4, cs.versionsOther) + "</div>";
 }
 
 async function load() {

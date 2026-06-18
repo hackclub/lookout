@@ -247,6 +247,68 @@ export async function adminRoutes(app: FastifyInstance) {
     // Global totals across ALL sessions, including program-less ones.
     const [totals] = await db.select(aggCols).from(schema.sessions);
 
+    // Client-info breakdown for the dashboard graphs. For each session we take
+    // its first reported clientInfo (earliest screenshot by requested_at that
+    // carried one — same "first recorded" rule as getFirstClientInfo), then
+    // group identical strings so each distinct string is parsed just once.
+    const clientInfoResult = await db.execute(sql`
+      select client_info, count(*)::int as n
+      from (
+        select distinct on (${schema.screenshots.sessionId})
+          ${schema.screenshots.clientInfo} as client_info
+        from ${schema.screenshots}
+        where ${schema.screenshots.clientInfo} is not null
+        order by ${schema.screenshots.sessionId}, ${schema.screenshots.requestedAt} asc
+      ) t
+      group by client_info
+    `);
+    const clientInfoRows = (
+      clientInfoResult as unknown as {
+        rows: Array<{ client_info: string; n: number }>;
+      }
+    ).rows;
+
+    // Tally distinct strings into named buckets (type / OS / version). A string
+    // that fails to parse — or parses but lacks a dimension (e.g. a desktop
+    // client reports no OS segment) — feeds that dimension's "other" seed, so
+    // the dashboard's "Other" bar stays honest instead of silently dropping it.
+    const typeCounts = new Map<string, number>();
+    const osCounts = new Map<string, number>();
+    const versionCounts = new Map<string, number>();
+    let typesOther = 0;
+    let osesOther = 0;
+    let versionsOther = 0;
+    let clientTotal = 0;
+    const bump = (m: Map<string, number>, k: string, n: number) =>
+      m.set(k, (m.get(k) ?? 0) + n);
+    const titleCase = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+    const typeLabel = (t: string) => (t === "sdk" ? "SDK" : titleCase(t));
+    for (const r of clientInfoRows) {
+      clientTotal += r.n;
+      const parts = parseClientInfo(r.client_info);
+      if (!parts) {
+        typesOther += r.n;
+        osesOther += r.n;
+        versionsOther += r.n;
+        continue;
+      }
+      bump(typeCounts, typeLabel(parts.type), r.n);
+      bump(versionCounts, parts.version, r.n);
+      if (parts.osType) bump(osCounts, parts.osType, r.n);
+      else osesOther += r.n;
+    }
+    const toPairs = (m: Map<string, number>): Array<[string, number]> =>
+      [...m.entries()].sort((a, b) => b[1] - a[1]);
+    const clientStats = {
+      total: clientTotal,
+      types: toPairs(typeCounts),
+      typesOther,
+      oses: toPairs(osCounts),
+      osesOther,
+      versions: toPairs(versionCounts),
+      versionsOther,
+    };
+
     const statsByName = new Map(statsRows.map((s) => [s.program, s]));
     const keysByProgram = new Map<string, typeof keys>();
     for (const k of keys) {
@@ -300,6 +362,7 @@ export async function adminRoutes(app: FastifyInstance) {
           empty: totals?.empty ?? 0,
           failed: totals?.failed ?? 0,
         },
+        clientStats,
       },
     };
   });
