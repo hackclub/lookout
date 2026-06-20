@@ -13,7 +13,7 @@
   "dependencies": {
     "@lookout/react": "*",
     "@lookout/shared": "*",
-    "@videojs/react": "^10.0.0-beta.8",
+    "@videojs/react": "^10.0.0-beta.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

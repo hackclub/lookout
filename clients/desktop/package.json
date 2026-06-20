@@ -22,7 +22,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.0.0",
     "@tauri-apps/plugin-updater": "^2.10.0",
-    "@videojs/react": "^10.0.0-beta.8",
+    "@videojs/react": "^10.0.0-beta.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tauri-plugin-liquid-glass-api": "^0.1.6",
