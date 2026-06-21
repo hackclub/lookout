@@ -23,7 +23,7 @@
     "drizzle-orm": "^0.45.1",
     "fastify": "^5.8.3",
     "pg": "^8.13.0",
-    "pg-boss": "^10.1.0"
+    "pg-boss": "^12.19.1"
   },
   "devDependencies": {
     "@types/pg": "^8.11.0",
