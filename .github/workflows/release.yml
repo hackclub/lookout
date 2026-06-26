@@ -187,7 +187,7 @@ jobs:
                 echo "depend = glib2" >> .PKGINFO
                 echo "depend = gtk3" >> .PKGINFO
                 echo "depend = hicolor-icon-theme" >> .PKGINFO
-                echo "depend = libsoup" >> .PKGINFO
+                echo "depend = libsoup3" >> .PKGINFO
                 echo "depend = pango" >> .PKGINFO
                 echo "depend = webkit2gtk-4.1" >> .PKGINFO
                 
