@@ -42,10 +42,9 @@ import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.j
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
-import { applyLinuxChrome, useBackdropState, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
+import { applyLinuxChrome, useBackdropState, useWindowFrameState, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
 import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
-import { useWindowFrameState } from "./components/WindowResizeHandles.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -565,13 +564,13 @@ function MainWindowApp() {
   // Resolves to the defaults untouched on every other platform.
   const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
   useBackdropState();
-  // Fixed size hints don't stop a tiling WM sizing this window, so its frame
-  // has to collapse under one just as the editor's does.
+  // Fixed size hints don't stop a tiling WM sizing this window, so its
+  // corner rounding has to square off under one just as the editor's does.
   useWindowFrameState();
   useEffect(() => {
-    // The main window is undecorated on Linux (lib.rs), so it owns its
-    // corners and its header bar.
-    void applyLinuxChrome({ undecorated: true }).then(setAppearance);
+    // The main window wears GTK's client-side frame on Linux (lib.rs), so
+    // the webview keeps its top corners inside it and draws the header bar.
+    void applyLinuxChrome({ csd: true }).then(setAppearance);
   }, []);
 
   // Listen for native menu navigation events
@@ -625,10 +624,10 @@ function MainWindowApp() {
         });
     } else {
       console.log("[vibrancy] skipped on Linux");
-      // Nothing to do: the window is undecorated here and linuxChrome.ts
-      // paints #root (rounding its corners) while leaving html and body
-      // transparent, which is what lets those corners read as corners
-      // rather than as squares in the window colour.
+      // Nothing to do: GTK draws this window's frame and linuxChrome.ts
+      // paints #root (rounding its top corners) while leaving html and
+      // body transparent, which is what keeps the webview from poking
+      // square corners out over the frame's rounding.
     }
 
     return () => {

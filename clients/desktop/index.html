@@ -77,27 +77,20 @@
         html:not([data-theme="dark"]) { background: #fafafa; }
       }
 
-      /* Linux draws its own rounded window, and the class lands synchronously
-         in the script below — so the first frame can be the right shape too
-         rather than a square that rounds off a moment later. */
+      /* Linux: GTK draws the window frame (window_frame.rs), but it can't
+         clip the webview to the frame's rounded top corners, so #root
+         rounds them itself over a transparent background. The class lands
+         synchronously in the script above, so the first frame can be the
+         right shape too rather than square corners that round off a moment
+         later. The radius shadows WINDOW_TOP_RADIUS in linuxChrome.ts. */
       html.os-linux { background: transparent; }
       html.os-linux #root {
-        position: fixed;
-        inset: 40px;
-        height: auto;
         background: #242424;
-        border-radius: 12px;
-        box-shadow:
-          0 0 0 1px rgba(255, 255, 255, 0.18),
-          0 2px 8px rgba(0, 0, 0, 0.1),
-          0 8px 28px rgba(0, 0, 0, 0.14);
+        border-radius: 8px 8px 0 0;
+        overflow: hidden;
       }
       html.os-linux[data-theme="light"] #root {
         background: #fafafa;
-        box-shadow:
-          0 0 0 1px rgba(0, 0, 0, 0.18),
-          0 2px 8px rgba(0, 0, 0, 0.08),
-          0 8px 28px rgba(0, 0, 0, 0.1);
       }
 
       /* Linux: prefer the desktop's own UI font over the bundled one, so the

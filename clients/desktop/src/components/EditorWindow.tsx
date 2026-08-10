@@ -7,9 +7,8 @@ import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
-import { applyLinuxChrome, useBackdropState, WINDOW_MARGIN, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
+import { applyLinuxChrome, useBackdropState, useWindowFrameState, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
-import { WindowResizeHandles, useWindowFrameState } from "./WindowResizeHandles.js";
 import { isLinux as IS_LINUX } from "../platform.js";
 
 /** Event the editor window emits after applying cuts, so the main window
@@ -54,37 +53,47 @@ export async function openEditorWindow(token: string): Promise<void> {
     return;
   }
   const isMacOS = navigator.userAgent.includes("Mac");
-  // Linux reserves a transparent frame around the visible window for its
-  // outer border and shadow, so every dimension grows by twice it — the
-  // content keeps the size these numbers describe.
-  const pad = IS_LINUX ? WINDOW_MARGIN * 2 : 0;
   const win = new WebviewWindow(label, {
     url: `${window.location.pathname}#/editor?token=${token}`,
     title: "Edit timelapse",
-    width: 940 + pad,
-    height: 660 + pad,
+    width: 940,
+    height: 660,
     // The floor is what the shell actually needs: chrome + a legible
     // stage + the dock. Below this the layout would be cramped rather
     // than broken — it still reflows — but there's no reason to allow it.
-    minWidth: 620 + pad,
-    minHeight: 480 + pad,
+    minWidth: 620,
+    minHeight: 480,
     resizable: true,
     center: true,
     // Transparent + overlay titlebar is what lets the vibrancy material
-    // show through, matching the main window's chrome exactly.
+    // show through, matching the main window's chrome exactly. On Linux
+    // the transparency is what lets GTK's rounded frame show past the
+    // webview's rounded top corners.
     transparent: true,
     // Overlay titlebar with the title VISIBLE: macOS draws and centers it
     // for us, so it can't drift out of alignment with the traffic lights
     // the way a hand-placed label does.
     ...(isMacOS ? { titleBarStyle: "overlay" as const } : {}),
-    // Linux: no GTK titlebar, because the window draws its own header bar.
-    // The resize borders that disappear with it are redrawn in the webview
-    // (WindowResizeHandles), so the window stays resizable.
-    ...(IS_LINUX ? { decorations: false } : {}),
+    // Linux: born hidden so the native side can swap in the zero-height
+    // GTK titlebar (window_frame.rs) before the window first realizes;
+    // GTK's frame then carries the shadow, corners and resize edges while
+    // the webview's header bar stays the visible titlebar. The command
+    // shows the window once the frame is on.
+    ...(IS_LINUX ? { visible: false } : {}),
   });
   win.once("tauri://error", (e) => {
     console.error("[editor] failed to open editor window:", e);
   });
+  if (IS_LINUX) {
+    void win.once("tauri://created", () => {
+      invoke("show_with_gtk_frame", { label }).catch((e) => {
+        // Never leave the user with a window that exists but can't be
+        // seen — a stock frame beats an invisible editor.
+        console.error("[editor] could not adopt the GTK frame:", e);
+        void win.show().catch(() => {});
+      });
+    });
+  }
   await emit(EDITOR_OPENED_EVENT, { token }).catch(() => {});
 }
 
@@ -259,10 +268,10 @@ export function EditorWindow({ token }: { token: string }) {
     const isLinux = navigator.userAgent.toLowerCase().includes("linux");
 
     if (isLinux) {
-      // Adwaita palette, session accent, desktop font, and the rounded
-      // corners this window now owns — it's undecorated here, same as the
-      // main window.
-      void applyLinuxChrome({ undecorated: true }).then(setAppearance);
+      // Adwaita palette, session accent, desktop font, and the transparent
+      // background that keeps the webview's corners inside the GTK frame —
+      // this window wears one, same as the main window.
+      void applyLinuxChrome({ csd: true }).then(setAppearance);
       return;
     }
 
@@ -386,15 +395,12 @@ export function EditorWindow({ token }: { token: string }) {
           through the window's normal close path, so the publish-on-close
           confirmation below still runs. */}
       {IS_LINUX && (
-        <>
-          <HeaderBar
-            title={sessionName ?? "Edit timelapse"}
-            subtitle={sessionName ? "Editing timelapse" : undefined}
-            appearance={appearance}
-            maximizable
-          />
-          <WindowResizeHandles />
-        </>
+        <HeaderBar
+          title={sessionName ?? "Edit timelapse"}
+          subtitle={sessionName ? "Editing timelapse" : undefined}
+          appearance={appearance}
+          maximizable
+        />
       )}
 
       {/* Body owns the rest. min-height:0 is what lets the stage inside

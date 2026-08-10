@@ -1,9 +1,10 @@
 /**
  * A client-side-decorated header bar, in the shape GTK apps use.
  *
- * On Linux the window is undecorated (see `set_decorations(false)` in
- * lib.rs), so this bar *is* the titlebar: title and subtitle on the leading
- * edge, a single close button trailing, page actions beside it.
+ * On Linux the window's GTK titlebar is a zero-height widget (see
+ * window_frame.rs) — GTK draws the frame, and this bar *is* the visible
+ * titlebar: title and subtitle on the leading edge, a single close button
+ * trailing, page actions beside it.
  *
  * It is deliberately flat — no fill, no bottom border. A header that paints
  * itself a different colour reads as a separate thing stacked on the app,

@@ -9,7 +9,7 @@ mod native_tray;
 mod pipewire;
 mod screencast;
 mod tray;
-mod window_shape;
+mod window_frame;
 #[cfg(target_os = "windows")]
 mod windows_permissions;
 
@@ -3548,7 +3548,8 @@ pub fn run() {
             is_wayland,
             capture_diagnostics::capture_environment,
             desktop_appearance::desktop_appearance,
-            window_shape::sync_window_frame,
+            window_frame::show_with_gtk_frame,
+            window_frame::window_manager_sized,
             open_external_url,
             native_menu::show_add_menu,
             native_menu::prefetch_add_menu_icons,
@@ -3727,38 +3728,27 @@ pub fn run() {
                 window.set_maximizable(false)?;
                 window.set_fullscreen(false)?;
 
-                // Linux: drop the server-side titlebar and let the webview
-                // draw a client-side header bar instead (see HeaderBar.tsx).
-                // A GTK titlebar stacked on top of the app's own chrome is
-                // two visual systems in one window, which is most of why
-                // Lookout read as a visitor on the desktop.
+                // Linux: swap the GTK titlebar for a zero-height one, which
+                // flips GTK into drawing its client-side frame — themed
+                // shadow, border, rounded corners, resize edges — around the
+                // webview's own header bar (HeaderBar.tsx). A visible GTK
+                // titlebar stacked on top of the app's own chrome is two
+                // visual systems in one window, which is most of why Lookout
+                // read as a visitor on the desktop; hand-drawn CSS
+                // decorations were the previous answer, and read just as
+                // foreign everywhere that isn't GNOME.
+                //
+                // Setup runs on the GTK main thread, and the window is
+                // created hidden (`visible: false` in tauri.conf.json)
+                // precisely so this lands before the first realize.
                 #[cfg(target_os = "linux")]
-                {
-                    window.set_decorations(false)?;
-
-                    // Grow the window by the transparent frame the webview
-                    // draws its outer border and shadow into (see
-                    // WINDOW_MARGIN in linuxChrome.ts). Both paint outside
-                    // the content box, so without the extra room the
-                    // compositor simply clips them away.
-                    //
-                    // The bounds have to move with it: this window is fixed
-                    // at 480x640 by min == max, and a set_size past the
-                    // maximum would just be clamped back. Widen the limits
-                    // first, then resize, then re-centre — the window grew
-                    // around its old top-left otherwise.
-                    const MARGIN: f64 = 40.0;
-                    let scale = window.scale_factor()?;
-                    let inner: tauri::LogicalSize<f64> = window.inner_size()?.to_logical(scale);
-                    let grown = tauri::LogicalSize::new(
-                        inner.width + MARGIN * 2.0,
-                        inner.height + MARGIN * 2.0,
-                    );
-                    window.set_min_size(Some(grown))?;
-                    window.set_max_size(Some(grown))?;
-                    window.set_size(grown)?;
-                    window.center()?;
+                if let Err(e) = window_frame::adopt_gtk_frame(&window) {
+                    eprintln!("[window-frame] main window keeps its stock frame: {e}");
                 }
+
+                // Hidden in the config so the Linux frame above beats the
+                // first realize; every platform reveals it here.
+                window.show()?;
 
                 // Auto-grant camera/microphone permissions on Windows so the
                 // WebView2 native prompt never appears.

@@ -3,11 +3,21 @@
  *
  * The shared design system now carries Adwaita's surfaces itself, so the
  * palette isn't this file's job any more. What is: the session's own accent
- * colour and UI font, read from GSettings, plus the chrome that only an
- * undecorated GTK window needs. macOS and Windows never load any of it.
+ * colour and UI font, read from GSettings, plus the little the webview still
+ * has to do inside a GTK-framed window. macOS and Windows never load any
+ * of it.
+ *
+ * The window frame itself — shadow, outer border, rounded corners, resize
+ * edges — is GTK's, not ours. The native side gives each window a
+ * zero-height GTK titlebar (window_frame.rs), which flips GTK into its
+ * client-side decoration mode: the frame is drawn by the session's own GTK
+ * theme, so it matches the desktop on GNOME and KDE and everything else,
+ * and GTK squares it off on its own when the window is maximized or tiled.
+ * Earlier revisions drew all of that by hand in CSS, hardcoded to Adwaita's
+ * look, which is exactly why it read wrong anywhere that wasn't GNOME.
  */
 import { useEffect } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { setAccentColor } from "@lookout/react";
 import { isLinux } from "./platform.js";
 import { invoke } from "./logger.js";
@@ -27,46 +37,22 @@ export const DEFAULT_APPEARANCE: DesktopAppearance = {
 /** The header bar's height, in px. Adwaita's is 46 plus a 1px hairline. */
 export const HEADER_BAR_HEIGHT = 47;
 
-/** Adwaita rounds windows and dialogs at 12px; the shared tokens stop at 10. */
-export const WINDOW_RADIUS = 12;
-
 /**
- * Transparent frame reserved around the visible window, in px per side.
+ * The radius the webview rounds its own top corners at, in px.
  *
- * A window is normally exactly the size of its content, which leaves nowhere
- * to draw an outer border or a shadow — both paint outside the content box,
- * i.e. off the window, where the compositor clips them. GTK solves this by
- * making the window bigger than it looks and keeping the extra transparent;
- * the shadow lives in there, and so does the invisible frame you grab to
- * resize. Same trick here.
+ * GTK rounds the window frame, but GTK3 does not clip child widgets to that
+ * radius — a webview with an opaque background pokes square corners out
+ * over the frame's rounding. So the webview stays transparent and #root
+ * rounds its top corners itself, matching GTK3 Adwaita's decoration radius
+ * (8px, top corners only; the bottom of a GTK3 window is square).
  *
- * The native side grows each window by twice this (lib.rs for the main
- * window, EditorWindow.tsx for the editor), so the content keeps its
- * intended size.
- *
- * IT MUST BE AT LEAST AS LARGE AS THE SHADOW REACHES. A box-shadow extends
- * `offset + blur` past its box, and anything past the frame is off the
- * window and clipped away — a shadow that looks generous in a browser gets
- * a hard straight edge on the desktop. The shadows below are sized against
- * this number; raising one means raising the other.
+ * A theme with a smaller radius leaves a sliver of GTK's window background
+ * showing in the corners — the theme's own surface colour, which is as
+ * close to invisible as a hardcoded number gets. The alternative, reading
+ * the radius out of the theme at runtime, means resolving GTK's internal
+ * `decoration` style node; not worth it for two corners.
  */
-export const WINDOW_MARGIN = 40;
-
-/**
- * How much of that frame still accepts pointer input, measured inward from
- * the visible window's edge.
- *
- * The rest of the frame is passed through to whatever is behind, so a click
- * on the shadow doesn't land on Lookout — but this band has to stay live,
- * because it's where the resize strips are. Mirrored in window_shape.rs.
- */
-export const RESIZE_BAND = 8;
-
-/**
- * The outer ring of the frame that passes clicks through: everything
- * between the window's real edge and the resize band.
- */
-export const SHADOW_PASSTHROUGH = WINDOW_MARGIN - RESIZE_BAND;
+const WINDOW_TOP_RADIUS = 8;
 
 /**
  * Linux-only chrome that the shared theme can't carry.
@@ -74,7 +60,8 @@ export const SHADOW_PASSTHROUGH = WINDOW_MARGIN - RESIZE_BAND;
  * The Adwaita palette itself now lives in the shared theme — it's the app's
  * baseline on every platform — so what's left here is the part that only
  * makes sense on a GTK desktop: the header bar's control colours, GTK's
- * cursor behaviour, and the rounded corners an undecorated window owns.
+ * cursor behaviour, and keeping the webview's top corners inside the
+ * GTK-drawn frame.
  *
  * Specificity note: these still key off `html.os-linux[data-theme=…]`
  * (0,2,1) because the shared sheet's light block is `:root[data-theme=
@@ -101,7 +88,6 @@ const ADWAITA_CSS = `
     --color-popover-border: rgba(255, 255, 255, 0.14);
     --color-popover-hover: rgba(255, 255, 255, 0.1);
     --color-popover-separator: rgba(255, 255, 255, 0.15);
-    --color-window-border: rgba(255, 255, 255, 0.18);
   }
   html.os-linux[data-theme="light"] {
     --color-headerbar-control: rgba(0, 0, 0, 0.08);
@@ -111,7 +97,6 @@ const ADWAITA_CSS = `
     --color-popover-border: rgba(0, 0, 0, 0.12);
     --color-popover-hover: rgba(0, 0, 0, 0.08);
     --color-popover-separator: rgba(0, 0, 0, 0.12);
-    --color-window-border: rgba(0, 0, 0, 0.18);
   }
   /* GTK never swaps in a hand cursor over a button — the pointer is a web
      convention, and having it follow every control around is one of the
@@ -120,8 +105,8 @@ const ADWAITA_CSS = `
      !important because the app sets cursor:pointer inline in a couple of
      dozen components, and forking each of them per platform would be a far
      worse trade than one scoped override. The selector deliberately does
-     NOT match everything: the resize handles and the editor's scrub cursors
-     carry real information, and they set their own values. */
+     NOT match everything: the editor's scrub cursors carry real
+     information, and they set their own values. */
   html.os-linux button,
   html.os-linux a,
   html.os-linux [role="button"],
@@ -133,79 +118,38 @@ const ADWAITA_CSS = `
   html.os-linux [contenteditable="true"] {
     cursor: text !important;
   }
-  /* Undecorated windows draw their own corners. They're clipped on #root
-     rather than the body because the body has to stay transparent for the
-     rounding to show anything but a square. Opt in per window, since a
-     window that kept its GTK titlebar must not round its own content. */
+  /* GTK draws the window frame, but it cannot clip the webview to the
+     frame's rounded top corners — GTK3 doesn't clip children. So the
+     webview stays transparent and #root rounds itself, letting GTK's own
+     corner show through the gap. Opt in per window: only the windows the
+     native side gave a zero-height GTK titlebar carry .lookout-csd. */
   html.os-linux.lookout-csd, html.os-linux.lookout-csd body {
     background: transparent;
   }
   html.os-linux.lookout-csd {
-    --lookout-window-radius: ${WINDOW_RADIUS}px;
-    --lookout-window-margin: ${WINDOW_MARGIN}px;
+    --lookout-window-radius: ${WINDOW_TOP_RADIUS}px;
   }
-  /* Snapped or maximized: the window is flush with the screen edge, and
-     rounding it there leaves four notches of desktop showing through — the
-     clearest tell that an app is drawing its own decorations badly. */
+  /* Snapped or maximized: GTK squares its frame, and rounded content
+     corners would leave two notches poking out of it. Mirrors GTK's own
+     behaviour, driven by the same compositor state (useWindowFrameState). */
   html.os-linux.lookout-csd.lookout-snapped {
     --lookout-window-radius: 0px;
   }
-  /* The visible window: inset from the real one by the transparent frame,
-     so the outer border and the shadow have somewhere to land. Both are
-     spread/blur on one box-shadow — the 1px spread ring IS the outer
-     border, which keeps it off the content box entirely and lets it follow
-     the corner radius. */
   html.os-linux.lookout-csd #root {
-    position: fixed;
-    inset: var(--lookout-window-margin);
-    height: auto;
     background: var(--color-bg-body);
-    border-radius: var(--lookout-window-radius);
+    border-radius: var(--lookout-window-radius) var(--lookout-window-radius) 0 0;
     overflow: hidden;
-    /* Wide and faint rather than tight and dark. A compositor shadow is
-       mostly a large, very soft falloff — reading the alpha off a dark
-       screenshot tempts you into something far heavier than GNOME's, which
-       then looks like a drop shadow on a web card. */
-    /* Reach is 8 + 28 = 36, inside the 40px frame. */
-    box-shadow:
-      0 0 0 1px var(--color-window-border),
-      0 2px 8px rgba(0, 0, 0, 0.1),
-      0 8px 28px rgba(0, 0, 0, 0.14);
-    transition: box-shadow 160ms ease-out;
   }
-  /* Unfocused windows cast less. GTK pulls its shadow back in :backdrop so
-     the focused window is the one that looks lifted. */
-  html.os-linux.lookout-csd.lookout-backdrop #root {
-    box-shadow:
-      0 0 0 1px var(--color-window-border),
-      0 1px 4px rgba(0, 0, 0, 0.06),
-      0 4px 16px rgba(0, 0, 0, 0.09);
-  }
-  /* Snapped or maximized: the frame collapses so the content fills the
-     screen edge to edge, and the outline and shadow have nothing to
-     separate the window from. */
-  html.os-linux.lookout-csd.lookout-snapped #root {
-    inset: 0;
-    border-radius: 0;
-    box-shadow: none;
-  }
-  /* Modal backdrops portal to <body>, so they cover the whole window —
-     including the transparent frame, which paints the dim over the shadow
-     and squares off the rounded corners. Pull them in to the visible window.
-
-     !important because these set their own inset inline, and an inline
-     declaration otherwise beats anything a stylesheet says. */
+  /* Modal backdrops portal to <body>, so they'd square off the rounded top
+     corners; give them the same rounding. */
   html.os-linux.lookout-csd [data-lookout-overlay] {
-    inset: var(--lookout-window-margin) !important;
-    border-radius: var(--lookout-window-radius);
+    border-radius: var(--lookout-window-radius) var(--lookout-window-radius) 0 0;
     overflow: hidden;
   }
-  html.os-linux.lookout-csd.lookout-snapped [data-lookout-overlay] {
-    inset: 0 !important;
-    border-radius: 0;
-  }
 
-  /* The header bar dims with the window, GTK's :backdrop state. */
+  /* The header bar dims with the window, GTK's :backdrop state. GTK pulls
+     the frame's shadow back on its own when focus leaves; this keeps the
+     webview-drawn titlebar in step with it. */
   html.os-linux .lookout-headerbar {
     transition: opacity 160ms ease-out;
   }
@@ -254,38 +198,111 @@ if (isLinux && typeof document !== "undefined" && !document.querySelector("style
 }
 
 /**
- * Reconcile the window's frame with how the compositor is treating it.
- *
- * Applies the input shape and answers whether the frame is collapsed —
- * true when the window manager is sizing this window (tiled, maximized,
- * fullscreen), which is read from the compositor rather than inferred.
+ * Whether the window manager is sizing this window — tiled, maximized,
+ * fullscreen — read from the compositor rather than inferred.
  *
  * That distinction is the whole point under a tiling WM: every window there
- * is WM-sized, and a frame kept in that state is not a shadow but a band of
- * desktop wedged between neighbours.
+ * is WM-sized, and rounded content corners in that state poke out of a
+ * frame GTK has already squared.
  *
  * Returns null if the native side couldn't answer, so callers can fall back
  * rather than treat "unknown" as "floating".
  */
-export async function syncWindowFrame(inset: number): Promise<boolean | null> {
+async function windowManagerSized(): Promise<boolean | null> {
   if (!isLinux) return null;
   try {
-    return await invoke<boolean>("sync_window_frame", { inset });
+    return await invoke<boolean>("window_manager_sized");
   } catch (e) {
-    // Worth knowing about, not worth breaking over: the window keeps
-    // catching clicks on its own shadow.
-    console.warn("[csd] could not sync the window frame:", e);
+    // Worth knowing about, not worth breaking over: the corners simply
+    // keep their rounding a beat longer.
+    console.warn("[csd] could not read window state:", e);
     return null;
   }
 }
 
 /**
+ * Fallback for when the native side can't report the window's state.
+ *
+ * A geometry guess: a window the WM has sized usually matches the work area
+ * on at least one axis. It cannot see a quarter-tile, which is exactly why
+ * it is only the fallback — `windowManagerSized` asks the compositor.
+ *
+ * Deliberately compares sizes and not positions: Wayland doesn't tell a
+ * client where its own window is, so `outerPosition()` is either unavailable
+ * or a lie there.
+ */
+async function isFlushWithWorkArea(): Promise<boolean> {
+  const win = getCurrentWindow();
+  try {
+    if (await win.isMaximized()) return true;
+    const monitor = await currentMonitor();
+    if (!monitor) return false;
+    const size = await win.outerSize();
+    const work = monitor.workArea.size;
+    // A couple of physical pixels of slack, scaled: fractional scaling means
+    // an exactly-snapped window can land a pixel off its own work area.
+    const slack = Math.max(2, Math.ceil(monitor.scaleFactor));
+    return (
+      Math.abs(size.height - work.height) <= slack ||
+      Math.abs(size.width - work.width) <= slack
+    );
+  } catch (e) {
+    // Rounded corners on a snapped window are a cosmetic wart; a throw here
+    // that took the window down with it would not be.
+    console.warn("[csd] could not read window geometry:", e);
+    return false;
+  }
+}
+
+/**
+ * Keep the webview's corner rounding in step with the compositor: rounded
+ * while the window floats, squared the moment the window manager takes over
+ * sizing it — which is when GTK squares the frame the corners sit inside.
+ */
+export function useWindowFrameState(): void {
+  useEffect(() => {
+    if (!isLinux) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const sync = async () => {
+      const reported = await windowManagerSized();
+      const snapped = reported ?? (await isFlushWithWorkArea());
+      if (cancelled) return;
+      document.documentElement.classList.toggle("lookout-snapped", snapped);
+    };
+
+    // `onResized` fires continuously through a drag, and each check costs a
+    // few IPC round trips. Snapping is a discrete event, so trailing-edge
+    // debouncing loses nothing and spares the bridge.
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void sync(); }, 100);
+    };
+
+    void sync();
+
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onResized(schedule).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      if (unlisten) unlisten();
+      document.documentElement.classList.remove("lookout-snapped");
+    };
+  }, []);
+}
+
+/**
  * Track focus and mirror it onto the document as GTK's :backdrop state.
  *
- * One class for the whole window rather than per-component opacity, because
- * both the header bar and the window's own shadow have to dim together —
- * they're the same signal, and driving them from two places is how they end
- * up disagreeing.
+ * GTK dims the frame's shadow itself when focus leaves; the header bar is
+ * the webview's, so its half of the signal has to be driven from here, off
+ * the same window-focus events GTK is reacting to.
  */
 export function useBackdropState(): void {
   useEffect(() => {
@@ -332,8 +349,9 @@ export function useBackdropState(): void {
  * Apply the Adwaita palette immediately, then fold in whatever GSettings
  * reports once it answers.
  *
- * `undecorated` says this window has had its GTK titlebar removed and is
- * therefore responsible for its own corners and header bar.
+ * `csd` says the native side gave this window a zero-height GTK titlebar
+ * (window_frame.rs) — GTK draws its frame, and the webview must keep its
+ * top corners inside it.
  *
  * The stylesheet itself is already in the document by the time this runs —
  * it goes in on import, above. What's left here needs a round trip to the
@@ -341,19 +359,15 @@ export function useBackdropState(): void {
  * that's better than holding the first paint hostage to an IPC call.
  */
 export async function applyLinuxChrome(
-  { undecorated = false }: { undecorated?: boolean } = {},
+  { csd = false }: { csd?: boolean } = {},
 ): Promise<DesktopAppearance> {
   if (!isLinux) return DEFAULT_APPEARANCE;
 
   document.documentElement.classList.add("os-linux");
-  // Opts this window into drawing its own rounded corners. Only the windows
-  // that actually had their decorations taken away may claim it.
-  if (undecorated) {
+  // Opts this window into transparent-background-plus-rounded-#root. Only
+  // the windows wearing GTK's client-side frame may claim it.
+  if (csd) {
     document.documentElement.classList.add("lookout-csd");
-    // Stop the shadow catching clicks, and collapse the frame straight away
-    // if we opened into a tile. Re-checked on every resize by
-    // useWindowFrameState.
-    void syncWindowFrame(SHADOW_PASSTHROUGH);
   }
 
   let appearance = DEFAULT_APPEARANCE;

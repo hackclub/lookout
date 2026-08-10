@@ -23,6 +23,7 @@
         "maxHeight": 640,
         "resizable": false,
         "center": true,
+        "visible": false,
         "fullscreen": false,
         "maximizable": false,
         "transparent": true,
