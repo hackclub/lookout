@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data: https:; media-src 'self' blob: https:; connect-src 'self' https:; worker-src 'self' blob:; base-uri 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- A session URL is a private capability. Keep it out of search results
+         and out of the Referer header on any outbound navigation. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Record — Lookout</title>
+    <link rel="icon" href="/favicon.ico" />
+    <style>
+      /* Self-hosted so the page makes no third-party request: a session URL
+         is a capability and shouldn't leak to a font CDN. Absolute paths,
+         matching the app's /session/ base. */
+      @font-face {
+        font-family: 'Geist';
+        src: url('/session/fonts/Geist-Regular.woff2') format('woff2');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'Geist';
+        src: url('/session/fonts/Geist-Medium.woff2') format('woff2');
+        font-weight: 500;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'Geist';
+        src: url('/session/fonts/Geist-SemiBold.woff2') format('woff2');
+        font-weight: 600;
+        font-style: normal;
+        font-display: swap;
+      }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Geist', 'Segoe UI', Roboto, sans-serif;
+        /* The SDK theme owns the palette (and follows prefers-color-scheme);
+           these two just keep the pre-hydration paint from flashing white. */
+        background: var(--color-bg-body, #242424);
+        color: var(--color-text-primary, #e5e5e5);
+        min-height: 100vh;
+      }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+      /* Shown from the first paint until React takes over the container, so
+         the wait for the bundle is a spinner rather than an empty grey page.
+         React clears it on mount. */
+      .boot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 70vh;
+      }
+      .boot-ring {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.12);
+        border-top-color: rgba(255, 255, 255, 0.8);
+        animation: spin 0.8s linear infinite;
+      }
+
+      /* The stock mark is a black flag with the wordmark knocked out of it,
+         which vanishes on a dark background. Dark is this app's default (the
+         SDK theme only goes light when the OS asks), so invert by default and
+         undo it for light. */
+      .hc-flag { opacity: 0.4; filter: invert(1); }
+
+      @media (prefers-color-scheme: light) {
+        .boot-ring {
+          border-color: rgba(0, 0, 0, 0.1);
+          border-top-color: rgba(0, 0, 0, 0.6);
+        }
+        .hc-flag { filter: none; opacity: 0.35; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot"><div class="boot-ring"></div></div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

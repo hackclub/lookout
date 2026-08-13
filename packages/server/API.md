@@ -842,6 +842,11 @@ Creates a new session in `pending` state.
 }
 ```
 
+`sessionUrl` serves a recorder Lookout hosts, where the user chooses between
+the desktop app, this browser, and a camera. Alongside the token it takes
+`?app=` (your program's name, for telemetry) and `?edit=false` (drop the
+"Edit & save" option from the stop dialog).
+
 ---
 
 ### Get Session Details (Admin)

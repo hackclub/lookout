@@ -253,8 +253,18 @@ jobs:
 
       # Vitest hook tests for the user-facing recording timer. Pinned to
       # the SDK + web — desktop uses the SDK build so coverage transits.
+      # The recorder Lookout hosts itself at /session. Type-checked here
+      # because it ships inside the server image — a break in it is a break
+      # in the URL the API hands to every integrating program.
+      - name: Type-check hosted recorder
+        working-directory: clients/hosted
+        run: npx tsc --noEmit
+
       - name: Vitest (React SDK)
         run: npm test -w clients/react
 
       - name: Vitest (web client)
         run: npm test -w clients/web
+
+      - name: Vitest (hosted recorder)
+        run: npm test -w clients/hosted

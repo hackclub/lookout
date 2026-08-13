@@ -60,7 +60,7 @@ Response:
 
 - `token` — the session credential. Give this to the user's browser, and **store it on your server** associated with the user so you can look up the session later.
 - `sessionId` — the server-side ID.
-- `sessionUrl` — a convenience URL you can redirect the user to.
+- `sessionUrl` — a convenience URL you can redirect the user to. It serves a recorder Lookout hosts, where the user picks the desktop app, this browser, or a camera; it also takes `?app=your-program` and `?edit=false` (drops "Edit & save" from the stop dialog).
 - `metadata` — any JSON you want to associate with the session (user info, project, etc.)
 - `clips` — set `false` to opt this session OUT of [clips](#clips-6-frames-per-minute) and back to 1 JPEG/min. Default `true` (~6 frames/min video → 6× smoother timelapses); immutable after creation.
 - `redirectUrl` — optional [redirect hook](#redirect-hook): an http(s) URL the recording client sends the user to once their timelapse finishes compiling. Immutable after creation.

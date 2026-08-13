@@ -8,13 +8,15 @@
     "packages/worker",
     "clients/react",
     "clients/web",
+    "clients/hosted",
     "clients/desktop",
     "clients/playground"
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev -w clients/web\" \"npm run dev -w packages/server\"",
+    "dev:hosted": "concurrently \"npm run dev -w clients/hosted\" \"npm run dev -w packages/server\"",
     "dev:worker": "npm run dev -w packages/worker",
-    "build": "npm run build -w packages/shared && npm run build -w clients/react && npm run build -w clients/web && npm run build -w packages/server && npm run build -w packages/worker",
+    "build": "npm run build -w packages/shared && npm run build -w clients/react && npm run build -w clients/web && npm run build -w clients/hosted && npm run build -w packages/server && npm run build -w packages/worker",
     "db:generate": "npm run db:generate -w packages/server",
     "db:migrate": "npm run db:migrate -w packages/server"
   },

@@ -4,6 +4,10 @@ node_modules/
 # Build outputs
 dist/
 *.tsbuildinfo
+# The hosted recorder's build, dropped in beside the committed landing page.
+# Produced by Dockerfile.server (or `npm run build -w clients/hosted` plus a
+# copy) — never committed.
+packages/server/public/session/
 
 # Environment
 .env

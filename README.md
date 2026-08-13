@@ -7,6 +7,8 @@ There are currently two official clients for this service:
 - [Web React SDK](/clients/react/API.md) - for embedding the recorder in your web app.
 - [Desktop App](https://github.com/hackclub/lookout/releases) - for download on Mac, Windows, and Linux.
 
+Lookout also hosts a [small recorder of its own](/clients/hosted) at the `sessionUrl` a new session returns, for cases where sending the user a link is easier than shipping a client.
+
 > [!NOTE]
 > If you're a YSWS program author hoping to integrate Lookout into your program, please reach out to me via Slack first. See [/docs/integration.md](/docs/integration.md) for technical information on how to integrate Lookout.
 >

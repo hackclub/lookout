@@ -9,10 +9,33 @@ COPY packages/server packages/server
 RUN npm run build -w packages/shared
 RUN npm run build -w packages/server
 
+# The hosted recorder served at /session. Built in its own stage on purpose:
+# the runtime image copies node_modules wholesale from `builder`, so keeping
+# vite/tsup and the whole React toolchain out of that tree is the difference
+# between shipping them and not. Only the built assets cross over.
+FROM node:20-alpine AS recorder
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY clients/react/package.json clients/react/
+COPY clients/hosted/package.json clients/hosted/
+RUN npm ci
+COPY clients/react clients/react
+COPY clients/hosted clients/hosted
+# Consume shared as a built artifact rather than rebuilding it here. Its tsc
+# build compiles its own *.test.ts, so it needs vitest — which nothing in
+# this stage's dependency subset brings in. The builder stage above has
+# already produced exactly the dist the recorder needs.
+COPY --from=builder /app/packages/shared/dist packages/shared/dist
+RUN npm run build -w clients/react
+RUN npm run build -w clients/hosted
+
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/packages/server/dist ./dist
 COPY --from=builder /app/packages/server/public ./public
+# Mounted where the SPA fallback looks for it (see packages/server/src/index.ts).
+COPY --from=recorder /app/clients/hosted/dist ./public/session
 COPY --from=builder /app/packages/server/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/shared/dist ./node_modules/@lookout/shared/dist

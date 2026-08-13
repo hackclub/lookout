@@ -100,10 +100,23 @@ if (existsSync(publicDir)) {
     wildcard: false,
   });
 
-  // SPA fallback — serve index.html for non-API routes
+  // Two apps share this origin: the download page at the root, and the
+  // hosted recorder under /session — the URL `POST /api/internal/sessions`
+  // has always handed back. They have separate builds and separate
+  // index.html files, so the fallback has to look at the path.
+  const recorderIndex = join(publicDir, "session", "index.html");
+  const hasRecorder = existsSync(recorderIndex);
+
+  // SPA fallback — serve the right index.html for non-API routes
   app.setNotFoundHandler(async (request, reply) => {
     if (request.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "Not found" });
+    }
+    // The session token rides in the query string, so compare on path
+    // only. `/sessions` is deliberately not a match.
+    const path = request.url.split("?")[0];
+    if (hasRecorder && (path === "/session" || path.startsWith("/session/"))) {
+      return reply.sendFile("session/index.html");
     }
     return reply.sendFile("index.html");
   });
