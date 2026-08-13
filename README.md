@@ -10,9 +10,9 @@ There are currently two official clients for this service:
 Lookout also hosts a [small recorder of its own](/clients/hosted) at the `sessionUrl` a new session returns, for cases where sending the user a link is easier than shipping a client.
 
 > [!NOTE]
-> If you're a YSWS program author hoping to integrate Lookout into your program, please reach out to me via Slack first. See [/docs/integration.md](/docs/integration.md) for technical information on how to integrate Lookout.
+> If you're a YSWS program author hoping to integrate Lookout into your program, have your program's point of contact email <lookout@hackclub.com> first. See [/docs/integration.md](/docs/integration.md) for technical information on how to integrate Lookout.
 >
-> If you're a Hack Clubber using Lookout and running into issues with Lookout, please reach out to the program's author (and not me). They'll forward the issue to me if needed. - @samliu
+> If you're a Hack Clubber using Lookout and running into issues with Lookout, please reach out to the program's author (and not us). They'll forward the issue on if needed.
 
 ### Why does this exist?
 
@@ -27,9 +27,9 @@ Lookout is a service that processes screenshots for proof of time spent on a pro
 Lookout is designed to be simple, resilient, and easy to integrate. Here's how it works at a high level:
 
 1. A Hack Club program generates a session and shares it with the client.
-2. The client begins capturing screenshots once per minute, uploading them as they are taken.
-3. The server tracks the number and timing of screenshots received to validate time.
-4. When the session finishes, Lookout stitches the screenshots into a time-lapse video.
+2. The client records a short clip every minute, grabbing a frame every 10 seconds (~6 frames per minute), and uploads it as a single capture. Clients that can't encode video fall back to one screenshot per minute.
+3. The server tracks the number and timing of captures received to validate time.
+4. When the session finishes, Lookout stitches the captures into a time-lapse video.
 5. The Hack Club program can retrieve the session results.
 
 Sessions auto-pause after 10 minutes of inactivity and auto-stop after 24 hours of inactivity.
