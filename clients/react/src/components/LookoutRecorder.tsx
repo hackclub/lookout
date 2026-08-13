@@ -116,9 +116,15 @@ export function LookoutRecorder({ editing = true }: LookoutRecorderProps = {}) {
     return (
       <>
         <PageContainer style={{ padding: spacing.xxl }}>
+          {/* videoUrl is what ends the wait. useLookout fetches it the
+              moment the session flips to complete; without it here,
+              ProcessingState has no way to tell "still compiling" from
+              "compiled, and here it is", so it sits on its spinner forever
+              with the finished video already in hand. */}
           <ProcessingState
             status={state.status}
             trackedSeconds={state.trackedSeconds}
+            videoUrl={state.videoUrl}
           />
         </PageContainer>
 
