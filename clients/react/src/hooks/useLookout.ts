@@ -104,6 +104,8 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   takeScreenshotRef.current = capture.takeScreenshot;
   const captureUploadConfirmRef = useRef(uploader.captureUploadConfirm);
   captureUploadConfirmRef.current = uploader.captureUploadConfirm;
+  const serverNowRef = useRef(uploader.serverNowMs);
+  serverNowRef.current = uploader.serverNowMs;
 
   // Start/stop capture interval based on sharing + session state.
   const isActive = session.status === "active" || session.status === "pending";
@@ -260,16 +262,30 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
 
     const scheduleNext = (nextExpectedAt: string | null) => {
       if (cancelled) return;
+      // nextExpectedAt is SERVER wall-clock — subtract our estimate of the
+      // server's now, never the raw local clock. Raw Date.now() baked the
+      // machine's clock skew into every delay: >30s of skew pushed every
+      // capture out of the ±30s credit window (trackedSeconds stuck at 0),
+      // and >60s pinned the delay at the clamp below, halving the capture
+      // rate and with it the compiled video's length.
+      const now = serverNowRef.current();
       const target = nextExpectedAt
         ? Date.parse(nextExpectedAt)
-        : Date.now() + config.capture.intervalMs;
+        : now + config.capture.intervalMs;
       // Defensive upper bound: never sleep longer than 2x interval.
       // Matches desktop's same clamp — protects against malformed
       // server timestamps.
-      const delay = Math.min(
-        config.capture.intervalMs * 2,
-        Math.max(0, target - Date.now()),
-      );
+      const uncapped = Math.max(0, target - now);
+      if (uncapped > config.capture.intervalMs * 2) {
+        // With the offset applied this should never bind for clock skew —
+        // if it fires, something else is feeding us bad targets, and
+        // silence here is how the skew bug ran unnoticed for three months.
+        console.warn(
+          `[lookout] next-capture delay ${uncapped}ms exceeds the ` +
+            `2x-interval clamp — capping to ${config.capture.intervalMs * 2}ms`,
+        );
+      }
+      const delay = Math.min(config.capture.intervalMs * 2, uncapped);
       if (intervalRef.current !== null) clearTimeout(intervalRef.current);
       intervalRef.current = setTimeout(tick, delay);
     };

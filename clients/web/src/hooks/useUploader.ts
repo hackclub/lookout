@@ -1,4 +1,5 @@
 import { useRef, useCallback, useState } from "react";
+import { ClockOffset } from "@lookout/shared";
 import { api } from "../api/client.js";
 import type { CaptureResult } from "./useScreenCapture.js";
 
@@ -57,17 +58,50 @@ export function useUploader() {
   const [trackedSeconds, setTrackedSeconds] = useState(0);
   const [lastImageUrl, setLastImageUrl] = useState<string | null>(null);
 
+  // Running estimate of how far this device's clock is from the server's.
+  // Mirrors the React SDK's useUploader: every upload-url response carries
+  // the server's own clock, so the estimate improves once a minute for free.
+  const clockOffsetRef = useRef(new ClockOffset());
+
+  /** Best estimate of the SERVER's current wall-clock, in ms since epoch.
+   *  Identical to `Date.now()` on a healthy clock. The tick scheduler MUST
+   *  use this — `nextExpectedAt` is server wall-clock, and subtracting the
+   *  raw local clock from it bakes the machine's skew into every delay. */
+  const serverNowMs = useCallback(
+    () => clockOffsetRef.current.correct(Date.now()),
+    [],
+  );
+
   const captureUploadConfirm = useCallback(
     async (capture: CaptureResult): Promise<UploadConfirmResult> => {
       setState((s) => ({ ...s, pending: s.pending + 1 }));
       try {
+        // Correct the capture moment into server time. A no-op for a healthy
+        // clock; for a skewed one it's the difference between every capture
+        // landing in the ±30s credit window and none of them doing so.
         const capturedAt = ENABLE_CREDIT_MODE
-          ? new Date(capture.capturedAtMs ?? Date.now()).toISOString()
+          ? new Date(
+              clockOffsetRef.current.correct(capture.capturedAtMs ?? Date.now()),
+            ).toISOString()
           : undefined;
 
-        const { uploadUrl, screenshotId } = await retry(() =>
-          api.getUploadUrl({ capturedAt }),
-        );
+        const sentAt = Date.now();
+        const urlResponse = await retry(() => api.getUploadUrl({ capturedAt }));
+        // Fold the server's clock into the estimate, bracketed by the local
+        // instants either side of the request so the round trip isn't
+        // charged to the offset.
+        if (urlResponse.serverTime) {
+          clockOffsetRef.current.observe(urlResponse.serverTime, sentAt, Date.now());
+          if (urlResponse.capturedAtAdopted) {
+            console.warn(
+              `[lookout] this device's clock is ~${Math.round(
+                clockOffsetRef.current.offset / 1000,
+              )}s off from the server, so that capture was stamped on arrival. ` +
+                `Later captures are corrected automatically.`,
+            );
+          }
+        }
+        const { uploadUrl, screenshotId } = urlResponse;
         await retry(() => api.uploadToR2(uploadUrl, capture.blob));
         const result = await retry(() =>
           api.confirmScreenshot({
@@ -107,6 +141,7 @@ export function useUploader() {
 
   return {
     captureUploadConfirm,
+    serverNowMs,
     uploadState: state,
     trackedSeconds,
     lastImageUrl,

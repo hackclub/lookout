@@ -29,6 +29,7 @@ export function Recorder({
     useScreenCapture();
   const {
     captureUploadConfirm,
+    serverNowMs,
     uploadState,
     trackedSeconds: uploadTrackedSeconds,
     lastImageUrl,
@@ -39,6 +40,8 @@ export function Recorder({
   const hasStartedRef = useRef(false);
   const captureUploadConfirmRef = useRef(captureUploadConfirm);
   captureUploadConfirmRef.current = captureUploadConfirm;
+  const serverNowRef = useRef(serverNowMs);
+  serverNowRef.current = serverNowMs;
   const takeScreenshotRef = useRef(takeScreenshotAsync);
   takeScreenshotRef.current = takeScreenshotAsync;
   const [error, setError] = useState<string | null>(null);
@@ -96,15 +99,24 @@ export function Recorder({
       }
       if (cancelled) return;
 
+      // nextExpectedAt is SERVER wall-clock — subtract our estimate of the
+      // server's now, never the raw local clock, so a skewed system clock
+      // doesn't leak into every delay (>30s of skew zeroes the credit,
+      // >60s halves the capture rate against the clamp below).
+      const now = serverNowRef.current();
       const target = nextExpectedAt
         ? Date.parse(nextExpectedAt)
-        : Date.now() + SCREENSHOT_INTERVAL_MS;
+        : now + SCREENSHOT_INTERVAL_MS;
       // Defensive upper bound: never sleep longer than 2x interval.
       // Matches desktop's same clamp.
-      const delay = Math.min(
-        SCREENSHOT_INTERVAL_MS * 2,
-        Math.max(0, target - Date.now()),
-      );
+      const uncapped = Math.max(0, target - now);
+      if (uncapped > SCREENSHOT_INTERVAL_MS * 2) {
+        console.warn(
+          `[capture-loop] next-capture delay ${uncapped}ms exceeds the ` +
+            `2x-interval clamp — capping to ${SCREENSHOT_INTERVAL_MS * 2}ms`,
+        );
+      }
+      const delay = Math.min(SCREENSHOT_INTERVAL_MS * 2, uncapped);
       intervalRef.current = setTimeout(tick, delay);
     };
     tick();

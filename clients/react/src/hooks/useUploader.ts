@@ -78,6 +78,14 @@ export interface UploaderResult {
    *  Throws on failure (after retries) — the caller (the capture-loop
    *  scheduler) catches and falls back to a local interval. */
   captureUploadConfirm: (capture: UploadPayload) => Promise<UploadConfirmResult>;
+  /** Best estimate of the SERVER's current wall-clock, in ms since epoch.
+   *  `Date.now()` corrected by the running clock-offset estimate; identical
+   *  to `Date.now()` on a healthy clock. The capture scheduler MUST use
+   *  this — `nextExpectedAt` is server wall-clock, and subtracting the raw
+   *  local clock from it bakes the machine's skew into every tick delay
+   *  (>30s of skew zeroes the credit, >60s halves the capture rate against
+   *  the 2x-interval clamp). */
+  serverNowMs: () => number;
   /** Current upload state. */
   uploads: UploadState;
   /** Server-reported tracked seconds after latest confirmation. */
@@ -126,6 +134,13 @@ export function useUploader(): UploaderResult {
   // upload would be pure noise. Every upload-url response carries the
   // server's own clock, so the estimate improves once a minute for free.
   const clockOffsetRef = useRef(new ClockOffset());
+
+  // Stable across renders so schedulers can hold it in a ref or a dep list
+  // without re-subscribing.
+  const serverNowMs = useCallback(
+    () => clockOffsetRef.current.correct(Date.now()),
+    [],
+  );
 
   const captureUploadConfirm = useCallback(
     async (capture: UploadPayload): Promise<UploadConfirmResult> => {
@@ -253,6 +268,7 @@ export function useUploader(): UploaderResult {
 
   return {
     captureUploadConfirm,
+    serverNowMs,
     uploads,
     trackedSeconds,
     lastScreenshotUrl,

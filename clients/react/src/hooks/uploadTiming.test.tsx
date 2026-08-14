@@ -114,6 +114,100 @@ describe("upload duration and credited time", () => {
   });
 });
 
+describe("clock-skew tolerance", () => {
+  /** Like mockTransport, but the server's clock runs `skewMs` ahead of the
+   *  device's — the situation on any machine whose system clock is wrong. */
+  function mockSkewedTransport(skewMs: number) {
+    const uploadUrlCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : String(input);
+        const serverNow = () => new Date(Date.now() + skewMs).toISOString();
+        if (url.includes("/upload-url")) {
+          uploadUrlCalls.push(url);
+          return new Response(
+            JSON.stringify({
+              uploadUrl: "https://r2.test/put",
+              r2Key: "k",
+              screenshotId: "00000000-0000-0000-0000-000000000000",
+              minuteBucket: 0,
+              nextExpectedAt: new Date(Date.now() + skewMs + 60_000).toISOString(),
+              serverTime: serverNow(),
+              format: "webm",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (init?.method === "PUT") return new Response("", { status: 200 });
+        if (url.includes("/screenshots")) {
+          return new Response(
+            JSON.stringify({
+              confirmed: true,
+              trackedSeconds: 60,
+              nextExpectedAt: new Date(Date.now() + skewMs + 60_000).toISOString(),
+              serverTime: serverNow(),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      }),
+    );
+    return { uploadUrlCalls };
+  }
+
+  const upload = (result: { current: ReturnType<typeof useUploader> }) =>
+    result.current.captureUploadConfirm({
+      blob: new Blob(["clip"], { type: "video/webm" }),
+      width: 1920,
+      height: 1080,
+      capturedAtMs: Date.now(),
+      format: "webm",
+    });
+
+  it("serverNowMs converges on the server's clock after one upload", async () => {
+    // The scheduler subtracts serverNowMs() from the server's nextExpectedAt.
+    // If it read the raw local clock instead, a 6-minute skew would pin every
+    // delay at the 2x-interval clamp — half the captures, half the video, and
+    // zero credited seconds. That was a real production failure, not a
+    // hypothetical: see the sessions with startedAt clamped to createdAt-5min.
+    const skewMs = 6 * 60_000;
+    mockSkewedTransport(skewMs);
+    const { result } = renderHook(() => useUploader(), { wrapper });
+
+    // Before any upload the estimate is empty: serverNowMs is the local clock.
+    expect(Math.abs(result.current.serverNowMs() - Date.now())).toBeLessThan(1_000);
+
+    await act(async () => {
+      await upload(result);
+    });
+
+    // One round trip later the estimate has the skew, well inside the ±30s
+    // credit window.
+    expect(Math.abs(result.current.serverNowMs() - (Date.now() + skewMs))).toBeLessThan(
+      2_000,
+    );
+  });
+
+  it("stamps later captures in server time once the offset is known", async () => {
+    const skewMs = 6 * 60_000;
+    const { uploadUrlCalls } = mockSkewedTransport(skewMs);
+    const { result } = renderHook(() => useUploader(), { wrapper });
+
+    await act(async () => {
+      await upload(result); // teaches the offset
+      await upload(result); // stamped corrected
+    });
+
+    expect(uploadUrlCalls).toHaveLength(2);
+    const second = new URL(uploadUrlCalls[1]).searchParams.get("capturedAt");
+    // The second capture's stamp lands within jitter of the SERVER's clock,
+    // not the device's — inside the envelope, inside the credit window.
+    expect(Math.abs(Date.parse(second!) - (Date.now() + skewMs))).toBeLessThan(2_000);
+  });
+});
+
 describe("the display timer while an upload is in flight", () => {
   const base = 120;
 

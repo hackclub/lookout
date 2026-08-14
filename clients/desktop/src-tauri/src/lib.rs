@@ -1,6 +1,7 @@
 mod capture;
 mod capture_diagnostics;
 mod clips;
+mod clock_offset;
 mod crop;
 mod desktop_appearance;
 mod native_menu;
@@ -59,8 +60,9 @@ pub(crate) mod test_support {
     /// per-process cap is 10k, after which every capture fails.
     #[cfg(windows)]
     pub fn gdi_object_count() -> u32 {
-        use windows::Win32::System::Threading::GetCurrentProcess;
-        use windows::Win32::UI::WindowsAndMessaging::{GetGuiResources, GR_GDIOBJECTS};
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
+        };
         unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
     }
 }
@@ -205,6 +207,14 @@ pub struct AppState {
     /// Rust-side 1s tray title ticker — keeps the menu bar time accurate
     /// even when the WebView's JS timers are throttled.
     tray_timer: Mutex<Option<TrayTimerHandle>>,
+    /// Running estimate of `serverNow - clientNow`. Fed by the `serverTime`
+    /// on every upload response; read wherever we stamp a capture or turn a
+    /// server wall-clock target into a local delay. This is what makes a
+    /// wrong system clock cost nothing: without it, any skew past ±30s
+    /// zeroed the credit and past 60s halved the capture rate (the skew
+    /// leaked into every `nextExpectedAt - now` delay and hit the
+    /// 2x-interval clamp).
+    pub clock_offset: Mutex<clock_offset::ClockOffset>,
 }
 
 /// Central deep link handler. All deep link entry points (cold start, single
@@ -655,6 +665,12 @@ pub struct UploadUrlResponse {
     /// Server wall-clock at response time. Absent on pre-credit-mode servers.
     #[serde(rename = "serverTime", default)]
     pub server_time: Option<String>,
+    /// True when the server replaced this capture's timestamp with its own
+    /// because ours was outside the ±5min trust envelope. The upload still
+    /// succeeded; seeing this means the clock-offset estimate is about to
+    /// matter, so it's worth telling the user their clock is wrong.
+    #[serde(rename = "capturedAtAdopted", default)]
+    pub captured_at_adopted: bool,
     /// Sticky tracking mode for the session. Absent on pre-credit-mode servers.
     #[serde(rename = "trackingMode", default)]
     pub tracking_mode: Option<String>,
@@ -1794,6 +1810,11 @@ async fn upload_and_confirm(
         query.push(("format", f));
     }
     // Each attempt re-requests a FRESH presigned URL (it has a 120s expiry).
+    // Bracket the request on the local clock for the offset estimate below.
+    // The bracket spans the whole retry block (matching the web SDK) — a
+    // retried attempt inflates the window and the midpoint with it, but the
+    // estimator smooths samples and only ever needs ±30s accuracy.
+    let url_sent_at_ms = current_unix_ms();
     let upload_url_resp: UploadUrlResponse = retry_upload_step!("upload-url", {
         let url_response = client
             .get(upload_url_url.as_str())
@@ -1820,6 +1841,34 @@ async fn upload_and_confirm(
             upload_url_resp.screenshot_id
         ),
     );
+
+    // Fold the server's clock into the offset estimate. One sample per
+    // upload, for free — this is what keeps stamps and the tick schedule
+    // honest on a machine whose system clock is wrong.
+    if let Some(server_ms) = upload_url_resp
+        .server_time
+        .as_deref()
+        .and_then(parse_iso_to_unix_ms)
+    {
+        let state = app.state::<AppState>();
+        let mut offset = state.clock_offset.lock().unwrap();
+        offset.observe(server_ms, url_sent_at_ms, current_unix_ms());
+        if upload_url_resp.captured_at_adopted {
+            // The server stamped that capture on arrival because our clock
+            // was outside the trust envelope. Recording is intact; from the
+            // next capture on, the estimate above corrects our stamps.
+            let skew_s = offset.offset_ms() / 1000;
+            eprintln!(
+                "[clock] this machine's clock is ~{skew_s}s off the server's — \
+                 the capture was saved with server time, and later captures \
+                 are corrected automatically"
+            );
+            let _ = app.emit(
+                "capture-progress",
+                format!("system clock is ~{skew_s}s off — corrected automatically"),
+            );
+        }
+    }
 
     // The presigned URL is signed for the GRANTED format's content type —
     // uploading a clip against a jpeg grant would fail the signature. A
@@ -1875,6 +1924,7 @@ async fn upload_and_confirm(
     if let Some(fc) = payload.frame_count {
         confirm_body["frameCount"] = fc.into();
     }
+    let confirm_sent_at_ms = current_unix_ms();
     let confirm_resp: ConfirmResponse = retry_upload_step!("confirm", {
         let confirm_response = client
             .post(format!(
@@ -1897,6 +1947,20 @@ async fn upload_and_confirm(
                 .map_err(|e| StepError::Retryable(describe_reqwest_error(&e)))
         }
     })?;
+    // Second free offset sample per upload, same bracketing as upload-url.
+    if let Some(server_ms) = confirm_resp
+        .server_time
+        .as_deref()
+        .and_then(parse_iso_to_unix_ms)
+    {
+        let state = app.state::<AppState>();
+        state
+            .clock_offset
+            .lock()
+            .unwrap()
+            .observe(server_ms, confirm_sent_at_ms, current_unix_ms());
+    }
+
     let _ = app.emit(
         "capture-progress",
         format!(
@@ -2057,17 +2121,26 @@ mod retry_tests {
     }
 }
 
-/// Build an ISO-8601 timestamp in UTC for the current instant. Used as the
+/// Build an ISO-8601 timestamp in UTC for the current instant, corrected
+/// into server time by the running clock-offset estimate. Used as the
 /// client-attested `capturedAt` on upload requests when credit mode is on.
-/// Format: `YYYY-MM-DDTHH:MM:SS.sssZ` — what `Date.parse()` and Go's
-/// `time.Parse(time.RFC3339)` both accept without surprises.
-fn captured_at_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = dur.as_secs() as i64;
-    let millis = dur.subsec_millis();
+/// A no-op for a healthy clock; for a skewed one it's the difference between
+/// every capture landing in the ±30s credit window and none of them doing so.
+fn captured_at_now(app: &AppHandle) -> String {
+    let corrected_ms = {
+        let state = app.state::<AppState>();
+        let offset = state.clock_offset.lock().unwrap();
+        offset.correct(current_unix_ms())
+    };
+    unix_ms_to_iso(corrected_ms)
+}
+
+/// Format milliseconds-since-epoch as `YYYY-MM-DDTHH:MM:SS.sssZ` — what
+/// `Date.parse()` and Go's `time.Parse(time.RFC3339)` both accept without
+/// surprises.
+fn unix_ms_to_iso(unix_ms: i64) -> String {
+    let total_secs = unix_ms.div_euclid(1_000);
+    let millis = unix_ms.rem_euclid(1_000) as u32;
 
     // Civil date math via days-since-epoch — Howard Hinnant's algorithm.
     let days = total_secs.div_euclid(86_400);
@@ -2159,7 +2232,7 @@ async fn capture_and_upload(
     );
 
     let captured_at = if ENABLE_CREDIT_MODE {
-        Some(captured_at_now())
+        Some(captured_at_now(&app))
     } else {
         None
     };
@@ -2201,7 +2274,7 @@ async fn upload_frame(
     );
 
     let captured_at = if ENABLE_CREDIT_MODE {
-        Some(captured_at_now())
+        Some(captured_at_now(&app))
     } else {
         None
     };
@@ -2779,13 +2852,36 @@ async fn capture_loop_task(
                 // If parsing fails or the target is in the past, default to
                 // "fire now" (catch-up). Upper-bounded at 2x interval as a
                 // guard against malformed responses.
+                //
+                // The target is SERVER wall-clock, so subtract our estimate
+                // of the server's now — not the raw local clock. Raw local
+                // time baked the machine's clock skew into every delay:
+                // >30s of skew pushed every capture out of the credit
+                // window (trackedSeconds stuck at 0), and >60s pinned the
+                // delay at the clamp below, halving the capture rate and
+                // with it the compiled video's length.
                 let parsed_target_ms = parse_iso_to_unix_ms(&result.next_expected_at);
-                let now_ms = current_unix_ms();
+                let now_ms = {
+                    let state = app.state::<AppState>();
+                    let offset = state.clock_offset.lock().unwrap();
+                    offset.correct(current_unix_ms())
+                };
                 let delay_ms = match parsed_target_ms {
                     Some(target) => (target - now_ms).max(0) as u64,
                     None => CAPTURE_INTERVAL_SECS * 1000,
                 };
-                let delay_ms = delay_ms.min(CAPTURE_INTERVAL_SECS * 2 * 1000);
+                let clamp_ms = CAPTURE_INTERVAL_SECS * 2 * 1000;
+                if delay_ms > clamp_ms {
+                    // With the offset applied this should never bind for
+                    // clock skew — if it fires, something else is feeding us
+                    // bad targets, and silence here is how the skew bug ran
+                    // unnoticed for three months.
+                    eprintln!(
+                        "[capture-loop] next-capture delay {delay_ms}ms exceeds \
+                         the 2x-interval clamp — capping to {clamp_ms}ms"
+                    );
+                }
+                let delay_ms = delay_ms.min(clamp_ms);
                 *next_fire =
                     tokio::time::Instant::now() + tokio::time::Duration::from_millis(delay_ms);
                 let _ = app.emit("capture-tick-result", CaptureTickResult::from(result));
@@ -3054,7 +3150,7 @@ async fn capture_loop_task(
         // Capture the wall-clock moment NOW — that's the value we'll send
         // as `capturedAt`, not when the upload eventually reaches the server.
         let captured_at = if ENABLE_CREDIT_MODE {
-            Some(captured_at_now())
+            Some(captured_at_now(&app))
         } else {
             None
         };
@@ -3580,6 +3676,7 @@ pub fn run() {
             blacklisted_apps: Mutex::new(Vec::new()),
             capture_loop: Mutex::new(None),
             tray_timer: Mutex::new(None),
+            clock_offset: Mutex::new(clock_offset::ClockOffset::new()),
         })
         .invoke_handler(tauri::generate_handler![
             list_capture_sources,
@@ -3994,7 +4091,8 @@ mod tray_timer_tests {
 #[cfg(test)]
 mod compat_tests {
     use super::{
-        captured_at_now, parse_iso_to_unix_ms, ConfirmResponse, UploadUrlResponse,
+        current_unix_ms, parse_iso_to_unix_ms, unix_ms_to_iso, ConfirmResponse,
+        UploadUrlResponse,
     };
 
     // Snapshot of the pre-credit-mode struct definitions, byte-for-byte from
@@ -4040,6 +4138,7 @@ mod compat_tests {
         "minuteBucket": 7,
         "nextExpectedAt": "2025-06-01T12:01:00.000Z",
         "serverTime": "2025-06-01T12:00:00.000Z",
+        "capturedAtAdopted": true,
         "trackingMode": "credit"
     }"#;
 
@@ -4066,6 +4165,7 @@ mod compat_tests {
         assert_eq!(r.screenshot_id, "11111111-2222-3333-4444-555555555555");
         assert_eq!(r.minute_bucket, 7);
         assert!(r.server_time.is_none());
+        assert!(!r.captured_at_adopted);
         assert!(r.tracking_mode.is_none());
     }
 
@@ -4073,6 +4173,7 @@ mod compat_tests {
     fn new_struct_parses_new_json_upload_url() {
         let r: UploadUrlResponse = serde_json::from_str(NEW_UPLOAD_JSON).unwrap();
         assert_eq!(r.server_time.as_deref(), Some("2025-06-01T12:00:00.000Z"));
+        assert!(r.captured_at_adopted);
         assert_eq!(r.tracking_mode.as_deref(), Some("credit"));
     }
 
@@ -4128,7 +4229,7 @@ mod compat_tests {
 
     #[test]
     fn captured_at_now_is_iso8601_utc() {
-        let s = captured_at_now();
+        let s = unix_ms_to_iso(current_unix_ms());
         // YYYY-MM-DDTHH:MM:SS.sssZ — 24 chars total
         assert_eq!(s.len(), 24);
         assert_eq!(&s[4..5], "-");
@@ -4142,7 +4243,7 @@ mod compat_tests {
 
     #[test]
     fn parse_iso_to_unix_ms_round_trips_captured_at_now() {
-        let s = captured_at_now();
+        let s = unix_ms_to_iso(current_unix_ms());
         let parsed = parse_iso_to_unix_ms(&s).expect("parses");
         let actual = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
