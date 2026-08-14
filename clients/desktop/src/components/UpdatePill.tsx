@@ -54,9 +54,9 @@ export function UpdatePill({ phase, onRestart, origin = "top" }: UpdatePillProps
   const clickable = phase.state === "ready";
   // Slide in from whichever edge the pill is anchored to.
   const offset = origin === "bottom" ? 8 : -8;
-  // Ready/restarting render as a solid, borderless capsule (inverted colors);
+  // Ready/installing render as a solid, borderless capsule (inverted colors);
   // downloading stays a quiet outlined pill.
-  const solid = phase.state === "ready" || phase.state === "restarting";
+  const solid = phase.state === "ready" || phase.state === "installing";
 
   return (
     <AnimatePresence>
@@ -73,7 +73,9 @@ export function UpdatePill({ phase, onRestart, origin = "top" }: UpdatePillProps
           title={
             phase.state === "downloading"
               ? `Downloading v${phase.version}`
-              : `Restart to update to v${phase.version}`
+              : phase.state === "installing"
+                ? `Installing v${phase.version}`
+                : `Restart to update to v${phase.version}`
           }
           style={{
             display: "inline-flex",
@@ -113,7 +115,11 @@ export function UpdatePill({ phase, onRestart, origin = "top" }: UpdatePillProps
           ) : (
             <>
               <PowerIcon />
-              <span>Restart to Complete Update</span>
+              <span>
+                {phase.state === "installing"
+                  ? "Installing Update…"
+                  : "Restart to Complete Update"}
+              </span>
             </>
           )}
         </motion.button>

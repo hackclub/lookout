@@ -19,7 +19,7 @@ debug = true
 
 [package]
 name = "lookout-desktop"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 
 [lib]

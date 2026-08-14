@@ -27,6 +27,7 @@ import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { useWindowFocus } from "../hooks/useWindowFocus.js";
 import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
 import { useSessionNotifications } from "../hooks/useSessionNotifications.js";
+import { setCaptureActive } from "../captureGuard.js";
 
 interface DesktopRecorderProps {
   token: string;
@@ -141,6 +142,13 @@ export function DesktopRecorder({ token, source, onChangeSource: _onChangeSource
     captureError: capture.error,
     status: session.status,
   });
+
+  // Publish capture state for the updater, which must not install (and so
+  // exit the process) while a session is recording. See captureGuard.
+  useEffect(() => {
+    setCaptureActive(capture.isCapturing);
+    return () => setCaptureActive(false);
+  }, [capture.isCapturing]);
 
 
   // Stale capture detection — warn if no successful capture for 3+ minutes
