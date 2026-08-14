@@ -217,6 +217,12 @@ export const sessions = pgTable(
     index("idx_sessions_active_last_screenshot")
       .on(table.lastScreenshotAt)
       .where(sql`status IN ('active', 'paused', 'pending')`),
+    // Exactly the shape of the program session list: one program's
+    // sessions, newest first, walked by a createdAt cursor. Without the
+    // pair a busy program scans and sorts its whole history per page.
+    index("idx_sessions_program_created")
+      .on(table.programId, table.createdAt.desc())
+      .where(sql`program_id IS NOT NULL`),
   ],
 );
 

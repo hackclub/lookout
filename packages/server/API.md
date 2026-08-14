@@ -849,6 +849,64 @@ the desktop app, this browser, and a camera. Alongside the token it takes
 
 ---
 
+### List Your Program's Sessions
+
+```
+GET /api/internal/sessions
+```
+
+Every other read here needs a token or a session id you already hold, which
+means a tool acting for a program can only ever see what it created itself.
+This lists everything recorded under the calling key's program, whoever
+created it.
+
+**Query Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| `limit` | integer | 1–100. Default 50. |
+| `cursor` | ISO-8601 | Returns sessions created strictly before this. Use the `nextCursor` from the previous page. |
+
+**Response `200 OK`:**
+```json
+{
+  "sessions": [
+    {
+      "sessionId": "uuid",
+      "name": "Rebuild of the submission",
+      "status": "complete",
+      "trackedSeconds": 2700,
+      "screenshotCount": 45,
+      "startedAt": "2026-08-13T09:14:00.000Z",
+      "createdAt": "2026-08-13T09:12:00.000Z",
+      "totalActiveSeconds": 2760,
+      "thumbnailUrl": "https://…/api/media/…/thumbnail.jpg",
+      "videoUrl": "https://…/api/media/…/video.mp4",
+      "metadata": {}
+    }
+  ],
+  "nextCursor": "2026-08-13T09:12:00.000Z"
+}
+```
+
+`nextCursor` is null on the last page.
+
+**No tokens.** A session token is the capability to record into that
+session; listing is a read, and the two are deliberately not the same
+permission. Everything needed to show and review a session is reachable
+from `sessionId` — the media URLs above, plus
+[`/api/internal/sessions/:sessionId`](#get-session-details-admin) for the
+detail. If you need to *record* into a session, you already hold its token
+from creating it.
+
+Cursor rather than offset: sessions are created while you page, and an
+offset would skip or repeat rows as they arrive.
+
+**Errors:**
+- `400` — the key has no program attached (the legacy global key), or the cursor isn't a date
+- `401` — unknown key
+
+---
+
 ### Get Session Details (Admin)
 
 ```

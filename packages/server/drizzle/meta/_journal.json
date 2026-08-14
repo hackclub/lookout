@@ -162,6 +162,13 @@
       "when": 1785110000000,
       "tag": "0022_clips_default_on",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786697133626,
+      "tag": "0023_program_session_index",
+      "breakpoints": true
     }
   ]
 }

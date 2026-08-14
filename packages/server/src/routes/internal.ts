@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { eq, sql, and, isNotNull } from "drizzle-orm";
+import { eq, sql, and, desc, inArray, isNotNull, lt } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
 import { requireApiKey } from "../middleware/apiKey.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
@@ -83,6 +83,154 @@ export async function internalRoutes(app: FastifyInstance) {
   );
 
   // Get session details (includes token)
+  // List the calling program's sessions, newest first.
+  //
+  // Every other read here needs a token or a session id you already hold,
+  // which means a program's own dashboard can list what it created but a
+  // tool acting for that program cannot see anything it did not create
+  // itself. This closes that: the key already identifies the program, and
+  // sessions carry programId, so a program can enumerate its own work.
+  //
+  // Deliberately does NOT return tokens. A token is the capability to
+  // record into a session; listing is a read, and the two should not be the
+  // same permission. Everything needed to display and review a session
+  // (media URLs, timings, status) is reachable from the id.
+  app.get<{
+    Querystring: { limit?: number; cursor?: string };
+  }>(
+    "/api/internal/sessions",
+    {
+      schema: {
+        querystring: {
+          type: "object" as const,
+          properties: {
+            limit: {
+              type: "integer" as const,
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            // ISO-8601. Returns sessions created strictly before it, which
+            // is stable under inserts in a way OFFSET is not.
+            cursor: { type: "string" as const, format: "date-time" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      // A key with no program can't scope this to anything. The legacy
+      // global key lands here; "every session with no program" is close
+      // enough to "everything" that it isn't on offer.
+      if (!request.programId) {
+        return reply.code(400).send({
+          error:
+            "This key is not attached to a program, so it has no sessions to list",
+        });
+      }
+
+      const limit = request.query.limit ?? 50;
+      const cursor = request.query.cursor
+        ? new Date(request.query.cursor)
+        : null;
+      if (cursor && Number.isNaN(cursor.getTime())) {
+        return reply.code(400).send({ error: "Invalid cursor" });
+      }
+
+      // One extra row tells us whether there is another page without a
+      // second count query.
+      const rows = await db
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.programId, request.programId),
+            cursor ? lt(schema.sessions.createdAt, cursor) : undefined,
+          ),
+        )
+        .orderBy(desc(schema.sessions.createdAt))
+        .limit(limit + 1);
+
+      const page = rows.slice(0, limit);
+      const nextCursor =
+        rows.length > limit
+          ? page[page.length - 1].createdAt.toISOString()
+          : null;
+
+      // Screenshot counts for the page in one query, as the batch endpoint
+      // does. Credit-mode sessions don't need it but mixing the two costs
+      // less than branching per row.
+      const ids = page.map((s) => s.id);
+      const counts =
+        ids.length > 0
+          ? await db
+              .select({
+                sessionId: schema.screenshots.sessionId,
+                bucketCount: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
+                screenshotCount: sql<number>`count(*)`,
+              })
+              .from(schema.screenshots)
+              .where(
+                and(
+                  inArray(schema.screenshots.sessionId, ids),
+                  eq(schema.screenshots.confirmed, true),
+                ),
+              )
+              .groupBy(schema.screenshots.sessionId)
+          : [];
+
+      const countMap = new Map(
+        counts.map((c) => [
+          c.sessionId,
+          {
+            bucketTrackedSeconds: Math.max(0, (Number(c.bucketCount) - 1) * 60),
+            screenshotCount: Number(c.screenshotCount),
+          },
+        ]),
+      );
+
+      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+
+      return {
+        sessions: page.map((s) => {
+          const c = countMap.get(s.id) ?? {
+            bucketTrackedSeconds: 0,
+            screenshotCount: 0,
+          };
+          // Same rule as /api/sessions/batch: credit-mode trusts the
+          // column, bucket-mode prefers it and falls back to a live count.
+          const rawTrackedSeconds =
+            s.trackingMode === "credit"
+              ? s.trackedSeconds ?? 0
+              : s.trackedSeconds ?? c.bucketTrackedSeconds;
+          return {
+            sessionId: s.id,
+            name: s.name,
+            status: s.status,
+            // Cuts can only shrink this, and /timings excludes the same
+            // captures, so every consumer tells one story.
+            trackedSeconds: Math.max(
+              0,
+              rawTrackedSeconds - (s.cutSeconds ?? 0),
+            ),
+            screenshotCount: c.screenshotCount,
+            startedAt: s.startedAt?.toISOString() ?? null,
+            createdAt: s.createdAt.toISOString(),
+            totalActiveSeconds: s.totalActiveSeconds,
+            thumbnailUrl: s.thumbnailR2Key
+              ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
+              : null,
+            videoUrl: s.videoR2Key
+              ? `${baseUrl}/api/media/${s.id}/video.mp4`
+              : null,
+            metadata: s.metadata ?? {},
+          };
+        }),
+        nextCursor,
+      };
+    },
+  );
+
   app.get<{
     Params: { sessionId: string };
   }>(

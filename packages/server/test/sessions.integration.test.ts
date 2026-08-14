@@ -1033,3 +1033,120 @@ describe("redirect hook", () => {
     }
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// Program session listing — GET /api/internal/sessions
+//
+// The one read that isn't keyed by something you already hold. A tool
+// acting for a program can enumerate that program's work; it still cannot
+// obtain the ability to record into any of it.
+// ────────────────────────────────────────────────────────────
+
+describe("listing a program's sessions", () => {
+  async function makeProgram(name: string) {
+    const [program] = await db
+      .insert(schema.programs)
+      .values({ name: `${name}-${Date.now()}-${Math.random()}` })
+      .returning({ id: schema.programs.id });
+    const [key] = await db
+      .insert(schema.apiKeys)
+      .values({
+        name: `${name}-key-${Date.now()}-${Math.random()}`,
+        programId: program.id,
+      })
+      .returning({ key: schema.apiKeys.key });
+    return { programId: program.id, key: key.key };
+  }
+
+  async function create(key: string, name: string) {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/sessions",
+      headers: { "x-api-key": key },
+      payload: { name },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json() as { token: string; sessionId: string };
+  }
+
+  const list = (key: string, query = "") =>
+    app.inject({
+      method: "GET",
+      url: `/api/internal/sessions${query}`,
+      headers: { "x-api-key": key },
+    });
+
+  it("returns only the calling program's sessions", async () => {
+    const mine = await makeProgram("mine");
+    const theirs = await makeProgram("theirs");
+
+    await create(mine.key, "mine-a");
+    await create(mine.key, "mine-b");
+    await create(theirs.key, "theirs-a");
+
+    const res = await list(mine.key);
+    expect(res.statusCode).toBe(200);
+    const names = res.json().sessions.map((s: { name: string }) => s.name);
+    expect(names.sort()).toEqual(["mine-a", "mine-b"]);
+  });
+
+  it("never returns tokens", async () => {
+    // The whole point of separating this from the detail endpoint: listing
+    // is a read, recording is not, and a token grants the latter.
+    const program = await makeProgram("secrets");
+    await create(program.key, "one");
+
+    const res = await list(program.key);
+    const [session] = res.json().sessions;
+    expect(session.token).toBeUndefined();
+    expect(session.sessionId).toEqual(expect.any(String));
+    expect(JSON.stringify(res.json())).not.toContain("token");
+  });
+
+  it("refuses a key with no program", async () => {
+    // The legacy global key lands here. "Every session with no program" is
+    // close enough to "everything" that it isn't on offer.
+    const [orphan] = await db
+      .insert(schema.apiKeys)
+      .values({ name: `orphan-${Date.now()}-${Math.random()}` })
+      .returning({ key: schema.apiKeys.key });
+
+    const res = await list(orphan.key);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not attached to a program/i);
+  });
+
+  it("pages newest first and stops when the history runs out", async () => {
+    const program = await makeProgram("paging");
+    for (const name of ["a", "b", "c"]) await create(program.key, name);
+
+    const first = await list(program.key, "?limit=2");
+    expect(first.json().sessions).toHaveLength(2);
+    expect(first.json().nextCursor).toEqual(expect.any(String));
+
+    const second = await list(
+      program.key,
+      `?limit=2&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+    );
+    expect(second.json().sessions).toHaveLength(1);
+    // Last page: nothing beyond it, so no cursor to follow.
+    expect(second.json().nextCursor).toBeNull();
+
+    // Every session appeared exactly once across the two pages.
+    const seen = [...first.json().sessions, ...second.json().sessions].map(
+      (s: { sessionId: string }) => s.sessionId,
+    );
+    expect(new Set(seen).size).toBe(3);
+  });
+
+  it("rejects an unparseable cursor rather than ignoring it", async () => {
+    const program = await makeProgram("cursor");
+    const res = await list(program.key, "?cursor=not-a-date");
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses an unknown key", async () => {
+    const res = await list("lk_definitely-not-a-key");
+    expect(res.statusCode).toBe(401);
+  });
+});
