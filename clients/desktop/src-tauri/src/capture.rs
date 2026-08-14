@@ -141,6 +141,16 @@ fn capture_to_dynamic_image(
                 .into_iter()
                 .find(|m| m.id().ok() == Some(*id))
                 .ok_or_else(|| format!("Monitor with id {id} not found"))?;
+            // Windows takes our own GDI path instead of xcap's: xcap's
+            // capture_monitor leaks one full-screen DDB per call (~8MB at
+            // 1080p) — see capture_monitor_windows_gdi. At clip cadence
+            // that compounded to GBs per hour of recording.
+            #[cfg(target_os = "windows")]
+            {
+                return capture_monitor_windows_gdi(&monitor)
+                    .map(DynamicImage::ImageRgba8);
+            }
+            #[cfg(not(target_os = "windows"))]
             monitor
                 .capture_image()
                 .map_err(|e| format!("Screen capture failed: {e}"))?
@@ -487,6 +497,199 @@ pub fn take_stitched_screenshots_raw_with_blacklist(
         blacklisted_apps,
     )?;
     encode_frame_jpeg(&dynamic, jpeg_quality)
+}
+
+/// GDI monitor capture with correct object teardown (Windows).
+///
+/// This exists because xcap's Windows `capture_monitor` (0.9.3, and still
+/// upstream master as of Aug 2026) leaks the screen-sized bitmap it blits
+/// into, every call: it selects the bitmap into its memory DC and never
+/// restores the previous object, so its `DeleteObject` runs while the
+/// bitmap is still selected — a documented failure that silently no-ops.
+/// One full-screen DDB (~8MB at 1080p, plus a GDI handle against the 10k
+/// per-process cap) per capture; at clips cadence that was ~58MB/min of
+/// RSS growth for the whole recording. xcap's WINDOW capture restores the
+/// object and is fine — only monitors come through here.
+///
+/// Same blit as xcap's (desktop-window DC, SRCCOPY at the monitor's
+/// physical origin) so behaviour is otherwise identical.
+#[cfg(target_os = "windows")]
+fn capture_monitor_windows_gdi(monitor: &Monitor) -> Result<image::RgbaImage, String> {
+    use std::mem;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+    let x = monitor.x().map_err(|e| format!("monitor x: {e}"))?;
+    let y = monitor.y().map_err(|e| format!("monitor y: {e}"))?;
+    // Physical pixels on Windows (dmPels* underneath) — matches x/y space.
+    let width = monitor.width().map_err(|e| format!("monitor width: {e}"))? as i32;
+    let height = monitor.height().map_err(|e| format!("monitor height: {e}"))? as i32;
+    if width <= 0 || height <= 0 {
+        return Err(format!("monitor has degenerate size {width}x{height}"));
+    }
+
+    unsafe {
+        let desktop = GetDesktopWindow();
+        let screen_dc = windows::Win32::Graphics::Gdi::GetWindowDC(Some(desktop));
+        if screen_dc.is_invalid() {
+            return Err("GetWindowDC(desktop) failed".into());
+        }
+        let mem_dc = CreateCompatibleDC(Some(screen_dc));
+        if mem_dc.is_invalid() {
+            ReleaseDC(Some(desktop), screen_dc);
+            return Err("CreateCompatibleDC failed".into());
+        }
+        let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(Some(desktop), screen_dc);
+            return Err("CreateCompatibleBitmap failed".into());
+        }
+        let previous = SelectObject(mem_dc, bitmap.into());
+
+        // No early returns from here to the teardown block — collect the
+        // outcome instead, so every handle is torn down on every path.
+        let blitted = BitBlt(
+            mem_dc,
+            0,
+            0,
+            width,
+            height,
+            Some(screen_dc),
+            x,
+            y,
+            SRCCOPY,
+        )
+        .map_err(|e| format!("BitBlt failed: {e}"));
+
+        // Deselect BEFORE reading the bits out: GetDIBits documents that
+        // the bitmap must not be selected into a DC, and DeleteObject on a
+        // still-selected bitmap fails outright — the exact leak (one
+        // full-screen DDB per capture) this function exists to fix.
+        SelectObject(mem_dc, previous);
+
+        let mut result: Result<Vec<u8>, String> = blitted.and_then(|()| {
+            let buffer_size = (width as usize) * (height as usize) * 4;
+            let mut bitmap_info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    // Negative height = top-down rows, so the buffer is
+                    // already in image order.
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biSizeImage: buffer_size as u32,
+                    biCompression: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut buffer = vec![0u8; buffer_size];
+            let copied = GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height as u32,
+                Some(buffer.as_mut_ptr().cast()),
+                &mut bitmap_info,
+                DIB_RGB_COLORS,
+            );
+            if copied == 0 {
+                Err("GetDIBits failed".into())
+            } else {
+                Ok(buffer)
+            }
+        });
+
+        // Teardown, in dependency order (the bitmap was already deselected
+        // above, so DeleteObject can actually free it).
+        if !DeleteObject(bitmap.into()).as_bool() {
+            result = Err("DeleteObject(bitmap) failed — GDI handle leaked".into());
+        }
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(Some(desktop), screen_dc);
+
+        // BGRA (GDI's 32bpp layout) -> RGBA in place.
+        let mut buffer = result?;
+        for px in buffer.chunks_exact_mut(4) {
+            px.swap(0, 2);
+            px[3] = 255; // GDI leaves alpha undefined
+        }
+        image::RgbaImage::from_raw(width as u32, height as u32, buffer)
+            .ok_or_else(|| "RgbaImage::from_raw failed".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the leak that shipped in 0.3.7: xcap's Windows
+    /// monitor capture orphaned one full-screen DDB (+1 GDI handle) per
+    /// call, ~58MB/min at clips cadence. GDI handles are the assertion —
+    /// the leak costs exactly one per capture, so the count is a
+    /// deterministic signal where RSS is noisy.
+    ///
+    /// Needs a real display session. Run with
+    /// `cargo test --release -- --ignored leak --nocapture`.
+    #[test]
+    #[ignore = "needs a display — run explicitly"]
+    fn monitor_capture_does_not_leak() {
+        let monitor_id = match Monitor::all()
+            .ok()
+            .and_then(|m| m.into_iter().next())
+            .and_then(|m| m.id().ok())
+        {
+            Some(id) => id,
+            None => {
+                eprintln!("no monitor available — skipping");
+                return;
+            }
+        };
+        let source = CaptureSource::Monitor { id: monitor_id };
+        let fds = std::collections::HashMap::new();
+
+        // Warm up one-time allocations (GDI/driver init, allocator pools).
+        for _ in 0..3 {
+            capture_to_dynamic_image(&source, &fds).expect("capture");
+        }
+
+        let rss_before = crate::test_support::rss_kb();
+        #[cfg(windows)]
+        let gdi_before = crate::test_support::gdi_object_count();
+
+        let cycles: u32 = 40;
+        for _ in 0..cycles {
+            let img = capture_to_dynamic_image(&source, &fds).expect("capture");
+            assert!(img.width() > 2 && img.height() > 2);
+        }
+
+        let rss_growth = crate::test_support::rss_kb().saturating_sub(rss_before);
+        eprintln!("RSS growth over {cycles} captures: {rss_growth} KB");
+
+        #[cfg(windows)]
+        {
+            let gdi_after = crate::test_support::gdi_object_count();
+            eprintln!("GDI objects: {gdi_before} -> {gdi_after}");
+            // The bug cost exactly +1 per capture (+40 here). Steady state
+            // is flat; allow a little slack for unrelated UI churn.
+            assert!(
+                gdi_after.saturating_sub(gdi_before) < 10,
+                "GDI objects grew {gdi_before} -> {gdi_after} over {cycles} captures — bitmap leak"
+            );
+        }
+
+        // A leaked full-screen RGBA/DDB is ~8MB at 1080p, ~330MB over this
+        // run; budget far below that but above allocator jitter.
+        assert!(
+            rss_growth < 100_000,
+            "RSS grew {rss_growth} KB over {cycles} captures — suspected leak"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

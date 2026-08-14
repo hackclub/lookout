@@ -318,17 +318,7 @@ mod tests {
         );
     }
 
-    /// Resident-set size of this process, in KB, via `ps`. Crude on purpose —
-    /// good enough to tell a leak from steady state, and needs no dependency.
-    #[cfg(test)]
-    fn rss_kb() -> u64 {
-        let out = std::process::Command::new("ps")
-            .args(["-o", "rss=", "-p"])
-            .arg(std::process::id().to_string())
-            .output()
-            .expect("ps");
-        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
-    }
+    use crate::test_support::rss_kb;
 
     /// Leak check for the encode cycle: many recorders, many frames each, all
     /// finished properly. The capture loop runs one of these per minute for as
@@ -336,8 +326,8 @@ mod tests {
     /// leak in the CVPixelBuffer / AVAssetWriter handling would accumulate into
     /// something a user notices.
     ///
-    /// Ignored by default: it's a few seconds of real encoding and it shells
-    /// out to `ps`. Run with `cargo test --release -- --ignored leak`.
+    /// Ignored by default: it's a few seconds of real encoding. Run with
+    /// `cargo test --release -- --ignored leak`.
     #[test]
     #[ignore = "stress test — run explicitly"]
     fn encode_cycle_does_not_leak() {
@@ -1071,11 +1061,28 @@ mod platform {
 
         pub fn finish(self, _duration_ms: u64) -> Result<(), String> {
             ensure_com();
+            // Destructured so the sink writer can be RELEASED before the
+            // platform is shut down. Held as `self.writer`, it would outlive
+            // the MFShutdown below and only drop at the end of this function.
+            //
+            // That ordering is the one Media Foundation forbids: every MF
+            // object must be released while the platform is still up. A sink
+            // writer released afterwards never runs its real teardown, so the
+            // H.264 MFT it owns — and the RGB32 input samples and NV12
+            // conversion buffers its allocators hold, tens of MB at capture
+            // resolution — are orphaned rather than freed. The capture loop
+            // builds one of these per upload tick, so that is a leak per
+            // minute of recording, for the length of the session.
+            //
+            // (The init path in `try_new` gets this right by accident: locals
+            // drop in reverse declaration order, so `writer` is released
+            // before `MfStartupGuard`. Only this explicit call inverted it.)
+            let Self { writer, .. } = self;
             unsafe {
-                let result = self
-                    .writer
+                let result = writer
                     .Finalize()
                     .map_err(|e| format!("sink writer Finalize failed: {e}"));
+                drop(writer);
                 // Balance MFStartup from new() on BOTH paths — an early
                 // return here would leak a startup refcount per failed clip.
                 let _ = MFShutdown();

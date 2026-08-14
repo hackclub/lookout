@@ -13,6 +13,58 @@ mod window_shape;
 #[cfg(target_os = "windows")]
 mod windows_permissions;
 
+/// Test-only helpers shared by the per-module leak tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Resident-set size of this process, in KB. Crude on purpose — good
+    /// enough to tell a leak from steady state, and needs no dependency.
+    ///
+    /// The Unix arm shells out to `ps`; Windows (where the worst leaks have
+    /// actually shipped — the GDI bitmap and MF sink-writer ones) asks
+    /// PowerShell for the working set, so the leak tests finally RUN there
+    /// instead of panicking on a missing `ps`.
+    pub fn rss_kb() -> u64 {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command"])
+                .arg(format!(
+                    "(Get-Process -Id {}).WorkingSet64",
+                    std::process::id()
+                ))
+                .output()
+                .expect("powershell");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                / 1024
+        }
+        #[cfg(not(windows))]
+        {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p"])
+                .arg(std::process::id().to_string())
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        }
+    }
+
+    /// Live GDI object count for this process — the precise leak signal on
+    /// Windows: orphaning a bitmap costs exactly one GDI handle, and the
+    /// per-process cap is 10k, after which every capture fails.
+    #[cfg(windows)]
+    pub fn gdi_object_count() -> u32 {
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        use windows::Win32::UI::WindowsAndMessaging::{GetGuiResources, GR_GDIOBJECTS};
+        unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
+    }
+}
+
 /// Scoped App Nap / idle-system-sleep suppression (macOS).
 ///
 /// The assertion must be held while a session is recording (or paused

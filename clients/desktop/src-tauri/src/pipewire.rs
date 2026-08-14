@@ -27,14 +27,16 @@ pub fn capture_pipewire_node(
         .set_state(gstreamer::State::Playing)
         .map_err(|e| format!("Failed to set playing: {}", e))?;
 
-    // Wait up to 2 seconds for a frame
-    let sample = appsink
-        .try_pull_sample(gstreamer::ClockTime::from_seconds(2))
-        .ok_or_else(|| "Failed to pull sample within timeout".to_string())?;
+    // Wait up to 2 seconds for a frame.
+    let sample = appsink.try_pull_sample(gstreamer::ClockTime::from_seconds(2));
 
-    pipeline
-        .set_state(gstreamer::State::Null)
-        .map_err(|e| format!("Failed to stop pipeline: {}", e))?;
+    // Tear down BEFORE bailing on a timeout: an early return here used to
+    // drop the pipeline still PLAYING, stranding its streaming threads and
+    // PipeWire stream — a leak per failed capture.
+    let stopped = pipeline.set_state(gstreamer::State::Null);
+
+    let sample = sample.ok_or_else(|| "Failed to pull sample within timeout".to_string())?;
+    stopped.map_err(|e| format!("Failed to stop pipeline: {}", e))?;
 
     let buffer = sample
         .buffer()
