@@ -203,6 +203,23 @@ fn frame_to_bgra(frame: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// The VA rate-control setup must be a graceful no-op on elements that
+    /// lack the properties it probes for — every set is introspection-
+    /// guarded, and a wrong guess panics inside GObject. Exercised against
+    /// non-VA elements (no VA hardware on CI): identity has none of the
+    /// properties; x264enc has enum props but no "rate-control".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn va_rate_control_config_is_safe_on_foreign_elements() {
+        use gstreamer as gst;
+        gst::init().expect("gst init");
+        for name in ["identity", "x264enc", "openh264enc"] {
+            let Ok(elem) = gst::ElementFactory::make(name).build() else {
+                continue; // element not installed here — nothing to probe
+            };
+            platform::configure_va_rate_control(&elem, 320, 10_000);
+        }
+    }
 
     /// Full round-trip through the real OS encoder: synthetic frames in,
     /// container bytes out, then ffprobe (when installed) verifies the
@@ -1102,9 +1119,20 @@ mod platform {
     use gstreamer::prelude::*;
     use gstreamer_app::AppSrc;
 
-    /// Encoders in preference order: VA-API hardware first, then software
-    /// fallbacks. Availability differs per distro/GPU; first that exists
-    /// wins.
+    /// Encoders in preference order: x264enc first, VA-API hardware only as
+    /// a fallback, openh264enc last. Availability differs per distro/GPU;
+    /// first that exists wins.
+    ///
+    /// Software-first is deliberate, not a leftover. This job is 6 frames a
+    /// minute — hardware buys nothing — and hardware rate control actively
+    /// hurts at sub-1fps: the VA encoders default to CBR with an
+    /// auto-calculated CPB of 2 seconds of bitrate, which caps every frame
+    /// at ~80 KB (2s x 320kbps at the 10s cadence) no matter how far apart
+    /// frames sit. So the better the machine (working VA-API drivers), the
+    /// blockier the clips — while x264's ABR, measured at this exact
+    /// cadence, spends the full ~400 KB per-frame budget. When a VA encoder
+    /// IS the only one installed, `configure_va_rate_control` steers it off
+    /// those defaults.
     ///
     /// PACKAGING: none of these are guaranteed present, and they live in
     /// different packages from the ones the pipeline's other elements need.
@@ -1124,7 +1152,72 @@ mod platform {
     /// the interval falls back to a JPEG, and after MAX_CLIP_ENCODER_FAILURES
     /// the loop stops trying. A user with no encoder gets the legacy
     /// one-frame-per-minute recording rather than a broken app.
-    const ENCODER_CANDIDATES: &[&str] = &["vah264enc", "vaapih264enc", "x264enc", "openh264enc"];
+    const ENCODER_CANDIDATES: &[&str] = &["x264enc", "vah264enc", "vaapih264enc", "openh264enc"];
+
+    /// Quantizer for the VA encoders' constant-QP mode. H.264 QP 23 at
+    /// 1080p screen content lands in the same visual class as the JPEG-q85
+    /// bar the CLIP_FRAME_BYTE_BUDGET was calibrated against, at frame
+    /// sizes comfortably inside that budget.
+    const VA_CQP_QP: u32 = 23;
+
+    /// Set a uint property clamped into its declared range. Returns false
+    /// (and sets nothing) if the property doesn't exist or isn't a uint —
+    /// the property sets below are all keyed on element type by name, so
+    /// "not there" is an expected outcome, not an error.
+    fn set_uint_prop_clamped(enc: &gst::Element, name: &str, value: u64) -> bool {
+        let Some(pspec) = enc.find_property(name) else {
+            return false;
+        };
+        let Some(spec) = pspec.downcast_ref::<gst::glib::ParamSpecUInt>() else {
+            return false;
+        };
+        let clamped = (value.min(spec.maximum() as u64) as u32).max(spec.minimum());
+        enc.set_property(name, clamped);
+        true
+    }
+
+    /// Steer a VA-API encoder off its default rate control, which starves
+    /// frames at our cadence (see ENCODER_CANDIDATES).
+    ///
+    /// Preferred: constant-QP, which sidesteps the driver's HRD/frame-rate
+    /// math entirely — deterministic quality at any cadence. Everything is
+    /// introspection-guarded because these properties are conditional:
+    /// `rate-control` is only installed when the driver exposes more than
+    /// one mode, and its enum only lists modes the driver supports (which
+    /// is also why none of this can go in the parse_launch string — an
+    /// unknown property there fails pipeline creation outright).
+    ///
+    /// Fallback when the driver has no CQP: stay on its default mode but
+    /// widen the CPB window from the 2s auto default to one frame interval,
+    /// so a frame is at least allowed to spend its whole byte budget.
+    pub(super) fn configure_va_rate_control(
+        enc: &gst::Element,
+        bitrate_kbps: u32,
+        interval_ms: u64,
+    ) {
+        let cqp = enc.find_property("rate-control").and_then(|pspec| {
+            pspec
+                .downcast_ref::<gst::glib::ParamSpecEnum>()?
+                .enum_class()
+                .to_value_by_nick("cqp")
+        });
+
+        if let Some(cqp) = cqp {
+            enc.set_property_from_value("rate-control", &cqp);
+            // vah264enc spells its quantizers qpi/qpp; the legacy
+            // vaapih264enc has init-qp. Each element has one spelling.
+            set_uint_prop_clamped(enc, "qpi", VA_CQP_QP as u64);
+            set_uint_prop_clamped(enc, "qpp", VA_CQP_QP as u64);
+            set_uint_prop_clamped(enc, "init-qp", VA_CQP_QP as u64);
+            return;
+        }
+
+        // vah264enc counts CPB in kbit; vaapih264enc in ms of bitrate.
+        let cpb_kbits = (bitrate_kbps as u64).saturating_mul(interval_ms) / 1000;
+        if !set_uint_prop_clamped(enc, "cpb-size", cpb_kbits) {
+            set_uint_prop_clamped(enc, "cpb-length", interval_ms);
+        }
+    }
 
     pub struct Encoder {
         pipeline: gst::Pipeline,
@@ -1179,7 +1272,7 @@ mod platform {
             let desc = format!(
                 "appsrc name=src is-live=false format=time \
                  caps=video/x-raw,format=BGRA,width={width},height={height},framerate=1000/{interval_ms} \
-                 ! videoconvert ! {encoder_name} {encoder_props} \
+                 ! videoconvert ! {encoder_name} name=enc {encoder_props} \
                  ! h264parse ! mp4mux ! filesink location=\"{}\"",
                 path.to_string_lossy()
             );
@@ -1187,6 +1280,12 @@ mod platform {
                 .map_err(|e| format!("gst pipeline parse failed: {e}"))?
                 .downcast::<gst::Pipeline>()
                 .map_err(|_| "not a pipeline".to_string())?;
+
+            if encoder_name.starts_with("va") {
+                if let Some(enc) = pipeline.by_name("enc") {
+                    configure_va_rate_control(&enc, (bitrate / 1000).max(1), interval_ms);
+                }
+            }
 
             let appsrc = pipeline
                 .by_name("src")
