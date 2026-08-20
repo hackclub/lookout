@@ -4058,35 +4058,79 @@ pub fn run() {
                 {
                     window.set_decorations(false)?;
 
-                    // Grow the window by the transparent frame the webview
-                    // draws its outer border and shadow into (see
-                    // WINDOW_MARGIN in linuxChrome.ts). Both paint outside
-                    // the content box, so without the extra room the
-                    // compositor simply clips them away.
+                    // Pin the window to an exact size, reserving the
+                    // transparent frame the webview draws its outer border and
+                    // shadow into (see WINDOW_MARGIN in linuxChrome.ts). Both
+                    // paint outside the content box, so without the extra room
+                    // the compositor simply clips them away.
                     //
-                    // Skipped when a shell extension is already rounding and
-                    // shading every window: it would draw around the grown
-                    // window, i.e. 40px out from the app, and the frame ends
-                    // up decorated twice. See `shell_draws_window_frame`.
+                    // The margin drops to zero when a shell extension is
+                    // already rounding and shading every window — it would draw
+                    // around the grown window, 40px out from the app, and the
+                    // frame ends up decorated twice. See
+                    // `shell_draws_window_frame`.
                     //
-                    // The bounds have to move with it: this window is fixed
-                    // at 480x640 by min == max, and a set_size past the
-                    // maximum would just be clamped back. Widen the limits
-                    // first, then resize, then re-centre — the window grew
-                    // around its old top-left otherwise.
-                    if !desktop_appearance::shell_draws_window_frame() {
-                        const MARGIN: f64 = 40.0;
-                        let scale = window.scale_factor()?;
-                        let inner: tauri::LogicalSize<f64> =
-                            window.inner_size()?.to_logical(scale);
-                        let grown = tauri::LogicalSize::new(
-                            inner.width + MARGIN * 2.0,
-                            inner.height + MARGIN * 2.0,
-                        );
-                        window.set_min_size(Some(grown))?;
-                        window.set_max_size(Some(grown))?;
-                        window.set_size(grown)?;
-                        window.center()?;
+                    // The size is NOT read back from the window, and that is
+                    // the whole point of this block. `inner_size()` here
+                    // reports a size GTK has already had its way with: on Yaru
+                    // it came back 47px short (exactly a titlebar), which is why
+                    // the main window shipped as 480x593 instead of the 480x640
+                    // it is configured for. And with no explicit `set_size` at
+                    // all, GTK leaves its CSD shadow extents in the surface,
+                    // which measured 52px over on the same theme. Two opposite
+                    // errors, one cause: trusting that query. So don't.
+                    //
+                    // The intended size is read from tauri.conf.json rather
+                    // than repeated here. The frontend's layout is built
+                    // against those same numbers, and a second copy in Rust
+                    // would drift from them silently.
+                    let configured = app
+                        .config()
+                        .app
+                        .windows
+                        .iter()
+                        .find(|w| w.label == window.label())
+                        .map(|w| (w.width, w.height));
+
+                    match configured {
+                        Some((content_w, content_h)) => {
+                            let margin: f64 =
+                                if desktop_appearance::shell_draws_window_frame() {
+                                    0.0
+                                } else {
+                                    40.0
+                                };
+                            let target = tauri::LogicalSize::new(
+                                content_w + margin * 2.0,
+                                content_h + margin * 2.0,
+                            );
+
+                            // Unconditional, including when the margin is zero:
+                            // the set_size is not only about growing the window,
+                            // it is what pins the surface to an exact size now
+                            // the decorations are off. Skipping it is what left
+                            // the window oversized.
+                            //
+                            // The bounds have to move first: this window is
+                            // fixed by min == max, and a set_size past the
+                            // maximum would just be clamped back. Widen the
+                            // limits, then resize, then re-centre — the window
+                            // grows around its old top-left otherwise.
+                            window.set_min_size(Some(target))?;
+                            window.set_max_size(Some(target))?;
+                            window.set_size(target)?;
+                            window.center()?;
+                        }
+                        None => {
+                            // Unreachable for a window that came from the
+                            // config, which this one did. Leaving the size alone
+                            // beats inventing one: a clipped shadow is a smaller
+                            // wrong than a window the wrong size.
+                            eprintln!(
+                                "[linux-chrome] no config for window {:?}; leaving its size alone",
+                                window.label()
+                            );
+                        }
                     }
                 }
 

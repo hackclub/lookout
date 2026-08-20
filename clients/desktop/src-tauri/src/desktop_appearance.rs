@@ -461,11 +461,18 @@ pub fn shell_draws_window_frame() -> bool {
         #[cfg(target_os = "linux")]
         {
             // An explicit answer wins outright, extension or no extension.
-            if let Some(draw) = frame_override(
+            //
+            // Note the inversion: `frame_override` answers "should Lookout
+            // draw the frame", and this function answers the opposite —
+            // whether something else is drawing it, so we don't. Saying no to
+            // the frame is saying yes here, and that one boolean is what
+            // drops the 40px margin, the border, the shadow, the radius and
+            // the input shape together.
+            if let Some(draw_our_own) = frame_override(
                 std::env::var("LOOKOUT_WINDOW_FRAME").ok().as_deref(),
             ) {
-                eprintln!("[linux-chrome] LOOKOUT_WINDOW_FRAME says draw={draw}");
-                return !draw;
+                eprintln!("[linux-chrome] LOOKOUT_WINDOW_FRAME says draw={draw_our_own}");
+                return !draw_our_own;
             }
 
             let disabled = gsetting("org.gnome.shell", "disable-user-extensions")
