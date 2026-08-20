@@ -1,9 +1,47 @@
-/* The pill itself inherits the shell's own `screen-recording-indicator`
- * styling (red fill, 999px radius, bold label) from the active theme, so
- * only the label geometry is ours. The min-width keeps the pill from
- * resizing under the pointer every time the digits change width. */
-.lookout-indicator-label {
-  min-width: 2.8em;
-  text-align: center;
-  padding: 0 0.15em;
+/* Recording keeps the shell's own `screen-recording-indicator` fill, so the
+ * pill matches whatever the active theme paints GNOME's recorder with. Only
+ * the geometry and the paused fill are ours. */
+
+.lookout-indicator-box {
+  /* Explicit, because the theme's spacing rule for the pill's box is scoped
+   * to `.screen-recording-indicator` — which comes off while paused, and the
+   * icon would otherwise butt straight against the digits. */
+  spacing: 0.35em;
+}
+
+.lookout-indicator-icon {
+  icon-size: 1.09em;
+}
+
+/* The shell pads panel buttons for text-only items like the clock. An icon
+ * plus a five-character time already reads as a unit, so that padding just
+ * makes the pill long; halve it to `-minimum-hpadding` and let the label size
+ * to its own content (no min-width, so h:mm:ss grows and mm:ss shrinks). */
+#panel .panel-button.lookout-indicator {
+  -natural-hpadding: 6px;
+  -minimum-hpadding: 6px;
+}
+
+/* Paused. Amber rather than the recording red, so a paused session doesn't
+ * read as live at a glance — and dark text on it, because white on #f59e0b
+ * is about 2:1 and unreadable at panel size. Same `inset` fill trick the
+ * shell's own indicators use, since panel buttons are transparent and carry
+ * a transparent 3px border the fill has to sit inside. */
+#panel .panel-button.lookout-indicator.lookout-indicator-paused {
+  transition-duration: 150ms;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  font-weight: bold;
+  color: #1c1917;
+  box-shadow: inset 0 0 0 100px #f59e0b;
+}
+
+#panel .panel-button.lookout-indicator.lookout-indicator-paused:focus,
+#panel .panel-button.lookout-indicator.lookout-indicator-paused:hover {
+  box-shadow: inset 0 0 0 100px #fbaf24;
+}
+
+#panel .panel-button.lookout-indicator.lookout-indicator-paused:active,
+#panel .panel-button.lookout-indicator.lookout-indicator-paused:checked {
+  box-shadow: inset 0 0 0 100px #fdbc45;
 }

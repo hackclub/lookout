@@ -19,6 +19,7 @@
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 
@@ -42,10 +43,22 @@ class LookoutIndicator extends PanelMenu.Button {
         // PanelMenu.Button; this is the class that turns it into a pill.
         this.add_style_class_name('screen-recording-indicator');
 
-        const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
+        // Our own class carries the width trim and the paused fill; see
+        // stylesheet.css.
+        this.add_style_class_name('lookout-indicator');
+
+        this._appIcon = delegate.appIcon;
+        this._pausedIcon = new Gio.ThemedIcon({
+            name: 'media-playback-pause-symbolic',
+        });
+
+        const box = new St.BoxLayout({style_class: 'lookout-indicator-box'});
+        // gicon in both states rather than icon_name in one and gicon in the
+        // other: setting icon_name leaves a themed gicon behind, and the two
+        // properties then disagree about which wins.
         this._icon = new St.Icon({
-            icon_name: 'media-record-symbolic',
-            style_class: 'system-status-icon',
+            gicon: this._appIcon,
+            style_class: 'lookout-indicator-icon',
         });
         this._label = new St.Label({
             style_class: 'lookout-indicator-label',
@@ -76,14 +89,17 @@ class LookoutIndicator extends PanelMenu.Button {
         this._toggleItem.label.text = paused
             ? _('Resume recording')
             : _('Pause recording');
-        // Paused is not recording: drop the red fill and swap the glyph, so a
-        // paused session doesn't sit in the panel claiming to be live.
+        // Paused is not recording: amber fill and a pause glyph, so a paused
+        // session doesn't sit in the panel claiming to be live. Recording
+        // keeps the shell's own red and shows the app's icon.
         if (paused) {
             this.remove_style_class_name('screen-recording-indicator');
-            this._icon.icon_name = 'media-playback-pause-symbolic';
+            this.add_style_class_name('lookout-indicator-paused');
+            this._icon.gicon = this._pausedIcon;
         } else {
+            this.remove_style_class_name('lookout-indicator-paused');
             this.add_style_class_name('screen-recording-indicator');
-            this._icon.icon_name = 'media-record-symbolic';
+            this._icon.gicon = this._appIcon;
         }
     }
 });
@@ -189,6 +205,11 @@ export default class LookoutIndicatorExtension extends Extension {
 
         if (!this._indicator) {
             this._indicator = new LookoutIndicator({
+                // Shipped beside this file by the app's installer, so it is
+                // found whether the app came from a deb, an rpm or the
+                // AppImage.
+                appIcon: Gio.FileIcon.new(Gio.File.new_for_path(
+                    GLib.build_filenamev([this.path, 'icons', 'lookout.png']))),
                 toggle: () => this._call(this._paused ? 'Resume' : 'Pause'),
                 stop: () => this._call('Stop'),
                 open: () => this._call('Open'),

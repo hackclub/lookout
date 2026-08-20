@@ -8,7 +8,6 @@ import {
   WrenchIcon,
 } from "@phosphor-icons/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { listen } from "@tauri-apps/api/event";
 import {
   Button,
   colors,
@@ -161,109 +160,6 @@ function PageChrome({
   );
 }
 
-interface GnomeIndicatorState {
-  supported: boolean;
-  installed: boolean;
-  enabled: boolean;
-  attached: boolean;
-}
-
-/**
- * The GNOME top-bar pill.
- *
- * GNOME exposes no way for an app to put anything in its top bar, so the pill
- * is drawn by a small shell extension the app ships and installs from here.
- * GNOME only picks up a newly installed extension when a session starts,
- * which is why the copy asks for a log out rather than pretending it worked.
- *
- * Renders nothing off GNOME — including elsewhere on Linux, where the tray
- * item is the indicator instead.
- */
-function GnomeIndicatorCard() {
-  const [state, setState] = useState<GnomeIndicatorState | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const refresh = () => {
-      invoke<GnomeIndicatorState>("gnome_indicator_status")
-        .then(setState)
-        .catch(() => setState(null));
-    };
-    refresh();
-    // The extension connects a moment after either side starts, and can be
-    // switched off from GNOME's own settings — both change this row's wording.
-    let unlisten: (() => void) | undefined;
-    listen("gnome-indicator-attached", refresh).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, []);
-
-  if (!state?.supported) return null;
-
-  const install = async () => {
-    setInstalling(true);
-    setError(null);
-    try {
-      setState(await invoke<GnomeIndicatorState>("install_gnome_indicator"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setInstalling(false);
-    }
-  };
-
-  const waitingForLogin = state.installed && state.enabled && !state.attached;
-  const description = state.attached
-    ? "Recording time shows as a pill in the top bar."
-    : waitingForLogin
-      ? "Installed. Log out and back in to show it — GNOME only loads a new extension when a session starts."
-      : "Show the recording time as a pill in the top bar, the way GNOME's own screen recorder does. Adds a small GNOME Shell extension.";
-
-  return (
-    <div
-      style={{
-        marginTop: spacing.md,
-        borderRadius: radii.lg,
-        border: `1px solid ${colors.border.default}`,
-        background: colors.bg.surface,
-        padding: spacing.lg,
-        display: "flex",
-        alignItems: "center",
-        gap: spacing.md,
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: fontSize.md, fontWeight: fontWeight.medium }}>
-          Top bar indicator
-        </div>
-        <div
-          style={{
-            fontSize: fontSize.sm,
-            color: error ? colors.status.danger : colors.text.tertiary,
-            lineHeight: 1.5,
-            marginTop: 2,
-          }}
-        >
-          {error ?? description}
-        </div>
-      </div>
-      {!state.attached && !waitingForLogin && (
-        <Button
-          variant="secondary"
-          size="sm"
-          loading={installing}
-          onClick={install}
-          style={{ flexShrink: 0 }}
-        >
-          {state.installed ? "Enable" : "Install"}
-        </Button>
-      )}
-    </div>
-  );
-}
-
 /** A tappable settings-menu row: icon, title, description, chevron. */
 function MenuRow({
   icon,
@@ -409,7 +305,6 @@ export function SettingsPage({ onBack, isWayland }: SettingsPageProps) {
                 onClick={() => setSubpage("advanced")}
               />
             </div>
-            {isLinux && <GnomeIndicatorCard />}
           </PageChrome>
         );
     }

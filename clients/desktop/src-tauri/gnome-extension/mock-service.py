@@ -7,6 +7,7 @@ rebuilding the desktop app. Prints the methods the extension calls back.
 
     python3 mock-service.py            # counts up from 0
     python3 mock-service.py --paused   # starts paused
+    python3 mock-service.py --start 3725   # counts up from 1:02:05
 """
 
 import sys
@@ -51,10 +52,10 @@ def format_time(seconds):
 
 
 class MockIndicator:
-    def __init__(self, paused=False):
+    def __init__(self, paused=False, seconds=0):
         self.active = True
         self.paused = paused
-        self.seconds = 0
+        self.seconds = seconds
         self.connection = None
         self.node = Gio.DBusNodeInfo.new_for_xml(XML)
         Gio.bus_own_name(
@@ -106,5 +107,8 @@ class MockIndicator:
 
 
 if __name__ == "__main__":
-    MockIndicator(paused="--paused" in sys.argv)
+    start = 0
+    if "--start" in sys.argv:
+        start = int(sys.argv[sys.argv.index("--start") + 1])
+    MockIndicator(paused="--paused" in sys.argv, seconds=start)
     GLib.MainLoop().run()

@@ -2443,34 +2443,6 @@ fn set_tray_title(app: &AppHandle, time_text: &str, paused: bool) {
     }
 }
 
-/// State of the GNOME top-bar pill, for the Linux settings row. Registered on
-/// every platform because the handler list is; reports `supported: false`
-/// wherever the pill can't exist.
-#[tauri::command]
-fn gnome_indicator_status() -> serde_json::Value {
-    #[cfg(target_os = "linux")]
-    return serde_json::to_value(crate::gnome_indicator::status()).unwrap_or_default();
-
-    #[cfg(not(target_os = "linux"))]
-    serde_json::json!({
-        "supported": false,
-        "installed": false,
-        "enabled": false,
-        "attached": false,
-    })
-}
-
-/// Install the shell extension that draws the pill, and enable it.
-#[tauri::command]
-fn install_gnome_indicator() -> Result<serde_json::Value, String> {
-    #[cfg(target_os = "linux")]
-    return crate::gnome_indicator::install()
-        .map(|status| serde_json::to_value(status).unwrap_or_default());
-
-    #[cfg(not(target_os = "linux"))]
-    Err("the GNOME top-bar indicator is only available on Linux".into())
-}
-
 /// Start the tray timer (if not already running). Returns the shared state
 /// so the capture loop can sync `tracked_seconds` into it.
 fn start_tray_timer(app: &AppHandle, state: &AppState) -> Arc<TrayTimerState> {
@@ -3766,8 +3738,6 @@ pub fn run() {
             tray::tray_action,
             tray::set_tray_state,
             tray::get_tray_state,
-            gnome_indicator_status,
-            install_gnome_indicator,
         ])
         .manage(tray::TrayStateMutex(std::sync::Mutex::new(tray::TrayState::default())))
         .setup(|app| {
@@ -3775,11 +3745,16 @@ pub fn run() {
             // Filtered Apps is instant rather than paying for the scan.
             prewarm_installed_apps();
 
-            // Export the recording state for the GNOME pill extension. Starts
-            // regardless of whether the extension is installed — it connects
-            // whenever it appears, and nothing else reads this.
+            // The GNOME top-bar pill. Installing the extension is not a
+            // setting to go and find: on GNOME the pill *is* how a recording
+            // is indicated, so put it in place and switch it on, then export
+            // the state it reads. Both no-op off GNOME, and the install is a
+            // no-op once the shipped version is already there.
             #[cfg(target_os = "linux")]
-            gnome_indicator::start(app.handle().clone());
+            {
+                gnome_indicator::ensure_installed();
+                gnome_indicator::start(app.handle().clone());
+            }
 
             #[cfg(target_os = "macos")]
             {

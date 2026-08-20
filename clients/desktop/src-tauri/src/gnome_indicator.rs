@@ -23,8 +23,7 @@ use std::sync::OnceLock;
 
 use gtk::gio;
 use gtk::gio::prelude::*;
-use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use zbus::object_server::SignalEmitter;
 
@@ -36,6 +35,9 @@ const OBJECT_PATH: &str = "/com/hackclub/Lookout/Indicator";
 const METADATA_JSON: &str = include_str!("../gnome-extension/metadata.json");
 const EXTENSION_JS: &str = include_str!("../gnome-extension/extension.js");
 const STYLESHEET_CSS: &str = include_str!("../gnome-extension/stylesheet.css");
+/// The app icon the pill shows while recording. The extension loads it by
+/// path from its own directory, so it has to land there too.
+const APP_ICON_PNG: &[u8] = include_bytes!("../gnome-extension/icons/lookout.png");
 
 /// Set while the extension is connected, so the tray can stand down.
 static PILL_ATTACHED: AtomicBool = AtomicBool::new(false);
@@ -123,14 +125,12 @@ impl Indicator {
     fn attach(&self) {
         PILL_ATTACHED.store(true, Ordering::Relaxed);
         self.app.remove_tray_by_id("timelapse_tray");
-        let _ = self.app.emit("gnome-indicator-attached", true);
     }
 
     /// The extension is going away (disabled, or the shell is shutting it
     /// down). Put the tray back if there's still something to indicate.
     fn detach(&self) {
         PILL_ATTACHED.store(false, Ordering::Relaxed);
-        let _ = self.app.emit("gnome-indicator-attached", false);
         if self.state.active {
             let _ = crate::tray::show_tray(self.state.time.clone(), self.app.clone());
         }
@@ -206,22 +206,11 @@ async fn serve(app: AppHandle, mut rx: UnboundedReceiver<PillState>) -> zbus::Re
     Ok(())
 }
 
-/// What the settings UI needs to describe the pill's state in one line.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IndicatorStatus {
-    /// Running under GNOME Shell, so a pill is possible at all.
-    pub supported: bool,
-    /// The extension is installed, at the version this build ships.
-    pub installed: bool,
-    /// GNOME has it enabled.
-    pub enabled: bool,
-    /// It has actually connected to us — the pill really is live.
-    pub attached: bool,
-}
-
 const SHELL_SCHEMA: &str = "org.gnome.shell";
 const ENABLED_KEY: &str = "enabled-extensions";
+/// Written next to the extension the first time we switch it on. Its absence
+/// is what distinguishes "never enabled" from "the user turned it off".
+const ENABLED_MARKER: &str = ".lookout-enabled-once";
 
 fn extension_dir() -> Result<PathBuf, String> {
     let data_home = match std::env::var_os("XDG_DATA_HOME") {
@@ -249,60 +238,86 @@ fn shell_settings() -> Option<gio::Settings> {
     Some(gio::Settings::new(SHELL_SCHEMA))
 }
 
-fn is_enabled() -> bool {
-    shell_settings().is_some_and(|settings| {
-        settings
-            .strv(ENABLED_KEY)
-            .iter()
-            .any(|uuid| uuid.as_str() == UUID)
-    })
-}
-
-fn is_installed() -> bool {
-    extension_dir()
-        .ok()
-        .and_then(|dir| std::fs::read_to_string(dir.join("metadata.json")).ok())
+fn is_current(dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(dir.join("metadata.json"))
         // Compared against what we ship, so an install from an older build
-        // counts as absent and `install` rewrites it.
-        .is_some_and(|installed| installed == METADATA_JSON)
+        // counts as absent and gets rewritten.
+        .is_ok_and(|installed| installed == METADATA_JSON)
 }
 
-pub fn status() -> IndicatorStatus {
-    IndicatorStatus {
-        supported: is_gnome(),
-        installed: is_installed(),
-        enabled: is_enabled(),
-        attached: pill_attached(),
-    }
-}
-
-/// Write the extension into the user's extension directory and mark it
-/// enabled. No root and no package manager, so this works the same from the
-/// deb, the rpm and the AppImage.
+/// Put the extension in place, and switch it on the first time.
 ///
-/// It does not come up in this session. GNOME scans the extension directories
-/// at startup and exposes no way to ask for a rescan —
-/// `org.gnome.Shell.Extensions.ReloadExtension` is declared but not
-/// implemented, and `EnableExtension` rejects a UUID the shell has never seen
-/// ("does not exist"). `gnome-extensions install` documents the same
-/// behaviour: an extension is "loaded in the next session". So the enable is
-/// written straight to the `enabled-extensions` key instead, where the shell
-/// will find it already switched on at next login — which is why the caller
-/// is expected to tell the user to log back in.
-pub fn install() -> Result<IndicatorStatus, String> {
+/// Called at every startup on GNOME: the pill is how the app indicates a
+/// recording there, not something to go looking for in a settings pane. It is
+/// a no-op once the shipped version is already installed, so the cost is one
+/// `read_to_string` per launch, and an app update reinstalls itself.
+///
+/// It will not be *drawn* until the next login. GNOME scans the extension
+/// directories when a session starts and offers no way to ask for a rescan
+/// (`org.gnome.Shell.Extensions.ReloadExtension` is declared but returns "not
+/// implemented", and `EnableExtension` rejects a UUID the shell has never
+/// seen; `man gnome-extensions` says an install is "loaded in the next
+/// session"). Until then the StatusNotifierItem is the indicator, which is
+/// why that path is still maintained.
+pub fn ensure_installed() {
     if !is_gnome() {
-        return Err("the top-bar pill needs GNOME Shell".into());
+        return;
     }
 
-    let dir = extension_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    match install() {
+        Ok(Installed::AlreadyCurrent) => {}
+        Ok(Installed::Written) => {
+            eprintln!("[gnome-indicator] extension installed; the pill appears at next login")
+        }
+        Err(err) => eprintln!("[gnome-indicator] could not install the extension: {err}"),
+    }
+}
 
+enum Installed {
+    AlreadyCurrent,
+    Written,
+}
+
+fn install() -> Result<Installed, String> {
+    let dir = extension_dir()?;
+    if is_current(&dir) {
+        // Still take the enable path: it is marker-guarded, and an install
+        // predating the marker would otherwise never get one — leaving an
+        // app update free to re-enable a pill the user had turned off.
+        enable_once(&dir)?;
+        return Ok(Installed::AlreadyCurrent);
+    }
+
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (name, contents) in [
         ("metadata.json", METADATA_JSON),
         ("extension.js", EXTENSION_JS),
         ("stylesheet.css", STYLESHEET_CSS),
     ] {
         std::fs::write(dir.join(name), contents).map_err(|e| format!("{name}: {e}"))?;
+    }
+
+    let icons = dir.join("icons");
+    std::fs::create_dir_all(&icons).map_err(|e| format!("{}: {e}", icons.display()))?;
+    std::fs::write(icons.join("lookout.png"), APP_ICON_PNG)
+        .map_err(|e| format!("lookout.png: {e}"))?;
+
+    enable_once(&dir)?;
+    Ok(Installed::Written)
+}
+
+/// Add the UUID to `enabled-extensions`, but only the first time.
+///
+/// Written to the key directly because the shell won't enable a UUID it has
+/// not scanned; at next login it finds the extension already switched on.
+///
+/// Only once, though: someone who turns the pill off in GNOME's own settings
+/// has said what they want, and an app update — which reinstalls, since the
+/// shipped version no longer matches — must not quietly switch it back on.
+fn enable_once(dir: &std::path::Path) -> Result<(), String> {
+    let marker = dir.join(ENABLED_MARKER);
+    if marker.exists() {
+        return Ok(());
     }
 
     let settings = shell_settings().ok_or("GNOME Shell's settings schema isn't installed")?;
@@ -315,5 +330,8 @@ pub fn install() -> Result<IndicatorStatus, String> {
             .map_err(|e| format!("couldn't enable the extension: {e}"))?;
     }
 
-    Ok(status())
+    // Best effort: a marker we failed to write only costs one redundant
+    // enable, which is better than failing an install that otherwise worked.
+    let _ = std::fs::write(marker, "");
+    Ok(())
 }
