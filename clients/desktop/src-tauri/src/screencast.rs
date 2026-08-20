@@ -71,6 +71,7 @@ async fn portal_session_task(
     use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
     use ashpd::desktop::PersistMode;
     use ashpd::WindowIdentifier;
+    use futures_util::StreamExt;
     use std::os::fd::IntoRawFd;
 
     // Connect to the screencast portal
@@ -156,6 +157,23 @@ async fn portal_session_task(
         return;
     }
 
+    // Subscribe to the portal's `Closed` signal — this is what fires when the
+    // user stops the share from the system indicator.
+    //
+    // `receive_closed` hands back the signal STREAM: awaiting it only sets the
+    // subscription up, it does NOT wait for a close. Treating that first
+    // `Ok(_)` as the close itself made every session look revoked the instant
+    // it started, which killed capture outright.
+    let mut closed = match session.receive_closed().await {
+        Ok(stream) => Some(Box::pin(stream)),
+        Err(e) => {
+            // No signal to listen on. The session still works; a revocation
+            // just falls to the capture loop's watchdog instead.
+            eprintln!("[screencast] session {id} closed-signal subscribe failed: {e}");
+            None
+        }
+    };
+
     // Park until the session ends, from either side.
     tokio::select! {
         _ = close_rx => {
@@ -164,16 +182,18 @@ async fn portal_session_task(
                 Err(e) => eprintln!("[screencast] closing session {id} failed: {e}"),
             }
         }
-        // The portal's `Closed` signal — this is what fires when the user
-        // stops the share from the system indicator. NOTE: `receive_closed`
-        // resolves once, with the close details; if a future ashpd hands back
-        // a Stream instead, this becomes a single `.next().await`.
-        res = session.receive_closed() => {
-            match res {
-                Ok(_) => eprintln!("[screencast] session {id} was closed by the compositor"),
-                // The signal stream dying also means the session is gone.
-                Err(e) => eprintln!("[screencast] session {id} closed signal ended: {e}"),
+        _ = async {
+            match closed.as_mut() {
+                // One item on this stream means the session is gone. So does
+                // the stream ending (None) — the signal connection is only
+                // torn down with the session.
+                Some(stream) => { stream.next().await; }
+                // Never resolves: with no subscription this arm must not win
+                // the select, or we'd revoke a perfectly live session.
+                None => std::future::pending::<()>().await,
             }
+        } => {
+            eprintln!("[screencast] session {id} was closed by the compositor");
             on_session_revoked(&app, id, node_ids);
         }
     }

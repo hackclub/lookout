@@ -99,6 +99,10 @@ windows = { version = "0.62", features = [
 
 [target."cfg(target_os = \"linux\")".dependencies]
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+# `StreamExt::next`, to await the screencast portal's `Closed` signal
+# (screencast.rs). Already in the tree via ashpd/zbus — this is a direct dep
+# on an existing build.
+futures-util = "0.3"
 # Session-bus service the GNOME pill extension reads the recording state from
 # (gnome_indicator.rs). Already in the tree via tauri-plugin-single-instance,
 # xcap and notify-rust, so this is a direct dep on an existing build. The
