@@ -315,6 +315,29 @@ export function useNativeCapture(
         setIsCapturing(false);
         onSessionTerminatedRef.current?.(event.payload.status);
       }),
+      // Wayland: the user stopped the share from the system indicator. The
+      // portal session is gone, so every further capture would come back
+      // empty — stop rather than tick away over a dead stream.
+      listen<{ nodeIds: number[] }>("screencast-revoked", (event) => {
+        console.warn(`[capture] screen sharing revoked (nodes ${event.payload.nodeIds.join(", ")})`);
+        capturingRef.current = false;
+        setIsCapturing(false);
+        setError(
+          "Screen sharing was stopped from your system's sharing indicator. " +
+            "Pick a source again to keep recording.",
+        );
+      }),
+      // Same outcome, found the slow way: the capture loop gave up after the
+      // source failed repeatedly without the portal ever telling us.
+      listen<{ message: string }>("capture-source-lost", (event) => {
+        console.error(`[capture] capture source lost: ${event.payload.message}`);
+        capturingRef.current = false;
+        setIsCapturing(false);
+        setError(
+          `Lost the screen capture source — recording stopped. Pick a source again to ` +
+            `continue. (${event.payload.message})`,
+        );
+      }),
     ];
 
     return () => {

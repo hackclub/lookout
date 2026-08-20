@@ -201,6 +201,14 @@ pub struct AppState {
     /// the user incrementally adds sources via the "+" button).
     #[cfg(target_os = "linux")]
     pub pipewire_fds: Mutex<std::collections::HashMap<u32, std::os::fd::RawFd>>,
+    /// Live XDG screencast sessions, one per trip through the portal picker.
+    /// Holding them is what lets us CLOSE them: the portal keeps casting until
+    /// `Close()` is called, so a session we forget about streams (and shows in
+    /// the system's screen-sharing indicator) until the process exits.
+    /// `pipewire_fds` above is a derived view of this list — see
+    /// `screencast::rebuild_fd_map`.
+    #[cfg(target_os = "linux")]
+    pub screencast_sessions: Mutex<Vec<crate::screencast::ScreencastSession>>,
     /// App names whose windows should be blacked out in monitor captures.
     pub blacklisted_apps: Mutex<Vec<String>>,
     /// Active Rust-side capture loop (if running). Holds the cancel channel
@@ -1461,15 +1469,31 @@ async fn request_screencast(
 #[tauri::command]
 async fn add_screencast(
     #[allow(unused_variables)] state: State<'_, AppState>,
+    #[allow(unused_variables)] app: AppHandle,
 ) -> Result<Vec<crate::screencast::StreamInfo>, String> {
     #[cfg(target_os = "linux")]
     {
-        crate::screencast::add_screencast(state).await
+        crate::screencast::add_screencast(app, state).await
     }
     #[cfg(not(target_os = "linux"))]
     {
         Err("Screencast portal is only supported on Linux".into())
     }
+}
+
+/// Hand the screen back: close every portal session and drop its PipeWire fds.
+///
+/// The frontend calls this when a recording session ends or the user returns
+/// to the source picker. It is deliberately NOT wired into `stop_capture_loop`
+/// — pause goes through that same path, and a paused session has to keep its
+/// cast so resuming doesn't re-prompt the portal.
+#[tauri::command]
+fn release_screencast(#[allow(unused_variables)] state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::screencast::release_screencast(&state);
+    }
+    Ok(())
 }
 
 /// Initialize the session config so Rust knows where the server is.
@@ -2327,6 +2351,19 @@ const CLIP_FIRST_CUT_DELAY_MS: u64 = 8_000;
 /// recording intact and stops the thrash.
 const MAX_CLIP_ENCODER_FAILURES: u32 = 3;
 
+/// Consecutive failed capture ticks that mean a PipeWire source is gone for
+/// good rather than briefly unhappy.
+///
+/// A revoked screencast is normally caught by the portal's `Closed` signal
+/// (see `screencast::portal_session_task`), which is instant. This is the
+/// backstop for the case where the stream dies without the session closing:
+/// `pipewiresrc` then just times out on every frame, and the loop used to
+/// retry that forever — tray ticking, UI claiming to record, not one frame
+/// reaching the server. Only armed for PipeWire sources; a monitor capture
+/// failing a few times in a row is ordinary (locked screen, sleeping display)
+/// and must not end the recording.
+const MAX_CONSECUTIVE_PIPEWIRE_FAILURES: u32 = 3;
+
 /// Max seconds the menu-bar time may run ahead of the last server-credited
 /// `tracked_seconds`. Must equal `MAX_INTERPOLATION_S` in
 /// @lookout/react's useSessionTimer — one capture interval. Without the cap
@@ -2576,6 +2613,14 @@ impl From<CaptureUploadResult> for CaptureTickResult {
 /// Event payload emitted when a capture tick fails.
 #[derive(Clone, Serialize)]
 struct CaptureTickError {
+    message: String,
+}
+
+/// Event payload emitted when the capture source is gone for good and the
+/// loop has given up — as opposed to `CaptureTickError`, which is a bad
+/// minute the loop expects to recover from.
+#[derive(Clone, Serialize)]
+struct CaptureSourceLost {
     message: String,
 }
 
@@ -2941,6 +2986,14 @@ async fn capture_loop_task(
         eprintln!("[capture-loop] clips enabled (frame every {frame_interval_ms}ms)");
     }
 
+    // Watchdog for a screencast that died without the portal telling us.
+    // Only armed when a PipeWire source is in play — see
+    // MAX_CONSECUTIVE_PIPEWIRE_FAILURES.
+    let watch_for_lost_source = sources
+        .iter()
+        .any(|s| matches!(s, CaptureSource::PipeWire { .. }));
+    let mut consecutive_capture_failures: u32 = 0;
+
     // Clips: hold the first upload back so the opening clip has a few frames
     // and the session activates promptly. Fixed delay, NOT a multiple of the
     // cadence — see CLIP_FIRST_CUT_DELAY_MS. JPEG mode keeps the legacy
@@ -3165,6 +3218,7 @@ async fn capture_loop_task(
 
         match grab_result {
             Ok(grab) => {
+                consecutive_capture_failures = 0;
                 let capture::RawCaptureResult {
                     data: jpeg_data,
                     width: jpeg_w,
@@ -3273,6 +3327,17 @@ async fn capture_loop_task(
             }
             Err(e) => {
                 eprintln!("[capture-loop] screenshot failed: {e}");
+                consecutive_capture_failures += 1;
+                if watch_for_lost_source
+                    && consecutive_capture_failures >= MAX_CONSECUTIVE_PIPEWIRE_FAILURES
+                {
+                    eprintln!(
+                        "[capture-loop] {consecutive_capture_failures} capture ticks in a row \
+                         failed on a PipeWire source — the screencast is gone, stopping"
+                    );
+                    let _ = app.emit("capture-source-lost", CaptureSourceLost { message: e });
+                    break;
+                }
                 let _ = app.emit(
                     "capture-tick-error",
                     CaptureTickError {
@@ -3698,6 +3763,8 @@ pub fn run() {
             cold_start_urls: Mutex::new(None),
             #[cfg(target_os = "linux")]
             pipewire_fds: Mutex::new(std::collections::HashMap::new()),
+            #[cfg(target_os = "linux")]
+            screencast_sessions: Mutex::new(Vec::new()),
             blacklisted_apps: Mutex::new(Vec::new()),
             capture_loop: Mutex::new(None),
             tray_timer: Mutex::new(None),
@@ -3728,6 +3795,7 @@ pub fn run() {
             native_menu::prefetch_add_menu_icons,
             request_screencast,
             add_screencast,
+            release_screencast,
             set_blacklisted_apps,
             get_blacklisted_apps,
             list_installed_apps,

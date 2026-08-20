@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { invoke } from "../logger.js";
 import {
   LookoutProvider,
   Button,
@@ -72,6 +73,23 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
     setIsPrompting(true);
   }, []);
 
+  /** Hand the screen back to the compositor.
+   *
+   *  Wayland casts through the XDG portal, and the portal keeps streaming
+   *  until the session is explicitly closed — leaving the "screen is being
+   *  shared" indicator up long after the timelapse ended. Stopping the
+   *  capture loop is deliberately not enough: pause goes through that too,
+   *  and a paused session has to keep its cast. So the release happens here,
+   *  where the recording genuinely ends. */
+  const releaseScreencast = useCallback(() => {
+    invoke("release_screencast").catch(console.error);
+  }, []);
+
+  // Backstop for every other way out of a recording — a server-side auto-stop
+  // navigates straight to the session view without passing through
+  // `stopSession`, and that must not leave the screen being cast either.
+  useEffect(() => releaseScreencast, [releaseScreencast]);
+
   const stopSession = useCallback(async (name: string | null, edit: boolean) => {
     setStopping(true);
     console.log(
@@ -109,8 +127,9 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
     if (edit) {
       void openEditorWindow(token);
     }
+    releaseScreencast();
     onViewSession(token);
-  }, [token, onViewSession]);
+  }, [token, onViewSession, releaseScreencast]);
 
   const handleConfirmStop = useCallback(
     (name: string | null) => stopSession(name, false),
@@ -134,7 +153,10 @@ export function RecordPage({ token, onBack, onViewSession }: RecordPageProps) {
   const handleChangeSource = useCallback(() => {
     setCaptureFlowDirection(-1);
     setCaptureSource(null);
-  }, []);
+    // Back to the picker: whatever was being cast isn't being recorded any
+    // more, and the next pick opens its own session.
+    releaseScreencast();
+  }, [releaseScreencast]);
 
   // Loading skeleton that matches the SourcePicker layout
   if (sessionCheck === "loading") {
