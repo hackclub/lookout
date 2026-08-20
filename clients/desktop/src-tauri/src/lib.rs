@@ -1442,23 +1442,92 @@ fn is_wayland() -> bool {
 /// shows a browser confirmation prompt the user must click. Restricted to
 /// http(s) so the frontend can't open arbitrary schemes.
 #[tauri::command]
-fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn open_external_url(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    url: String,
+) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("only http(s) URLs are allowed".into());
     }
+
+    // On Linux the opener plugin spawns the browser with no startup token, so
+    // GNOME's focus-stealing prevention leaves it in the background behind a
+    // "Google Chrome is ready" notification — the opposite of what this
+    // command is for. Launch through GTK instead, which attaches an
+    // activation token (xdg-activation on Wayland, startup notification on
+    // X11) that entitles the browser to the foreground.
+    #[cfg(target_os = "linux")]
+    if linux_open_url_foreground(&app, &window, &url) {
+        return Ok(());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = &window;
+
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
 }
 
+/// Open `url` via GTK so the launch carries a window's activation token.
+///
+/// The token inherits its authority from the window it was minted for, so ask
+/// for it from whichever of our windows currently has focus (e.g. the editor
+/// window, while the invoking code lives in the main one); a token from an
+/// unfocused window is stale and GNOME demotes the browser to a notification
+/// anyway. Returns false to fall back to the opener plugin, which at least
+/// still loads the page.
+#[cfg(target_os = "linux")]
+fn linux_open_url_foreground(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    url: &str,
+) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let source = app
+        .webview_windows()
+        .into_values()
+        .find(|w| w.is_focused().unwrap_or(false))
+        .unwrap_or_else(|| window.clone());
+
+    let (tx, rx) = mpsc::channel();
+    let uri = url.to_string();
+    let target = source.clone();
+    if source
+        .run_on_main_thread(move || {
+            let opened = target
+                .gtk_window()
+                .map_err(|e| e.to_string())
+                .and_then(|gtk_window| {
+                    gtk::show_uri_on_window(Some(&gtk_window), &uri, gtk::current_event_time())
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = &opened {
+                eprintln!("[open-url] GTK could not launch the browser: {e}");
+            }
+            let _ = tx.send(opened.is_ok());
+        })
+        .is_err()
+    {
+        return false;
+    }
+
+    // Bounded like the GTK style reads: a wedged main thread must not hang
+    // the command, and the opener fallback still gets the page open.
+    rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
+}
+
 #[tauri::command]
 async fn request_screencast(
     #[allow(unused_variables)] state: State<'_, AppState>,
+    #[allow(unused_variables)] app: AppHandle,
 ) -> Result<Vec<crate::screencast::StreamInfo>, String> {
     #[cfg(target_os = "linux")]
     {
-        crate::screencast::request_screencast(state).await
+        crate::screencast::request_screencast(app, state).await
     }
     #[cfg(not(target_os = "linux"))]
     {
