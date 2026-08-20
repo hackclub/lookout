@@ -217,6 +217,8 @@ pub(crate) fn toggle_tray_window(app: &AppHandle, rect: tauri::Rect) {
         }
     } else {
         // Create it
+        // (mut is for the macOS-only call below; off macOS nothing reassigns it)
+        #[allow(unused_mut)]
         let mut builder = WebviewWindowBuilder::new(app, "tray", WebviewUrl::App("#/tray".into()))
             .title("Tray")
             .inner_size(300.0, 50.0)

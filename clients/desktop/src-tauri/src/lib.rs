@@ -3711,7 +3711,10 @@ pub fn run() {
         // in the page when our own scripts start. `js_init_script` runs at
         // document start, which is the one hook early enough.
         .plugin(
-            tauri::plugin::Builder::new("lookout-window-frame")
+            // Both parameters spelled out: `C` defaults to `()`, but a default
+            // is not used for inference in an expression, and nothing here
+            // pins it — so without this it's E0283.
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("lookout-window-frame")
                 .js_init_script(format!(
                     "window.__LOOKOUT_SHELL_DRAWS_FRAME__ = {};",
                     desktop_appearance::shell_draws_window_frame(),
