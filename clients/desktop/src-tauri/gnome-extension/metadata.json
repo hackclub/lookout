@@ -1,0 +1,9 @@
+{
+  "uuid": "lookout-indicator@hackclub.com",
+  "name": "Lookout Recording Indicator",
+  "description": "Shows the tracked time of an in-progress Lookout recording as a pill in the GNOME top bar, styled like the shell's own screen-recording indicator. Installed and enabled by the Lookout desktop app; it does nothing on its own.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://fallout.hackclub.com",
+  "version": 1,
+  "version-name": "1.0.0"
+}

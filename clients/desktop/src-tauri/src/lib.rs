@@ -4,6 +4,8 @@ mod clips;
 mod clock_offset;
 mod crop;
 mod desktop_appearance;
+#[cfg(target_os = "linux")]
+mod gnome_indicator;
 mod native_menu;
 #[cfg(target_os = "macos")]
 mod native_tray;
@@ -2402,7 +2404,7 @@ async fn tray_timer_task(
             // Write the frozen value once (a pause snaps the title down by
             // the dropped remainder), then idle until resume.
             if last_title.as_deref() != Some(time_text.as_str()) {
-                set_tray_title(&app, &time_text);
+                set_tray_title(&app, &time_text, true);
                 last_title = Some(time_text);
             }
             was_paused = true;
@@ -2410,7 +2412,7 @@ async fn tray_timer_task(
         }
 
         if was_paused || last_title.as_deref() != Some(time_text.as_str()) {
-            set_tray_title(&app, &time_text);
+            set_tray_title(&app, &time_text, false);
             last_title = Some(time_text);
         }
         was_paused = false;
@@ -2418,7 +2420,13 @@ async fn tray_timer_task(
 }
 
 /// Write the menu-bar time text (and, off macOS, the hover tooltip).
-fn set_tray_title(app: &AppHandle, time_text: &str) {
+fn set_tray_title(app: &AppHandle, time_text: &str, paused: bool) {
+    #[cfg(target_os = "linux")]
+    crate::gnome_indicator::publish_tick(time_text, paused);
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = paused;
+
     #[cfg(target_os = "macos")]
     {
         let _ = app;
@@ -2433,6 +2441,34 @@ fn set_tray_title(app: &AppHandle, time_text: &str) {
         // only way to see the recorded time there.
         let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
     }
+}
+
+/// State of the GNOME top-bar pill, for the Linux settings row. Registered on
+/// every platform because the handler list is; reports `supported: false`
+/// wherever the pill can't exist.
+#[tauri::command]
+fn gnome_indicator_status() -> serde_json::Value {
+    #[cfg(target_os = "linux")]
+    return serde_json::to_value(crate::gnome_indicator::status()).unwrap_or_default();
+
+    #[cfg(not(target_os = "linux"))]
+    serde_json::json!({
+        "supported": false,
+        "installed": false,
+        "enabled": false,
+        "attached": false,
+    })
+}
+
+/// Install the shell extension that draws the pill, and enable it.
+#[tauri::command]
+fn install_gnome_indicator() -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    return crate::gnome_indicator::install()
+        .map(|status| serde_json::to_value(status).unwrap_or_default());
+
+    #[cfg(not(target_os = "linux"))]
+    Err("the GNOME top-bar indicator is only available on Linux".into())
 }
 
 /// Start the tray timer (if not already running). Returns the shared state
@@ -3727,12 +3763,20 @@ pub fn run() {
             tray::tray_action,
             tray::set_tray_state,
             tray::get_tray_state,
+            gnome_indicator_status,
+            install_gnome_indicator,
         ])
         .manage(tray::TrayStateMutex(std::sync::Mutex::new(tray::TrayState::default())))
         .setup(|app| {
             // Warm the installed-app cache off-thread so the first visit to
             // Filtered Apps is instant rather than paying for the scan.
             prewarm_installed_apps();
+
+            // Export the recording state for the GNOME pill extension. Starts
+            // regardless of whether the extension is installed — it connects
+            // whenever it appears, and nothing else reads this.
+            #[cfg(target_os = "linux")]
+            gnome_indicator::start(app.handle().clone());
 
             #[cfg(target_os = "macos")]
             {

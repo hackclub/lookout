@@ -99,6 +99,12 @@ windows = { version = "0.62", features = [
 
 [target."cfg(target_os = \"linux\")".dependencies]
 ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+# Session-bus service the GNOME pill extension reads the recording state from
+# (gnome_indicator.rs). Already in the tree via tauri-plugin-single-instance,
+# xcap and notify-rust, so this is a direct dep on an existing build. The
+# `tokio` feature keeps zbus on the runtime the rest of the app spawns onto
+# rather than starting an async-io reactor beside it.
+zbus = { version = "5", features = ["tokio"] }
 # Window input shaping (window_shape.rs). Pinned to the same minor Tauri
 # links against — a different gtk would give us a second, incompatible
 # ApplicationWindow type and gtk_window() would stop unifying.

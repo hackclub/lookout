@@ -1,0 +1,9 @@
+/* The pill itself inherits the shell's own `screen-recording-indicator`
+ * styling (red fill, 999px radius, bold label) from the active theme, so
+ * only the label geometry is ours. The min-width keeps the pill from
+ * resizing under the pointer every time the digits change width. */
+.lookout-indicator-label {
+  min-width: 2.8em;
+  text-align: center;
+  padding: 0 0.15em;
+}
