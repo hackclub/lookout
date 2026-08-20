@@ -7,7 +7,7 @@ import { createLookoutClient, type CutInterval } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
-import { applyLinuxChrome, useBackdropState, WINDOW_MARGIN, DEFAULT_APPEARANCE, type DesktopAppearance } from "../linuxChrome.js";
+import { useBackdropState, useDesktopAppearance, SHELL_DRAWS_FRAME, WINDOW_MARGIN } from "../linuxChrome.js";
 import { HeaderBar } from "./HeaderBar.js";
 import { WindowResizeHandles, useWindowFrameState } from "./WindowResizeHandles.js";
 import { isLinux as IS_LINUX } from "../platform.js";
@@ -56,8 +56,9 @@ export async function openEditorWindow(token: string): Promise<void> {
   const isMacOS = navigator.userAgent.includes("Mac");
   // Linux reserves a transparent frame around the visible window for its
   // outer border and shadow, so every dimension grows by twice it — the
-  // content keeps the size these numbers describe.
-  const pad = IS_LINUX ? WINDOW_MARGIN * 2 : 0;
+  // content keeps the size these numbers describe. No frame, no growth:
+  // a shell that draws its own corners leaves us nothing to make room for.
+  const pad = IS_LINUX && !SHELL_DRAWS_FRAME ? WINDOW_MARGIN * 2 : 0;
   const win = new WebviewWindow(label, {
     url: `${window.location.pathname}#/editor?token=${token}`,
     title: "Edit timelapse",
@@ -243,7 +244,9 @@ export function useEditorWindowOpen(): string | null {
  */
 export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
-  const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
+  // Undecorated on Linux, same as the main window, so it owns its corners and
+  // header bar — and follows the GTK theme live.
+  const appearance = useDesktopAppearance({ undecorated: true });
   const [sessionName, setSessionName] = useState<string | null>(null);
   useWindowFrameState();
   useBackdropState();
@@ -256,15 +259,9 @@ export function EditorWindow({ token }: { token: string }) {
     const html = document.documentElement;
     const body = document.body;
     const root = document.getElementById("root");
-    const isLinux = navigator.userAgent.toLowerCase().includes("linux");
-
-    if (isLinux) {
-      // Adwaita palette, session accent, desktop font, and the rounded
-      // corners this window now owns — it's undecorated here, same as the
-      // main window.
-      void applyLinuxChrome({ undecorated: true }).then(setAppearance);
-      return;
-    }
+    // Linux's own chrome is handled by useDesktopAppearance above; the
+    // vibrancy below is a macOS/Windows affair.
+    if (IS_LINUX) return;
 
     let applied = false;
     invoke("enable_vibrancy")

@@ -42,7 +42,7 @@ import { AddMenuPopup, type AddMenuPopupItem } from "./components/AddMenuPopup.j
 import { AnnouncementBanner } from "./components/AnnouncementBanner.js";
 import { getApiBase } from "./serverConfig.js";
 import { HeaderBar } from "./components/HeaderBar.js";
-import { applyLinuxChrome, useBackdropState, DEFAULT_APPEARANCE, type DesktopAppearance } from "./linuxChrome.js";
+import { useBackdropState, useDesktopAppearance } from "./linuxChrome.js";
 import { isLinux } from "./platform.js";
 import { HeaderNavProvider, type HeaderNav } from "./headerNav.js";
 import { useWindowFrameState } from "./components/WindowResizeHandles.js";
@@ -526,8 +526,6 @@ function MainWindowApp() {
       }
     };
 
-    const isLinux = navigator.userAgent.toLowerCase().includes("linux");
-
     if (isLinux) {
       // On Linux, Tauri's window.theme() can incorrectly report "light" and override the native GTK webview behavior.
       // WebKitGTK natively supports prefers-color-scheme (via xdg-desktop-portal / org.freedesktop.appearance).
@@ -563,17 +561,14 @@ function MainWindowApp() {
   // Linux only: overlay the Adwaita palette, adopt the session's accent and
   // UI font, and learn which edge the user keeps their window controls on.
   // Resolves to the defaults untouched on every other platform.
-  const [appearance, setAppearance] = useState<DesktopAppearance>(DEFAULT_APPEARANCE);
+  // The main window is undecorated on Linux (lib.rs), so it owns its corners
+  // and its header bar. Re-read when the window regains focus, so a trip to
+  // GNOME Settings and back is reflected without a relaunch.
+  const appearance = useDesktopAppearance({ undecorated: true });
   useBackdropState();
   // Fixed size hints don't stop a tiling WM sizing this window, so its frame
   // has to collapse under one just as the editor's does.
   useWindowFrameState();
-  useEffect(() => {
-    // The main window is undecorated on Linux (lib.rs), so it owns its
-    // corners and its header bar.
-    void applyLinuxChrome({ undecorated: true }).then(setAppearance);
-  }, []);
-
   // Listen for native menu navigation events
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -611,7 +606,6 @@ function MainWindowApp() {
 
     let effectsApplied = false;
 
-    const isLinux = navigator.userAgent.toLowerCase().includes("linux");
     if (!isLinux) {
       invoke("enable_vibrancy")
         .then(() => {

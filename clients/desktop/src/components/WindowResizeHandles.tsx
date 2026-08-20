@@ -14,7 +14,7 @@
  */
 import React, { useEffect, useState } from "react";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { RESIZE_BAND, SHADOW_PASSTHROUGH, syncWindowFrame } from "../linuxChrome.js";
+import { FRAME_INSET, RESIZE_BAND, syncWindowFrame } from "../linuxChrome.js";
 
 /** Mirrors Tauri's ResizeDirection, which the package declares but doesn't export. */
 type ResizeDirection =
@@ -26,9 +26,15 @@ type ResizeDirection =
  * the window's real edge — everything outside that band is passed through
  * to the desktop (window_shape.rs), so a handle out there could never be
  * clicked.
+ *
+ * `FRAME_INSET` is 0 when the shell draws the frame for us: there is no
+ * transparent margin then, so the strips sit at the visible edge and the
+ * grab area comes out of the content instead of out of the frame. That is
+ * the same trade any undecorated window without an invisible border makes,
+ * and 8px is thinner than the border GTK would have given us.
  */
 const GRAB = RESIZE_BAND;
-const INSET = SHADOW_PASSTHROUGH;
+const INSET = FRAME_INSET;
 
 /**
  * Corners reach a little further in than the edges do, as they do in GTK.
@@ -107,7 +113,7 @@ export function useWindowFrameState(): void {
       // One round trip: applies the input shape (recomputed from the current
       // size, so this has to run on every resize) and reports whether the
       // compositor is sizing us.
-      const reported = await syncWindowFrame(SHADOW_PASSTHROUGH);
+      const reported = await syncWindowFrame(FRAME_INSET);
       const collapsed = reported ?? (await isFlushWithWorkArea());
       if (cancelled) return;
       document.documentElement.classList.toggle("lookout-snapped", collapsed);

@@ -17,6 +17,17 @@
         var ua = navigator.userAgent.toLowerCase();
         if (ua.indexOf('linux') !== -1 && ua.indexOf('android') === -1) {
           document.documentElement.classList.add('os-linux');
+          // Both Linux windows are undecorated, so they draw their own
+          // corners, border and shadow. Unless something else already is:
+          // the Rounded Window Corners extensions round and shade every
+          // window from its real edge, which is 40px outside ours, so you
+          // get two frames nested with a band of desktop between them. The
+          // native side decides and plants the answer before this runs
+          // (js_init_script in lib.rs); `lookout-csd` is the single switch
+          // for every rule that assumes a frame, here and in linuxChrome.ts.
+          if (window.__LOOKOUT_SHELL_DRAWS_FRAME__ !== true) {
+            document.documentElement.classList.add('lookout-csd');
+          }
           // The Adwaita overrides are keyed on data-theme, and App.tsx only
           // sets it once React has mounted.
           document.documentElement.setAttribute(
@@ -79,9 +90,13 @@
 
       /* Linux draws its own rounded window, and the class lands synchronously
          in the script below — so the first frame can be the right shape too
-         rather than a square that rounds off a moment later. */
-      html.os-linux { background: transparent; }
-      html.os-linux #root {
+         rather than a square that rounds off a moment later.
+
+         Keyed on .lookout-csd, not .os-linux: a session whose shell already
+         rounds and shades every window gets none of this, and falls through
+         to the opaque square `html` painted above. */
+      html.os-linux.lookout-csd { background: transparent; }
+      html.os-linux.lookout-csd #root {
         position: fixed;
         inset: 40px;
         height: auto;
@@ -92,7 +107,7 @@
           0 2px 8px rgba(0, 0, 0, 0.1),
           0 8px 28px rgba(0, 0, 0, 0.14);
       }
-      html.os-linux[data-theme="light"] #root {
+      html.os-linux.lookout-csd[data-theme="light"] #root {
         background: #fafafa;
         box-shadow:
           0 0 0 1px rgba(0, 0, 0, 0.18),

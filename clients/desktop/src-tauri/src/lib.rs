@@ -3668,6 +3668,20 @@ pub fn run() {
         .plugin(tauri_plugin_liquid_glass::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        // Tell the webview whether it should draw its own window frame, before
+        // it paints anything. index.html keys its first-paint styles on this
+        // (the frame has to be right on the very first frame, or every launch
+        // flashes), so it cannot be an IPC call — the answer has to already be
+        // in the page when our own scripts start. `js_init_script` runs at
+        // document start, which is the one hook early enough.
+        .plugin(
+            tauri::plugin::Builder::new("lookout-window-frame")
+                .js_init_script(format!(
+                    "window.__LOOKOUT_SHELL_DRAWS_FRAME__ = {};",
+                    desktop_appearance::shell_draws_window_frame(),
+                ))
+                .build(),
+        )
         .manage(AppState {
             config: Mutex::new(None),
             cold_start_urls: Mutex::new(None),
@@ -3891,22 +3905,30 @@ pub fn run() {
                     // the content box, so without the extra room the
                     // compositor simply clips them away.
                     //
+                    // Skipped when a shell extension is already rounding and
+                    // shading every window: it would draw around the grown
+                    // window, i.e. 40px out from the app, and the frame ends
+                    // up decorated twice. See `shell_draws_window_frame`.
+                    //
                     // The bounds have to move with it: this window is fixed
                     // at 480x640 by min == max, and a set_size past the
                     // maximum would just be clamped back. Widen the limits
                     // first, then resize, then re-centre — the window grew
                     // around its old top-left otherwise.
-                    const MARGIN: f64 = 40.0;
-                    let scale = window.scale_factor()?;
-                    let inner: tauri::LogicalSize<f64> = window.inner_size()?.to_logical(scale);
-                    let grown = tauri::LogicalSize::new(
-                        inner.width + MARGIN * 2.0,
-                        inner.height + MARGIN * 2.0,
-                    );
-                    window.set_min_size(Some(grown))?;
-                    window.set_max_size(Some(grown))?;
-                    window.set_size(grown)?;
-                    window.center()?;
+                    if !desktop_appearance::shell_draws_window_frame() {
+                        const MARGIN: f64 = 40.0;
+                        let scale = window.scale_factor()?;
+                        let inner: tauri::LogicalSize<f64> =
+                            window.inner_size()?.to_logical(scale);
+                        let grown = tauri::LogicalSize::new(
+                            inner.width + MARGIN * 2.0,
+                            inner.height + MARGIN * 2.0,
+                        );
+                        window.set_min_size(Some(grown))?;
+                        window.set_max_size(Some(grown))?;
+                        window.set_size(grown)?;
+                        window.center()?;
+                    }
                 }
 
                 // Auto-grant camera/microphone permissions on Windows so the

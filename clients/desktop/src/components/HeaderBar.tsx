@@ -145,7 +145,8 @@ export interface HeaderBarProps {
 export function HeaderBar({ title, subtitle, appearance, actions, onBack, onClose, maximizable = false }: HeaderBarProps) {
   // One button, no minimize and no maximize. That's what GNOME ships now:
   // the window menu and the keyboard still do everything else, and a row of
-  // three controls is the look this was meant to get away from.
+  // three controls is the look this was meant to get away from. Which *edge*
+  // it sits on is the user's call, though — see `close_on_trailing_edge`.
   const closeButton = (
     <button
       type="button"

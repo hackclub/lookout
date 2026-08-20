@@ -25,6 +25,10 @@
 //!
 //! Whether the frame should exist at all is the compositor's call, read
 //! from GDK rather than guessed from geometry — see `sync_window_frame`.
+//! It may also not exist because Lookout never drew one: a shell extension
+//! that rounds and shades every window takes the job over entirely, and the
+//! frontend then asks for an inset of 0, which clears the shape.
+//!
 //! The frontend drives *when* to re-check, since it already listens for
 //! resizes, and mirrors the answer into its CSS.
 
