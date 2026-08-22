@@ -555,7 +555,7 @@ Now that you've seen the full flow: whatever you build or embed — the desktop 
 
 4. **Use the batch API when reading multiple sessions.** For gallery/dashboard views, fetch with a single `POST /api/sessions/batch` (up to 100 tokens) instead of N separate `GET /api/sessions/:token` calls — fewer round trips and one shared rate-limit bucket.
 
-5. **Keep the client clock accurate.** `capturedAt` must be within **±5 minutes of server time and strictly monotonic** across uploads, or the server rejects it with a `400` (`captured_at_future`, `captured_at_too_old`, `captured_at_not_monotonic`, …). A skewed device clock silently breaks credit-mode tracking. Every `upload-url`/confirm response carries `serverTime` — use it to detect skew, and schedule the next capture from `nextExpectedAt` (never a fixed `setInterval`).
+5. **Keep the client clock accurate.** `capturedAt` must be within **±5 minutes of server time and strictly monotonic** across *confirmed* captures (a failed upload's stamp may be reused by its retry), or the server rejects it with a `400` (`captured_at_future`, `captured_at_too_old`, `captured_at_not_monotonic`, …). A skewed device clock silently breaks credit-mode tracking. Every `upload-url`/confirm response carries `serverTime` — use it to detect skew, and schedule the next capture from `nextExpectedAt` (never a fixed `setInterval`).
 
 6. **Honor `429` and the `Retry-After` header.** Endpoints are rate-limited (upload-url 10/min, confirm 20/min, etc.) and a throttled response sets `Retry-After: <seconds>`. Back off for exactly that long rather than retrying blindly — blind retries dig you deeper into the limit. See [Rate Limiting](../packages/server/API.md#rate-limiting).
 

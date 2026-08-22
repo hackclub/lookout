@@ -558,11 +558,26 @@ export async function sessionRoutes(app: FastifyInstance) {
             .send({ error: "credit_mode_requires_captured_at" });
         }
 
-        // Look up the latest existing capturedAt for monotonicity.
+        // Look up the latest CONFIRMED capturedAt for monotonicity. Confirmed
+        // only: a row is inserted at presign time, so counting unconfirmed
+        // rows made every abandoned upload a floor against its own retry.
+        // That broke the clip→JPEG fallback, which deliberately reuses the
+        // clip's capturedAt so the minute still credits (see the clients'
+        // uploadWithFallback): the clip presign 400'd or timed out, and the
+        // fallback then died here with captured_at_not_monotonic — the exact
+        // minute-loss the fallback exists to prevent. A capture that never
+        // landed can't be a replay target, and duplicate stamps at confirm
+        // time can only RESET a streak (credit 0, see creditCapture), so
+        // nothing anti-cheat is lost by ignoring unconfirmed rows.
         const [latest] = await db
           .select({ capturedAt: schema.screenshots.capturedAt })
           .from(schema.screenshots)
-          .where(eq(schema.screenshots.sessionId, session.id))
+          .where(
+            and(
+              eq(schema.screenshots.sessionId, session.id),
+              eq(schema.screenshots.confirmed, true),
+            ),
+          )
           .orderBy(sql`${schema.screenshots.capturedAt} DESC NULLS LAST`)
           .limit(1);
 

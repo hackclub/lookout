@@ -296,6 +296,35 @@ describe("credit mode envelope", () => {
     expect(replay.body.error).toBe("captured_at_not_monotonic");
   });
 
+  it("clip fallback: an unconfirmed presign does not block a same-stamp retry", async () => {
+    // The clip→JPEG fallback deliberately reuses the failed clip's
+    // capturedAt so the capture still lands in the ±30s streak window and
+    // the minute credits. The clip's presign already inserted an
+    // (unconfirmed) row with that stamp; when the monotonicity floor counted
+    // unconfirmed rows, the fallback 400'd against the very upload it was
+    // replacing — three retries of a guaranteed failure, whole minute lost.
+    // The floor must come from confirmed captures only.
+    const { token } = await seedCreditSession();
+    advanceVirtualMs(60_000);
+    const cap = new Date(virtualNow).toISOString();
+
+    // Clip attempt: presign succeeds, then the R2 PUT or confirm fails —
+    // the row stays unconfirmed and must not become the floor.
+    const clipAttempt = await postUpload(token, cap);
+    expect(clipAttempt.status).toBe(200);
+
+    // JPEG fallback for the SAME tick, same capturedAt.
+    const fallback = await postUpload(token, cap);
+    expect(fallback.status).toBe(200);
+    expect(fallback.body.capturedAtAdopted).toBeUndefined();
+
+    // The minute still credits: seed was at T0, this lands exactly on the
+    // T0+60 expected mark.
+    const c = await confirmUpload(token, fallback.body.screenshotId);
+    expect(c.status).toBe(200);
+    expect(c.body.trackedSeconds).toBe(60);
+  });
+
   it("rejects non-monotonic capturedAt", async () => {
     const sess = await seedCreditSession();
     // Submit a second upload with an EARLIER capturedAt than the first.
@@ -894,12 +923,17 @@ describe("latency — burst races (the bug we saw in prod)", () => {
 
   it("burst monotonicity: server rejects captured_at not strictly increasing", async () => {
     // The cap2 having same capturedAt as cap1 hits the
-    // captured_at_not_monotonic guard.
+    // captured_at_not_monotonic guard. cap1 must be CONFIRMED first: the
+    // floor is the latest confirmed capture, so an unconfirmed presign row
+    // doesn't block a same-stamp retry (the clip→JPEG fallback depends on
+    // that — see the regression test in the envelope suite).
     const { token } = await createSession();
     advanceVirtualMs(60_000);
     const cap = new Date(virtualNow).toISOString();
     const u1 = await postUpload(token, cap);
     expect(u1.status).toBe(200);
+    const c1 = await confirmUpload(token, u1.body.screenshotId);
+    expect(c1.status).toBe(200);
     const u2 = await postUpload(token, cap); // exact same capturedAt
     expect(u2.status).toBe(400);
     expect(u2.body.error).toBe("captured_at_not_monotonic");

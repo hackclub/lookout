@@ -120,10 +120,13 @@ export function adoptedCapturedAt(
  *
  * - Envelope: `serverNow - 5min ≤ capturedAt ≤ serverNow + 5min`
  * - Must be ≥ session.startedAt
- * - Must be strictly > the latest existing capturedAt (monotonic). Equality
- *   is only allowed when the caller is in an idempotent retry path (same
- *   screenshotId); that check lives at the route handler since it requires
- *   the row lookup.
+ * - Must be strictly > the latest CONFIRMED capturedAt (monotonic). The
+ *   caller must pass the latest confirmed capture only — an unconfirmed
+ *   (presign-time) row is an upload that never landed, and using it as the
+ *   floor blocks the clip→JPEG fallback retry that deliberately reuses the
+ *   failed upload's stamp. Equality is only allowed when the caller is in an
+ *   idempotent retry path (same screenshotId); that check lives at the route
+ *   handler since it requires the row lookup.
  *
  * Envelope failures are usually a wrong clock rather than a bad actor — use
  * `adoptedCapturedAt` to absorb them rather than calling this directly.
