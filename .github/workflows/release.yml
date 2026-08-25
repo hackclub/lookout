@@ -352,6 +352,8 @@ jobs:
             clients/desktop/src-tauri/target/*/release/bundle/**/*.msi
             clients/desktop/src-tauri/target/*/release/bundle/**/*.exe
             clients/desktop/src-tauri/target/release/bundle/**/*.pkg.tar.zst
+            clients/desktop/src-tauri/target/release/bundle/**/*.AppImage
+            clients/desktop/src-tauri/target/release/bundle/**/*.AppImage.sig
             clients/desktop/src-tauri/target/*/release/bundle/**/*.app.tar.gz.sig
             clients/desktop/src-tauri/target/release/bundle/**/*.app.tar.gz.sig
             clients/desktop/src-tauri/target/release/bundle/**/*.exe.sig
@@ -405,6 +407,8 @@ jobs:
             -name "*.msi" -o \
             -name "*.exe" -o \
             -name "*.pkg.tar.zst" -o \
+            -name "*.AppImage" -o \
+            -name "*.AppImage.sig" -o \
             -name "*.app.tar.gz.sig" -o \
             -name "*.exe.sig" -o \
             -name "*.msi.sig" \
