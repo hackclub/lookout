@@ -18,7 +18,12 @@ export function ResultView({ status, trackedSeconds }: ResultViewProps) {
       client
         .getVideo()
         .then((data) => {
-          if (data.videoUrl && !data.videoUrl.startsWith("https://")) {
+          if (
+            data.videoUrl &&
+            !data.videoUrl.startsWith("https://") &&
+            !data.videoUrl.startsWith("http://localhost") &&
+            !data.videoUrl.startsWith("http://127.0.0.1")
+          ) {
             throw new Error("Invalid video URL: must be HTTPS.");
           }
           setVideoUrl(data.videoUrl);

@@ -16,6 +16,7 @@ import type {
   ApplyCutsResponse,
   EditHeartbeatResponse,
   CutInterval,
+  MaskRegion,
 } from "@lookout/shared";
 import type { TokenProvider } from "../types.js";
 
@@ -49,9 +50,9 @@ export interface LookoutClient {
    *  wall clock), current cut list, and a token-gated presigned URL for the
    *  UNCUT original video. */
   getUnits(): Promise<UnitsResponse>;
-  /** Replace the session's cut list (full replace; [] clears all edits).
+  /** Replace the session's cut and mask lists.
    *  Returns the normalized list plus a server-authoritative preview. */
-  setCuts(cuts: CutInterval[]): Promise<SetCutsResponse>;
+  setCuts(cuts: CutInterval[], masks?: MaskRegion[]): Promise<SetCutsResponse>;
   /** Apply the current cut list to the published video (a cut-compile —
    *  usually a lossless stream copy, seconds not minutes). */
   applyCuts(): Promise<ApplyCutsResponse>;
@@ -180,7 +181,12 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
     },
 
     async uploadToR2(uploadUrl, blob, contentType = "image/jpeg") {
-      if (!uploadUrl.startsWith("https://") && !uploadUrl.startsWith("/")) {
+      if (
+        !uploadUrl.startsWith("https://") &&
+        !uploadUrl.startsWith("/") &&
+        !uploadUrl.startsWith("http://localhost") &&
+        !uploadUrl.startsWith("http://127.0.0.1")
+      ) {
         throw new Error("Invalid upload URL: must be HTTPS or a relative path.");
       }
       let res: Response;
@@ -281,10 +287,10 @@ export function createLookoutClient(options: CreateClientOptions): LookoutClient
       return fetchJson<UnitsResponse>(await sessionUrl("/units"));
     },
 
-    async setCuts(cuts) {
+    async setCuts(cuts, masks) {
       return fetchJson<SetCutsResponse>(await sessionUrl("/cuts"), {
         method: "PUT",
-        body: JSON.stringify({ cuts }),
+        body: JSON.stringify({ cuts, ...(masks !== undefined ? { masks } : {}) }),
       });
     },
 

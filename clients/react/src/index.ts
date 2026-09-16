@@ -18,7 +18,7 @@ export {
   normalizeRegions,
   gapIndices,
 } from "./hooks/editorMath.js";
-export type { UnitRegion } from "./hooks/editorMath.js";
+export type { UnitRegion, UnitMaskRegion, UnitBlurRegion } from "./hooks/editorMath.js";
 
 // Sub-components
 export { StatusBar } from "./components/StatusBar.js";
@@ -98,7 +98,7 @@ export type {
 } from "./types.js";
 
 // Re-export shared types consumers need
-export type { SessionStatus, SessionSummary, CutInterval } from "@lookout/shared";
+export type { SessionStatus, SessionSummary, CutInterval, MaskRegion, BlurRegion } from "@lookout/shared";
 export { SESSION_STATUSES } from "@lookout/shared";
 
 // UI primitives
