@@ -192,13 +192,21 @@ impl Core {
         self.api_get(session_url(s, "/units")).await
     }
 
-    /// `PUT /api/sessions/:token/cuts` — replace the cut list. `cuts` is the
-    /// JSON array of `CutInterval`s; `[]` clears all edits.
-    pub async fn session_set_cuts(&self, s: &SessionConfig, cuts: Value) -> ApiResult<Value> {
+    /// `PUT /api/sessions/:token/cuts` — replace the cut and mask lists. `cuts` is the
+    /// JSON array of `CutInterval`s; `masks` is the JSON array of `MaskRegion`s.
+    pub async fn session_set_cuts(
+        &self,
+        s: &SessionConfig,
+        cuts: Value,
+        masks: Option<Value>,
+    ) -> ApiResult<Value> {
         self.api_json(
             reqwest::Method::PUT,
             session_url(s, "/cuts"),
-            Some(serde_json::json!({ "cuts": cuts })),
+            Some(serde_json::json!({
+                "cuts": cuts,
+                "masks": masks.unwrap_or_else(|| serde_json::json!([])),
+            })),
             API_TIMEOUT,
         )
         .await
@@ -632,12 +640,31 @@ mod tests {
         assert_eq!(r["target"], "/api/sessions/tok/name");
         assert_eq!(r["body"], r#"{"name":"My cut"}"#);
         let c = core
-            .session_set_cuts(&cfg(&base), serde_json::json!([{ "start": 1, "end": 2 }]))
+            .session_set_cuts(
+                &cfg(&base),
+                serde_json::json!([{ "start": 1, "end": 2 }]),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(c["method"], "PUT");
         assert_eq!(c["target"], "/api/sessions/tok/cuts");
-        assert_eq!(c["body"], r#"{"cuts":[{"end":2,"start":1}]}"#);
+        assert_eq!(c["body"], r#"{"cuts":[{"end":2,"start":1}],"masks":[]}"#);
+
+        let c_masks = core
+            .session_set_cuts(
+                &cfg(&base),
+                serde_json::json!([{ "start": 1, "end": 2 }]),
+                Some(serde_json::json!([{ "x": 0.1, "y": 0.2 }])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(c_masks["method"], "PUT");
+        assert_eq!(c_masks["target"], "/api/sessions/tok/cuts");
+        assert_eq!(
+            c_masks["body"],
+            r#"{"cuts":[{"end":2,"start":1}],"masks":[{"x":0.1,"y":0.2}]}"#
+        );
     }
 
     #[tokio::test]
