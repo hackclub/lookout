@@ -120,11 +120,11 @@ async function seedActiveSession() {
 const load = (id: string) =>
   db.query.sessions.findFirst({ where: eq(schema.sessions.id, id) });
 
-async function putCuts(token: string, cuts: unknown) {
+async function putCuts(token: string, cuts: unknown, masks?: unknown) {
   const r = await app.inject({
     method: "PUT",
     url: `/api/sessions/${token}/cuts`,
-    payload: { cuts },
+    payload: masks !== undefined ? { cuts, masks } : { cuts },
   });
   return { status: r.statusCode, body: r.json() };
 }
@@ -389,6 +389,38 @@ describe("PUT /cuts", () => {
     expect((await putCuts(s.token, [{ start: "garbage", end: iso(3) }])).status).toBe(400);
   });
 
+  it("persists privacy masks alongside cuts", async () => {
+    const s = await seedHeldSession();
+    const testMask = {
+      id: "mask-1",
+      start: iso(2),
+      end: iso(5),
+      x: 0.1,
+      y: 0.2,
+      width: 0.3,
+      height: 0.4,
+    };
+    const { status, body } = await putCuts(s.token, [{ start: iso(3), end: iso(4) }], [testMask]);
+    expect(status).toBe(200);
+    expect(body.masks).toHaveLength(1);
+    expect(body.masks[0]).toMatchObject({
+      id: "mask-1",
+      start: iso(2),
+      end: iso(5),
+      x: 0.1,
+      y: 0.2,
+      width: 0.3,
+      height: 0.4,
+    });
+
+    const units = await getJson(`/api/sessions/${s.token}/units`);
+    expect(units.masks).toHaveLength(1);
+    expect(units.masks[0].id).toBe("mask-1");
+
+    const row = await load(s.id);
+    expect(row!.masks).toHaveLength(1);
+  });
+
   it("cannot touch a published session", async () => {
     const s = await seedHeldSession({
       status: "complete",
@@ -420,6 +452,27 @@ describe("POST /compile (publish)", () => {
     expect(row!.editHoldUntil).toBeNull();
     // No worker round-trip, so no recompile is consumed.
     expect(row!.recompileCount).toBe(0);
+  });
+
+  it("routes sessions with masks to worker compile even if there are no cuts", async () => {
+    const s = await seedHeldSession();
+    await putCuts(s.token, [], [{
+      id: "mask-1",
+      start: iso(2),
+      end: iso(5),
+      x: 0.1,
+      y: 0.2,
+      width: 0.3,
+      height: 0.4,
+    }]);
+
+    const r = await app.inject({ method: "POST", url: `/api/sessions/${s.token}/compile` });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ status: "compiling", instant: false });
+
+    const row = await load(s.id);
+    expect(row!.status).toBe("compiling");
+    expect(row!.recompileCount).toBe(1);
   });
 
   it("echoes the session's redirectUrl on both publish paths", async () => {
