@@ -200,6 +200,8 @@ export interface VideoUnit {
   capturedAt: string;
   /** Screenshot row id, for debugging/traceability. */
   screenshotId: string;
+  /** Number of individual screenshot frames inside this 1-second segment. */
+  frameCount?: number;
 }
 
 /** The slice of a confirmed screenshot row that cut/tracked-time math needs. */
