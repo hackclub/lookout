@@ -3,7 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import type { CutInterval } from "@lookout/react";
+import type { CutInterval, MaskRegion } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
@@ -243,6 +243,21 @@ export function useEditorWindowOpen(): string | null {
  * be pixel-matched against a position that varies by OS version, and it
  * was visibly off.
  */
+export function buildClosePromptMessage(
+    cutsCount: number,
+    masksCount: number,
+    isDirty: boolean,
+): string {
+    const parts: string[] = [];
+    if (cutsCount > 0)
+        parts.push(`${cutsCount} cut${cutsCount === 1 ? "" : "s"}`);
+    if (masksCount > 0)
+        parts.push(`${masksCount} mask${masksCount === 1 ? "" : "s"}`);
+    if (isDirty && parts.length > 0)
+        return `Closing publishes this timelapse with ${parts.join(" and ")} applied. This can't be undone.`;
+    return "Closing publishes this timelapse as recorded. This can't be undone.";
+}
+
 export function EditorWindow({ token }: { token: string }) {
   const isMacOS = navigator.userAgent.includes("Mac");
   // Undecorated on Linux, same as the main window, so it owns its corners and
@@ -311,63 +326,54 @@ export function EditorWindow({ token }: { token: string }) {
   // the session is unpublished until someone decides, so an editor that
   // could be dismissed without deciding would just strand it until the
   // lease lapsed. Hence: confirm, publish, then close.
-  const cutsRef = useRef<CutInterval[]>([]);
-  const dirtyRef = useRef(false);
-  const finishedRef = useRef(false);
+    const cutsRef = useRef<CutInterval[]>([]);
+    const masksRef = useRef<MaskRegion[]>([]);
+    const cutsDirtyRef = useRef(false);
+    const masksDirtyRef = useRef(false);
+    const finishedRef = useRef(false);
 
-  const finishAndClose = useCallback(async () => {
-    finishedRef.current = true;
-    let published: Awaited<ReturnType<typeof client.applyCuts>> | null = null;
-    try {
-      await client.setCuts(cutsRef.current);
-      published = await client.applyCuts();
-    } catch (e) {
-      console.error("[editor] publish on close failed:", e);
-      // Don't trap the user in a window they asked to close: the hold
-      // lapses on its own and publishes as recorded shortly after.
-    }
-    // Fire-and-forget: the close must not wait on the notification. Carry
-    // the publish result so the main window can fire the redirect the
-    // instant it's done (`complete`) or watch the compile to completion.
-    emit(EDITED_EVENT, {
-      token,
-      status: published?.status ?? null,
-      redirectUrl: published?.redirectUrl ?? null,
-      // Forwarded so the main window's edit-published handler can pick between
-      // panel and redirect the same way `handleCompleted` does. Without these,
-      // a session that has BOTH ends up with the redirect firing (guard sees
-      // null panelUrl) *and* the panel opening from the session page's own
-      // status poll — the reporter's "browser and sheet both opened" symptom.
-      panelUrl: published?.panelUrl ?? null,
-      panelResolved: published?.panelResolved ?? false,
-    }).catch((e) => console.error("[editor] emit failed:", e));
-    await closeEditorWindow();
-  }, [client, token]);
+    const finishAndClose = useCallback(async () => {
+        finishedRef.current = true;
+        let published: Awaited<ReturnType<typeof client.applyCuts>> | null = null;
+        try {
+            await client.setCuts(cutsRef.current, masksRef.current);
+            published = await client.applyCuts();
+        }
+        catch (e) {
+            console.error("[editor] publish on close failed:", e);
+        }
+        emit(EDITED_EVENT, {
+            token,
+            status: published?.status ?? null,
+            redirectUrl: published?.redirectUrl ?? null,
+            panelUrl: published?.panelUrl ?? null,
+            panelResolved: published?.panelResolved ?? false,
+        }).catch((e) => console.error("[editor] emit failed:", e));
+        await closeEditorWindow();
+    }, [client, token]);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void getCurrentWindow()
-      .onCloseRequested(async (event) => {
-        if (finishedRef.current) return;
-        event.preventDefault();
-        const removed = cutsRef.current.length;
-        const ok = await confirm(
-          dirtyRef.current && removed > 0
-            ? `Closing publishes this timelapse with ${removed} cut${
-                removed === 1 ? "" : "s"
-              } applied. This can't be undone.`
-            : "Closing publishes this timelapse as recorded. This can't be undone.",
-          { title: "Finish timelapse?", kind: "warning" },
-        );
-        if (ok) void finishAndClose();
-      })
-      .then((fn) => {
-        unlisten = fn;
-      });
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, [finishAndClose]);
+    useEffect(() => {
+        let unlisten: (() => void) | undefined;
+        void getCurrentWindow()
+            .onCloseRequested(async (event) => {
+                if (finishedRef.current) return;
+                event.preventDefault();
+                const cutsCount = cutsRef.current.length;
+                const masksCount = masksRef.current.length;
+                const isDirty = cutsDirtyRef.current || masksDirtyRef.current;
+                const ok = await confirm(
+                    buildClosePromptMessage(cutsCount, masksCount, isDirty),
+                    { title: "Finish timelapse?", kind: "warning" },
+                );
+                if (ok) void finishAndClose();
+            })
+            .then((fn) => {
+                unlisten = fn;
+            });
+        return () => {
+            if (unlisten) unlisten();
+        };
+    }, [finishAndClose]);
 
   return (
     <div
@@ -419,26 +425,29 @@ export function EditorWindow({ token }: { token: string }) {
         }}
       >
         <TimelapseEditor
-          token={token}
-          apiBaseUrl={getApiBase()}
-          client={client}
-          onCutsChange={(cuts, dirty) => {
-            cutsRef.current = cuts;
-            dirtyRef.current = dirty;
-          }}
-          onApplied={(result) => {
-            // Saved from inside the editor. Flag it first so the close
-            // handler doesn't prompt to publish what's already published.
-            finishedRef.current = true;
-            emit(EDITED_EVENT, {
-              token,
-              status: result.status,
-              redirectUrl: result.redirectUrl,
-              panelUrl: result.panelUrl ?? null,
-              panelResolved: result.panelResolved ?? false,
-            }).catch((e) => console.error("[editor] emit failed:", e));
-            void closeEditorWindow();
-          }}
+            token={token}
+            apiBaseUrl={getApiBase()}
+            client={client}
+            onCancel={() => void closeEditorWindow()}
+            onCutsChange={(cuts, dirty) => {
+                cutsRef.current = cuts;
+                cutsDirtyRef.current = dirty;
+            }}
+            onMasksChange={(masks, dirty) => {
+                masksRef.current = masks;
+                masksDirtyRef.current = dirty;
+            }}
+            onApplied={(result) => {
+                finishedRef.current = true;
+                emit(EDITED_EVENT, {
+                    token,
+                    status: result.status,
+                    redirectUrl: result.redirectUrl,
+                    panelUrl: result.panelUrl ?? null,
+                    panelResolved: result.panelResolved ?? false,
+                }).catch((e) => console.error("[editor] emit failed:", e));
+                void closeEditorWindow();
+            }}
         />
       </div>
     </div>

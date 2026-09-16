@@ -75,6 +75,7 @@ async function resolveConfig(
         config: {
           ...base,
           codec,
+          hardwareAcceleration: "prefer-hardware",
           latencyMode: "quality" as LatencyMode,
           bitrateMode: "quantizer" as VideoEncoderBitrateMode,
         },
@@ -89,6 +90,28 @@ async function resolveConfig(
         config: {
           ...base,
           codec,
+          hardwareAcceleration: "prefer-hardware",
+          latencyMode: "realtime" as LatencyMode,
+          bitrate: nativeClipBitsPerSecond(frameIntervalMs),
+          bitrateMode: "variable" as VideoEncoderBitrateMode,
+        },
+        quantizerMode: false,
+      },
+      {
+        config: {
+          ...base,
+          codec,
+          hardwareAcceleration: "no-preference",
+          latencyMode: "quality" as LatencyMode,
+          bitrateMode: "quantizer" as VideoEncoderBitrateMode,
+        },
+        quantizerMode: true,
+      },
+      {
+        config: {
+          ...base,
+          codec,
+          hardwareAcceleration: "no-preference",
           latencyMode: "realtime" as LatencyMode,
           bitrate: nativeClipBitsPerSecond(frameIntervalMs),
           bitrateMode: "variable" as VideoEncoderBitrateMode,

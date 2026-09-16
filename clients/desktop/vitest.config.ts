@@ -8,5 +8,6 @@ export default defineConfig({
     // resolves the interop. Nothing here is stubbed out — the real modules
     // load, so a test importing more of the shared package still gets it.
     server: { deps: { inline: [/@squircle-js/, /@lookout\/react/] } },
+    setupFiles: ["./src/testSetup.ts"],
   },
 });

@@ -2,7 +2,7 @@
 // axis (1 second = 1 capture unit = 1 real-world minute) and the wall-clock
 // cut intervals the server stores. Kept DOM-free so it's unit-testable.
 
-import { isCutAt, type CutInterval, type VideoUnit } from "@lookout/shared";
+import { isCutAt, type MaskRegion, type CutInterval, type VideoUnit, type VideoShot } from "@lookout/shared";
 import { SCREENSHOT_INTERVAL_MS } from "@lookout/shared";
 
 /** A cut region in unit space: [startUnit, endUnit) video-second indices.
@@ -145,12 +145,34 @@ export function formatUnitsDuration(unitCount: number): string {
 /** Wall-clock label (local) for a unit. Includes AM/PM where the locale
  *  uses it — this is the one place the *time of day* is stated, so it must
  *  not be mistakable for a duration. */
-export function unitClockLabel(unit: VideoUnit): string {
+export function unitClockLabel(unit?: VideoUnit | null): string {
+  if (!unit || !unit.capturedAt) return "";
   const d = new Date(unit.capturedAt);
+  if (isNaN(d.getTime())) return "";
   return d.toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/** Wall-clock span label (e.g. "11:56 AM – 12:04 PM" or "11:56 AM"). */
+export function unitRangeClockLabel(
+  startUnit: number,
+  endUnit: number,
+  units: VideoUnit[],
+): string {
+  if (!units || units.length === 0) return "";
+  const sIdx = Math.max(0, Math.min(units.length - 1, Math.floor(startUnit)));
+  const eIdx = Math.max(0, Math.min(units.length - 1, Math.max(sIdx, Math.ceil(endUnit) - 1)));
+  const sUnit = units[sIdx];
+  const eUnit = units[eIdx];
+  if (!sUnit) return "";
+  const sLabel = unitClockLabel(sUnit);
+  if (!sLabel) return "";
+  if (sIdx === eIdx || !eUnit) return sLabel;
+  const eLabel = unitClockLabel(eUnit);
+  if (!eLabel || sLabel === eLabel) return sLabel;
+  return `${sLabel} – ${eLabel}`;
 }
 
 /**
@@ -167,6 +189,13 @@ export function elapsedLabel(unitIndex: number, totalUnits: number): string {
   if (totalUnits < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return `${h}:${String(m % 60).padStart(2, "0")}`;
+}
+
+export function shotRulerLabel(unit: number, totalUnits: number, step: number): string {
+    if (unit === 0) return "Shot 1";
+    if (unit >= totalUnits) return `${totalUnits} shots`;
+    if (step === 1) return `Shot ${unit + 1}`;
+    return `Shot ${unit}`;
 }
 
 /** Steps a person reads without doing arithmetic — the reason a ruler
@@ -205,4 +234,268 @@ export function rulerTicks(
     ticks.push({ unit: u, major });
   }
   return ticks;
+}
+
+// Mask region in timeline units: [startUnit, endUnit) with normalized coords.
+export interface UnitMaskRegion {
+  id: string;
+  startUnit: number;
+  endUnit: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type UnitBlurRegion = UnitMaskRegion;
+
+// Convert timeline unit regions to ISO wall-clock mask intervals.
+export function unitMasksToMasks(
+  regions: UnitMaskRegion[],
+  units: VideoUnit[],
+): MaskRegion[] {
+  if (units.length === 0) return [];
+  const masks: MaskRegion[] = [];
+  for (const r of regions) {
+    if (r.endUnit <= r.startUnit || r.width <= 0 || r.height <= 0) continue;
+    const sIdx = Math.max(0, Math.min(units.length - 1, Math.floor(r.startUnit)));
+    const eIdx = Math.max(sIdx + 1, Math.min(units.length, Math.ceil(r.endUnit)));
+    const startUnit = units[sIdx];
+    const lastUnit = units[Math.min(units.length - 1, Math.max(0, eIdx - 1))];
+    if (!startUnit || !lastUnit) continue;
+    const lastCut = Date.parse(lastUnit.capturedAt);
+    const nextKept = eIdx < units.length && units[eIdx] ? Date.parse(units[eIdx].capturedAt) : null;
+    const end =
+      nextKept === null
+        ? lastCut + SCREENSHOT_INTERVAL_MS
+        : Math.min(nextKept, lastCut + SCREENSHOT_INTERVAL_MS);
+    masks.push({
+      id: r.id,
+      start: startUnit.capturedAt,
+      end: new Date(end).toISOString(),
+      startSec: Math.round(r.startUnit * 10_000) / 10_000,
+      endSec: Math.round(r.endUnit * 10_000) / 10_000,
+      x: r.x,
+      y: r.y,
+      width: r.width,
+      height: r.height,
+    });
+  }
+  return masks;
+}
+
+export const unitBlursToBlurs = unitMasksToMasks;
+
+// Convert ISO wall-clock mask intervals to timeline unit regions.
+export function masksToUnitMasks(
+  masks: MaskRegion[],
+  units: VideoUnit[],
+): UnitMaskRegion[] {
+  if (units.length === 0 || masks.length === 0) return [];
+  return masks.map((m) => {
+    let startUnit = 0;
+    let endUnit = units.length;
+
+    if (
+      typeof m.startSec === "number" &&
+      typeof m.endSec === "number" &&
+      m.endSec > m.startSec
+    ) {
+      startUnit = m.startSec;
+      endUnit = m.endSec;
+    }
+    else {
+      const startMs = Date.parse(m.start);
+      const endMs = Date.parse(m.end);
+
+      for (let i = 0; i < units.length; i++) {
+        const uTime = Date.parse(units[i].capturedAt);
+        if (uTime <= startMs) {
+          startUnit = i;
+        }
+        if (uTime < endMs) {
+          endUnit = i + 1;
+        }
+      }
+      if (endUnit <= startUnit) {
+        endUnit = Math.min(units.length, startUnit + 1);
+      }
+    }
+
+    return {
+      id: m.id,
+      startUnit,
+      endUnit,
+      x: m.x,
+      y: m.y,
+      width: m.width,
+      height: m.height,
+    };
+  });
+}
+
+export const blursToUnitBlurs = masksToUnitMasks;
+
+// Find the video shot active at time t.
+export function findShotAtTime(t: number, shots?: VideoShot[]): VideoShot | null {
+  if (!shots || shots.length === 0) return null;
+  const match = shots.find((s) => t >= s.startSec && t < s.endSec);
+  if (match) return match;
+  const last = shots[shots.length - 1];
+  if (last && (t >= last.endSec || Math.abs(t - last.endSec) < 0.05)) return last;
+  const first = shots[0];
+  if (first && t < first.startSec) return first;
+  return null;
+}
+
+// Snap time t to the nearest shot start or end boundary.
+export function snapToNearestShotBoundary(
+  t: number,
+  shots?: VideoShot[],
+  unitCount = 0,
+): number {
+  if (!shots || shots.length === 0) {
+    return Math.max(0, Math.min(unitCount, Math.round(t)));
+  }
+  let closest = 0;
+  let minDiff = Infinity;
+  for (const s of shots) {
+    const d1 = Math.abs(t - s.startSec);
+    if (d1 < minDiff) {
+      minDiff = d1;
+      closest = s.startSec;
+    }
+    const d2 = Math.abs(t - s.endSec);
+    if (d2 < minDiff) {
+      minDiff = d2;
+      closest = s.endSec;
+    }
+  }
+  return closest;
+}
+
+export interface TrackPreset {
+    name: string;
+    color: string;
+    border: string;
+    bgUnselected: string;
+    bgSelected: string;
+    bgHover: string;
+    badgeBg: string;
+    badgeText: string;
+    handleColor: string;
+}
+
+export const MAX_MASK_TRACKS = 3;
+export const MAX_BLUR_TRACKS = MAX_MASK_TRACKS;
+
+export const TRACK_PRESETS: readonly TrackPreset[] = [
+    {
+        name: "Blue",
+        color: "#3b82f6",
+        border: "#3b82f6",
+        bgUnselected: "rgba(59, 130, 246, 0.18)",
+        bgSelected: "rgba(59, 130, 246, 0.32)",
+        bgHover: "rgba(59, 130, 246, 0.24)",
+        badgeBg: "#2563eb",
+        badgeText: "#ffffff",
+        handleColor: "#60a5fa",
+    },
+    {
+        name: "Violet",
+        color: "#8b5cf6",
+        border: "#8b5cf6",
+        bgUnselected: "rgba(139, 92, 246, 0.18)",
+        bgSelected: "rgba(139, 92, 246, 0.32)",
+        bgHover: "rgba(139, 92, 246, 0.24)",
+        badgeBg: "#7c3aed",
+        badgeText: "#ffffff",
+        handleColor: "#a78bfa",
+    },
+    {
+        name: "Yellow",
+        color: "#eab308",
+        border: "#eab308",
+        bgUnselected: "rgba(234, 179, 8, 0.18)",
+        bgSelected: "rgba(234, 179, 8, 0.32)",
+        bgHover: "rgba(234, 179, 8, 0.24)",
+        badgeBg: "#ca8a04",
+        badgeText: "#ffffff",
+        handleColor: "#facc15",
+    },
+] as const;
+
+export interface MaskTrackAllocation {
+    assignments: Record<string, number>;
+    trackCount: number;
+    tracks: UnitMaskRegion[][];
+}
+
+export type BlurTrackAllocation = MaskTrackAllocation;
+
+// Assign masks to timeline tracks without overlapping collisions.
+export function assignMaskTracks(masks: UnitMaskRegion[]): MaskTrackAllocation {
+    const sorted = [...masks].sort((a, b) => {
+        if (Math.abs(a.startUnit - b.startUnit) > 0.001) return a.startUnit - b.startUnit;
+        return a.endUnit - b.endUnit;
+    });
+
+    const tracks: UnitMaskRegion[][] = Array.from({ length: MAX_MASK_TRACKS }, () => []);
+    const assignments: Record<string, number> = {};
+    const EPS = 0.001;
+
+    for (const mask of sorted) {
+        let placedTrack = -1;
+        for (let t = 0; t < tracks.length; t++) {
+            const track = tracks[t];
+            const hasCollision = track.some(
+                (existing) => !(mask.endUnit <= existing.startUnit + EPS || mask.startUnit >= existing.endUnit - EPS),
+            );
+            if (!hasCollision) {
+                placedTrack = t;
+                track.push(mask);
+                break;
+            }
+        }
+
+        if (placedTrack === -1) {
+            tracks.push([mask]);
+            placedTrack = tracks.length - 1;
+        }
+        assignments[mask.id] = placedTrack;
+    }
+
+    let trackCount = 1;
+    for (let t = 0; t < tracks.length; t++) {
+        if (tracks[t].length > 0) trackCount = t + 1;
+    }
+
+    return { assignments, trackCount, tracks };
+}
+
+export const assignBlurTracks = assignMaskTracks;
+
+// Get all masks active at the given unit time.
+export function activeMasksAtUnit(t: number, masks: UnitMaskRegion[]): UnitMaskRegion[] {
+    return masks.filter((m) => t >= m.startUnit - 0.001 && t < m.endUnit - 0.001);
+}
+
+export const activeBlursAtUnit = activeMasksAtUnit;
+
+// Check if a new mask can be added at time t without exceeding track capacity.
+export function canAddMaskAtTime(t: number, masks: UnitMaskRegion[]): boolean {
+    return activeMasksAtUnit(t, masks).length < MAX_MASK_TRACKS;
+}
+
+export const canAddBlurAtTime = canAddMaskAtTime;
+
+// Check if a mask is active on screen at video time t.
+export function isMaskActiveAtTime(t: number, m: UnitMaskRegion): boolean {
+    return t >= m.startUnit - 0.01 && t <= m.endUnit + 0.005;
+}
+
+export const isBlurActiveAtTime = isMaskActiveAtTime;
+
+export function computeSafeCursorTime(startSec: number, endSec: number, targetTime: number): number {
+    return Math.max(startSec + 0.005, Math.min(endSec - 0.005, targetTime));
 }
