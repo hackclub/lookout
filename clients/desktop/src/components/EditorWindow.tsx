@@ -3,7 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import type { CutInterval } from "@lookout/react";
+import type { CutInterval, MaskRegion } from "@lookout/react";
 import { TimelapseEditor, colors, fontSize, fontWeight, spacing } from "@lookout/react";
 import { invoke } from "../logger.js";
 import { getApiBase } from "../serverConfig.js";
@@ -312,6 +312,7 @@ export function EditorWindow({ token }: { token: string }) {
   // could be dismissed without deciding would just strand it until the
   // lease lapsed. Hence: confirm, publish, then close.
   const cutsRef = useRef<CutInterval[]>([]);
+  const masksRef = useRef<MaskRegion[]>([]);
   const dirtyRef = useRef(false);
   const finishedRef = useRef(false);
 
@@ -319,7 +320,7 @@ export function EditorWindow({ token }: { token: string }) {
     finishedRef.current = true;
     let published: Awaited<ReturnType<typeof client.applyCuts>> | null = null;
     try {
-      await client.setCuts(cutsRef.current);
+      await client.setCuts(cutsRef.current, masksRef.current);
       published = await client.applyCuts();
     } catch (e) {
       console.error("[editor] publish on close failed:", e);
@@ -425,6 +426,10 @@ export function EditorWindow({ token }: { token: string }) {
           onCutsChange={(cuts, dirty) => {
             cutsRef.current = cuts;
             dirtyRef.current = dirty;
+          }}
+          onMasksChange={(masks, dirty) => {
+            masksRef.current = masks;
+            if (dirty) dirtyRef.current = true;
           }}
           onApplied={(result) => {
             // Saved from inside the editor. Flag it first so the close
