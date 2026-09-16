@@ -20,11 +20,13 @@ import {
   type CutInterval,
   type KeptRange,
   type VideoUnit,
+  type MaskRegion,
 } from "@lookout/shared";
 import * as schema from "./schema.js";
 import {
   buildSegment,
   cutVideoToKeptRanges,
+  type VideoMask,
   dropSeedUnit,
   segmentEncodeArgs,
   PREVIEW_WIDTH,
@@ -67,6 +69,56 @@ function holdActiveOn(session: { editHoldUntil: Date | null }): boolean {
     session.editHoldUntil != null &&
     session.editHoldUntil.getTime() > Date.now()
   );
+}
+
+function masksToVideoMasks(
+    masks: MaskRegion[],
+    videoUnits: VideoUnit[],
+): VideoMask[] {
+    if (masks.length === 0 || videoUnits.length === 0) return [];
+    const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+
+    return masks.map((m) => {
+        let startSec: number;
+        let endSec: number;
+
+        if (
+            typeof m.startSec === "number" &&
+            typeof m.endSec === "number" &&
+            m.endSec > m.startSec
+        ) {
+            startSec = Math.max(0, Math.min(videoUnits.length, m.startSec));
+            endSec = Math.max(startSec + 0.001, Math.min(videoUnits.length, m.endSec));
+        }
+        else {
+            const startMs = Date.parse(m.start);
+            const endMs = Date.parse(m.end);
+
+            startSec = 0;
+            endSec = videoUnits.length;
+
+            for (let i = 0; i < unitTimesMs.length; i++) {
+                if (unitTimesMs[i] <= startMs) {
+                    startSec = i;
+                }
+                if (unitTimesMs[i] < endMs) {
+                    endSec = i + 1;
+                }
+            }
+            if (endSec <= startSec) {
+                endSec = Math.min(videoUnits.length, startSec + 1);
+            }
+        }
+
+        return {
+            startSec,
+            endSec,
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        };
+    });
 }
 
 /**
@@ -401,13 +453,14 @@ export async function compileTimelapse(sessionId: string): Promise<{
       requested_at: Date | string;
       captured_at: Date | string | null;
       format: string;
+      frame_count: number | null;
     }>(sql`
       SELECT DISTINCT ON (sample_bucket)
-        id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format
+        id, r2_key, sample_bucket AS minute_bucket, requested_at, captured_at, format, frame_count
       FROM (
         SELECT *, bool_or(NOT skipped) OVER () AS has_ordinary_unit
         FROM (
-          SELECT id, r2_key, requested_at, captured_at, format,
+          SELECT id, r2_key, requested_at, captured_at, format, frame_count,
             -- A seed credits 0 and has no expected mark. A drift RESET also
             -- credits 0 but records the mark it missed, and covers real
             -- screen time, so it keeps its second. IS TRUE for the NULLs on
@@ -595,6 +648,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       videoUnits.push({
         capturedAt: (ts instanceof Date ? ts : new Date(ts)).toISOString(),
         screenshotId: ss.id,
+        frameCount: ss.frame_count ?? 1,
       });
     }
 
@@ -665,8 +719,8 @@ export async function compileTimelapse(sessionId: string): Promise<{
     // Both assembly paths land on the pinned 1s closed-GOP grid.
     const videoCopyAligned = true;
 
-    // Step 4.25: apply cuts, if any. A first compile normally has none —
-    // cuts are authored during the edit hold, after this build hands the
+    // Step 4.25: apply cuts and masks, if any. A first compile normally has none —
+    // cuts/masks are authored during the edit hold, after this build hands the
     // user a preview. This branch covers a re-run that lost its original
     // (e.g. an internal recompile of a failed edited compile).
     const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
@@ -678,6 +732,11 @@ export async function compileTimelapse(sessionId: string): Promise<{
       throw new Error("Cut list removes every capture unit — refusing to compile an empty video");
     }
 
+    const masks = (session.masks ?? []) as MaskRegion[];
+    const videoMasks = masksToVideoMasks(masks, videoUnits);
+    const hasEffectiveMasks = videoMasks.length > 0;
+    const needsEdit = hasEffectiveCuts || hasEffectiveMasks;
+
     let publishPath = originalPath;
     let publishSize = originalSize;
     // Reuse the existing key on a recompile so the old object is overwritten
@@ -686,8 +745,14 @@ export async function compileTimelapse(sessionId: string): Promise<{
       session.originalVideoR2Key ?? uncutOriginalKey(sessionId);
     let publishR2Key = originalR2Key;
 
-    if (hasEffectiveCuts) {
-      publishPath = await cutVideoToKeptRanges(tmpDir, originalPath, keptRanges, videoCopyAligned);
+    if (needsEdit) {
+      publishPath = await cutVideoToKeptRanges(
+        tmpDir,
+        originalPath,
+        keptRanges,
+        videoCopyAligned && !hasEffectiveMasks,
+        videoMasks,
+      );
       publishSize = (await fs.stat(publishPath)).size;
       publishR2Key = `timelapses/${sessionId}/edited.mp4`;
     }
@@ -717,7 +782,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
       originalSize,
       "MP4 (original)",
     );
-    if (hasEffectiveCuts) {
+    if (needsEdit) {
       await uploadAndVerify(
         publishPath,
         publishR2Key,
@@ -827,7 +892,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
         videoUnits,
         videoCopyAligned,
         cutSeconds,
-        ...(hasEffectiveCuts ? { lastEditCompileAt: new Date() } : {}),
+        ...(needsEdit ? { lastEditCompileAt: new Date() } : {}),
         thumbnailUrl,
         thumbnailR2Key,
         updatedAt: new Date(),
@@ -1046,6 +1111,11 @@ async function applyCutCompile(
   const keptUnits = keptRanges.reduce((n, r) => n + (r.end - r.start), 0);
   const hasEffectiveCuts = cuts.length > 0 && keptUnits < videoUnits.length;
 
+  const masks = (session.masks ?? []) as MaskRegion[];
+  const videoMasks = masksToVideoMasks(masks, videoUnits);
+  const hasEffectiveMasks = videoMasks.length > 0;
+  const needsEdit = hasEffectiveCuts || hasEffectiveMasks;
+
   if (cuts.length > 0 && keptRanges.length === 0) {
     throw new Error(
       "Cut list removes every capture unit — refusing to compile an empty video",
@@ -1066,29 +1136,32 @@ async function applyCutCompile(
       keptRanges,
       videoUnits.length,
     );
-    if (built) {
+    if (built && !hasEffectiveMasks) {
       publishPath = built.path;
       publishR2Key = hasEffectiveCuts ? editedR2Key : originalR2Key;
     } else {
-      // The units are gone (retention purge, or an R2 outage that outlasted
-      // the retries). Publishing the preview is a visible quality drop, but a
-      // held session that can never publish is worse — the user's recording
-      // would be lost. Take the copy path and say so loudly.
-      console.error(
-        `Session ${sessionId}: cannot re-encode from capture units — ` +
-          `publishing the PREVIEW-grade original instead. The timelapse will ` +
-          `be ${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rather than full resolution.`,
-      );
-      const originalPath = path.join(tmpDir, "original.mp4");
-      await downloadObject(originalR2Key, originalPath);
+      const originalPath = built ? built.path : path.join(tmpDir, "original.mp4");
+      if (!built) {
+        // The units are gone (retention purge, or an R2 outage that outlasted
+        // the retries). Publishing the preview is a visible quality drop, but a
+        // held session that can never publish is worse — the user's recording
+        // would be lost. Take the copy path and say so loudly.
+        console.error(
+          `Session ${sessionId}: cannot re-encode from capture units — ` +
+            `publishing the PREVIEW-grade original instead. The timelapse will ` +
+            `be ${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rather than full resolution.`,
+        );
+        await downloadObject(originalR2Key, originalPath);
+      }
       publishPath = originalPath;
       publishR2Key = originalR2Key;
-      if (hasEffectiveCuts) {
+      if (needsEdit) {
         publishPath = await cutVideoToKeptRanges(
           tmpDir,
           originalPath,
           keptRanges,
-          session.videoCopyAligned === true,
+          session.videoCopyAligned === true && !hasEffectiveMasks,
+          videoMasks,
         );
         publishR2Key = editedR2Key;
       }
@@ -1101,12 +1174,13 @@ async function applyCutCompile(
     publishPath = originalPath;
     publishR2Key = originalR2Key;
 
-    if (hasEffectiveCuts) {
+    if (needsEdit) {
       publishPath = await cutVideoToKeptRanges(
         tmpDir,
         originalPath,
         keptRanges,
-        session.videoCopyAligned === true,
+        session.videoCopyAligned === true && !hasEffectiveMasks,
+        videoMasks,
       );
       publishR2Key = editedR2Key;
     }
@@ -1129,7 +1203,7 @@ async function applyCutCompile(
     }),
   );
 
-  if (hasEffectiveCuts) {
+  if (needsEdit) {
     const publishSize = (await fs.stat(publishPath)).size;
     await uploadAndVerify(
       publishPath,
