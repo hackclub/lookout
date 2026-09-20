@@ -45,7 +45,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@squircle-js/react": "^1.3.0",
     "@videojs/react": "^10.0.0-beta.8",
-    "motion": "^12.38.0",
+    "motion": "^13.2.0",
     "mp4-muxer": "^5.2.2"
   },
   "devDependencies": {
