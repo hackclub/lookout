@@ -1079,7 +1079,7 @@ The server uses **PG Boss** for background job processing.
 | `R2_ACCESS_KEY_ID` | — | R2 access key |
 | `R2_SECRET_ACCESS_KEY` | — | R2 secret key |
 | `R2_BUCKET_NAME` | — | R2 bucket name |
-| `R2_PUBLIC_DOMAIN` | — | Public domain for R2 URLs |
+| `R2_PUBLIC_DOMAIN` | — | Custom domain fronting the bucket. When set, `/api/media/*` redirects to stable public URLs instead of presigning (uploads and the editor's uncut original stay presigned) |
 | `RATE_LIMIT_PER_MINUTE` | 3 | Upload URL rate limit |
 
 ---

@@ -8,7 +8,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
 import { db, schema } from "../db/index.js";
-import { r2Client, R2_BUCKET } from "../config/r2.js";
+import { r2Client, R2_BUCKET, publicObjectUrl } from "../config/r2.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
 import { publishHeldSession } from "../lib/publish.js";
 import {
@@ -2005,8 +2005,11 @@ export async function sessionRoutes(app: FastifyInstance) {
   );
 
   // ── Public media redirect endpoints ─────────────────────────
-  // Permanent URLs that redirect to short-lived presigned R2 URLs.
-  // Use session ID (public, unguessable UUID) instead of token (secret).
+  // Permanent URLs for published media. With R2_PUBLIC_DOMAIN set they
+  // redirect to the stable public URL (cacheable, and what viewers see in
+  // the address bar); without it they fall back to presigning / streaming
+  // straight from the bucket. Use session ID (public, unguessable UUID)
+  // instead of token (secret).
 
   app.get<{ Params: { sessionId: string } }>(
     "/api/media/:sessionId/thumbnail.jpg",
@@ -2025,12 +2028,19 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
 
-      // Stream the bytes instead of redirecting to a presigned URL: the
-      // presigned URL changes on every request, which defeats the browser
-      // HTTP cache entirely. Thumbnails are the session's first frame, so
-      // they almost never change — a stable URL + ETag makes repeat app
-      // opens a disk-cache hit or a 304.
+      // Thumbnails are the session's first frame, so they almost never
+      // change — a stable URL makes repeat app opens a disk-cache hit.
       const cacheControl = "public, max-age=86400, stale-while-revalidate=604800";
+
+      const publicUrl = publicObjectUrl(session.thumbnailR2Key);
+      if (publicUrl) {
+        reply.header("Cache-Control", cacheControl);
+        return reply.redirect(publicUrl);
+      }
+
+      // No public domain: stream the bytes instead of redirecting to a
+      // presigned URL, which changes on every request and defeats the
+      // browser HTTP cache entirely. ETag gives repeat opens a 304.
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
       const ifNoneMatch = request.headers["if-none-match"];
       try {
@@ -2079,13 +2089,16 @@ export async function sessionRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Video not available" });
       }
 
+      reply.header("Cache-Control", "public, max-age=1800");
+
+      const publicUrl = publicObjectUrl(session.videoR2Key);
+      if (publicUrl) return reply.redirect(publicUrl);
+
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
       const url = await getSignedUrl(r2Client, new GetObjectCommand({
         Bucket: R2_BUCKET,
         Key: session.videoR2Key,
       }), { expiresIn: 3600 });
-
-      reply.header("Cache-Control", "public, max-age=1800");
       return reply.redirect(url);
     },
   );
