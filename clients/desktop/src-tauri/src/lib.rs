@@ -640,9 +640,13 @@ async fn api_session_set_cuts(
     token: String,
     api_base_url: String,
     cuts: Value,
+    masks: Option<Value>,
     state: State<'_, AppState>,
 ) -> Result<Value, ApiError> {
-    state.core.session_set_cuts(&session_ref(token, api_base_url), cuts).await
+    state
+        .core
+        .session_set_cuts(&session_ref(token, api_base_url), cuts, masks)
+        .await
 }
 
 #[tauri::command]

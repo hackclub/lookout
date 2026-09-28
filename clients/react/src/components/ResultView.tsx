@@ -18,10 +18,20 @@ export function ResultView({ status, trackedSeconds }: ResultViewProps) {
       client
         .getVideo()
         .then((data) => {
-          if (data.videoUrl && !data.videoUrl.startsWith("https://")) {
-            throw new Error("Invalid video URL: must be HTTPS.");
-          }
-          setVideoUrl(data.videoUrl);
+            if (data.videoUrl) {
+                let isAllowed = false;
+                try {
+                    const parsed = new URL(data.videoUrl);
+                    const isLocal = (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") && (parsed.protocol === "http:" || parsed.protocol === "https:");
+                    isAllowed = parsed.protocol === "https:" || isLocal;
+                }
+                catch {
+                    isAllowed = false;
+                }
+                if (!isAllowed)
+                    throw new Error("Invalid video URL: must be HTTPS.");
+            }
+            setVideoUrl(data.videoUrl);
           config.callbacks.onComplete?.({ videoUrl: data.videoUrl });
         })
         .catch((err) =>

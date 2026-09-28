@@ -67,7 +67,11 @@ async function publishExpiredHolds() {
   );
 
   const expired = await db
-    .select({ id: schema.sessions.id })
+    .select({
+      id: schema.sessions.id,
+      cuts: schema.sessions.cuts,
+      masks: schema.sessions.masks,
+    })
     .from(schema.sessions)
     .where(
       and(
@@ -79,6 +83,32 @@ async function publishExpiredHolds() {
     );
 
   for (const session of expired) {
+    const hasEdits =
+      ((session.cuts as unknown[] | null)?.length ?? 0) > 0 ||
+      ((session.masks as unknown[] | null)?.length ?? 0) > 0;
+
+    if (hasEdits) {
+      const [claimed] = await db
+        .update(schema.sessions)
+        .set({
+          status: "compiling",
+          editHoldUntil: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, session.id),
+            eq(schema.sessions.status, "stopped"),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+
+      if (claimed) {
+        await boss.send(COMPILE_JOB, { sessionId: session.id });
+        console.log(`[edit-hold] enqueued compile for ${session.id} with edits (hold expired)`);
+      }
+      continue;
+    }
     // The original exists once the build lands; if the compile is still
     // running (or failed), leave the row alone — the build path publishes
     // directly when it finds no live hold, and the stuck-compiling timeout

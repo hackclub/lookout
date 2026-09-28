@@ -15,6 +15,7 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { MaskRegion } from "@lookout/shared";
 
 export const sessionStatusEnum = pgEnum("session_status", [
   "pending",
@@ -53,6 +54,7 @@ export const sessions = pgTable(
     compileProgress: real("compile_progress"),
     // ── Edits (cuts) — see the server schema for full docs ──
     cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    masks: jsonb("masks").$type<MaskRegion[]>(),
     cutSeconds: integer("cut_seconds"),
     videoUnits: jsonb("video_units").$type<
       { capturedAt: string; screenshotId: string }[]

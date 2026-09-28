@@ -1,0 +1,347 @@
+import { describe, expect, it, beforeAll } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+    buildSegment,
+    cutVideoToKeptRanges,
+    probeDimensions,
+    probeFrameCount,
+    maskToVideoMask,
+    masksToVideoMasks,
+    SEGMENT_FPS,
+    type VideoMask,
+} from "../src/segments.js";
+import type { VideoUnit, MaskRegion } from "@lookout/shared";
+
+const execFileAsync = promisify(execFile);
+
+async function hasFfmpeg(): Promise<boolean> {
+  try {
+    await execFileAsync("ffmpeg", ["-version"], { timeout: 10_000 });
+    await execFileAsync("ffprobe", ["-version"], { timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const ffmpegAvailable = await hasFfmpeg();
+
+async function frameHashes(filePath: string): Promise<string[]> {
+    const { stdout } = await execFileAsync(
+        "ffmpeg",
+        ["-v", "error", "-i", filePath, "-an", "-f", "framemd5", "-"],
+        { timeout: 180_000, maxBuffer: 64 * 1024 * 1024 },
+    );
+    return stdout
+        .split("\n")
+        .filter((l) => l && !l.startsWith("#"))
+        .map((l) => l.trim().split(/[,\s]+/).pop() as string)
+        .filter(Boolean);
+}
+
+async function extractFrameRgb(filePath: string, timeSec: number): Promise<Buffer> {
+    const { stdout } = await execFileAsync(
+        "ffmpeg",
+        [
+            "-v", "error",
+            "-ss", String(timeSec),
+            "-i", filePath,
+            "-frames:v", "1",
+            "-c:v", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-f", "rawvideo",
+            "-",
+        ],
+        { timeout: 30_000, encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+    );
+    return stdout as unknown as Buffer;
+}
+
+function meanRegionDiff(
+    bufA: Buffer,
+    bufB: Buffer,
+    region: { x: number; y: number; width: number; height: number },
+    vidW = 1920,
+    vidH = 1080,
+): number {
+    const xStart = Math.max(0, Math.min(vidW, Math.round(region.x * vidW)));
+    const yStart = Math.max(0, Math.min(vidH, Math.round(region.y * vidH)));
+    const xEnd = Math.max(xStart, Math.min(vidW, Math.round((region.x + region.width) * vidW)));
+    const yEnd = Math.max(yStart, Math.min(vidH, Math.round((region.y + region.height) * vidH)));
+
+    let diff = 0;
+    let count = 0;
+    for (let y = yStart; y < yEnd; y++) {
+        for (let x = xStart; x < xEnd; x++) {
+            const idx = (y * vidW + x) * 3;
+            diff +=
+                Math.abs(bufA[idx] - bufB[idx]) +
+                Math.abs(bufA[idx + 1] - bufB[idx + 1]) +
+                Math.abs(bufA[idx + 2] - bufB[idx + 2]);
+            count += 3;
+        }
+    }
+    return count > 0 ? diff / count : 0;
+}
+
+function pixelationUniformity(
+    buf: Buffer,
+    region: { x: number; y: number; width: number; height: number },
+    vidW = 1920,
+    vidH = 1080,
+): number {
+    const xStart = Math.max(0, Math.min(vidW - 1, Math.round(region.x * vidW)));
+    const yStart = Math.max(0, Math.min(vidH, Math.round(region.y * vidH)));
+    const xEnd = Math.max(xStart, Math.min(vidW, Math.round((region.x + region.width) * vidW)));
+    const yEnd = Math.max(yStart, Math.min(vidH, Math.round((region.y + region.height) * vidH)));
+
+    let uniformPairs = 0;
+    let totalPairs = 0;
+    for (let y = yStart; y < yEnd; y++) {
+        for (let x = xStart; x < xEnd - 1; x++) {
+            const i1 = (y * vidW + x) * 3;
+            const i2 = (y * vidW + x + 1) * 3;
+            const d =
+                Math.abs(buf[i1] - buf[i2]) +
+                Math.abs(buf[i1 + 1] - buf[i2 + 1]) +
+                Math.abs(buf[i1 + 2] - buf[i2 + 2]);
+            if (d <= 2)
+                uniformPairs++;
+            totalPairs++;
+        }
+    }
+    return totalPairs > 0 ? uniformPairs / totalPairs : 0;
+}
+
+const UNITS = 4;
+
+describe.skipIf(!ffmpegAvailable)("maskVideo with cutVideoToKeptRanges", () => {
+  let tmpDir: string;
+  let originalPath: string;
+  let originalHashes: string[];
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-"));
+
+    const segments: string[] = [];
+    for (let i = 0; i < UNITS; i++) {
+      const jpeg = path.join(tmpDir, `unit_${i}.jpg`);
+      // Use testsrc with time/clock display for distinct pixel content per frame
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-f", "lavfi",
+          "-i", `testsrc=size=640x360:rate=1:duration=1`,
+          "-frames:v", "1",
+          "-y", jpeg,
+        ],
+        { timeout: 60_000 },
+      );
+      segments.push(await buildSegment(tmpDir, i, jpeg, "jpeg"));
+    }
+    const listPath = path.join(tmpDir, "segments.txt");
+    await fs.writeFile(
+      listPath,
+      segments.map((p) => `file '${p}'`).join("\n") + "\n",
+    );
+    originalPath = path.join(tmpDir, "original.mp4");
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-f", "concat",
+        "-safe", "0",
+        "-i", listPath,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-y", originalPath,
+      ],
+      { timeout: 120_000 },
+    );
+    expect(await probeFrameCount(originalPath)).toBe(UNITS * SEGMENT_FPS);
+    originalHashes = await frameHashes(originalPath);
+  }, 300_000);
+
+  it("re-encodes video with pixelated mask box over specified duration", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-a-"));
+    const masks: VideoMask[] = [
+      {
+        startSec: 1,
+        endSec: 3,
+        x: 0.2,
+        y: 0.2,
+        width: 0.4,
+        height: 0.4,
+      },
+    ];
+
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      originalPath,
+      [{ start: 0, end: UNITS }],
+      true,
+      masks,
+    );
+
+    const frameCount = await probeFrameCount(edited);
+    expect(frameCount).toBe(UNITS * SEGMENT_FPS);
+
+    const editedHashes = await frameHashes(edited);
+    expect(editedHashes.length).toBe(originalHashes.length);
+
+    // Frames during unit 1 & 2 (seconds 1 to 3) MUST have altered hashes because of pixelation
+    const middleFrameIndex = 1 * SEGMENT_FPS + 5;
+    expect(editedHashes[middleFrameIndex]).not.toBe(originalHashes[middleFrameIndex]);
+
+    const origFrame = await extractFrameRgb(originalPath, 1.5);
+    const editFrame = await extractFrameRgb(edited, 1.5);
+
+    const insideDiff = meanRegionDiff(origFrame, editFrame, masks[0]);
+    const outsideRegion = { x: 0.02, y: 0.02, width: 0.15, height: 0.15 };
+    const outsideDiff = meanRegionDiff(origFrame, editFrame, outsideRegion);
+
+    expect(insideDiff).toBeGreaterThan(1.5);
+    expect(insideDiff).toBeGreaterThan(outsideDiff * 5);
+    expect(outsideDiff).toBeLessThan(1.0);
+    expect(pixelationUniformity(editFrame, masks[0])).toBeGreaterThan(0.85);
+  }, 120_000);
+
+  it("supports multiple and simultaneous mask boxes", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-b-"));
+    const masks: VideoMask[] = [
+      {
+        startSec: 1,
+        endSec: 2,
+        x: 0.1,
+        y: 0.1,
+        width: 0.3,
+        height: 0.3,
+      },
+      {
+        startSec: 1,
+        endSec: 2,
+        x: 0.6,
+        y: 0.6,
+        width: 0.3,
+        height: 0.3,
+      },
+    ];
+
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      originalPath,
+      [{ start: 0, end: UNITS }],
+      true,
+      masks,
+    );
+
+    const frameCount = await probeFrameCount(edited);
+    expect(frameCount).toBe(UNITS * SEGMENT_FPS);
+
+    const origFrame = await extractFrameRgb(originalPath, 1.5);
+    const editFrame = await extractFrameRgb(edited, 1.5);
+
+    const mask0Diff = meanRegionDiff(origFrame, editFrame, masks[0]);
+    const mask1Diff = meanRegionDiff(origFrame, editFrame, masks[1]);
+    const outsideRegion = { x: 0.45, y: 0.45, width: 0.1, height: 0.1 };
+    const outsideDiff = meanRegionDiff(origFrame, editFrame, outsideRegion);
+
+    expect(mask0Diff).toBeGreaterThan(3.0);
+    expect(mask1Diff).toBeGreaterThan(3.0);
+    expect(outsideDiff).toBeLessThan(1.0);
+
+    expect(pixelationUniformity(editFrame, masks[0])).toBeGreaterThan(0.85);
+    expect(pixelationUniformity(editFrame, masks[1])).toBeGreaterThan(0.85);
+  }, 120_000);
+
+  it("combines cuts and masks correctly", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-c-"));
+    // Cut unit 0, keep units 1..4 (3 units = 90 frames), mask unit 1
+    const masks: VideoMask[] = [
+      {
+        startSec: 1,
+        endSec: 2,
+        x: 0.2,
+        y: 0.2,
+        width: 0.5,
+        height: 0.5,
+      },
+    ];
+
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      originalPath,
+      [{ start: 1, end: 4 }],
+      true,
+      masks,
+    );
+
+    const frameCount = await probeFrameCount(edited);
+    expect(frameCount).toBe(3 * SEGMENT_FPS);
+  }, 120_000);
+
+  it("probeDimensions fails closed when video dimensions cannot be determined", async () => {
+    const invalidPath = path.join(tmpDir, "nonexistent.mp4");
+    await expect(probeDimensions(invalidPath)).rejects.toThrow("probeDimensions");
+  });
+
+  it("drops masks whose wall-clock interval does not intersect videoUnits", () => {
+    const baseTime = 1_700_000_000_000;
+    const videoUnits: VideoUnit[] = [
+      { capturedAt: new Date(baseTime).toISOString(), screenshotId: "1" },
+      { capturedAt: new Date(baseTime + 60_000).toISOString(), screenshotId: "2" },
+      { capturedAt: new Date(baseTime + 120_000).toISOString(), screenshotId: "3" },
+    ];
+
+    const beforeMask: MaskRegion = {
+      id: "before",
+      start: new Date(baseTime - 120_000).toISOString(),
+      end: new Date(baseTime - 60_000).toISOString(),
+      x: 0, y: 0, width: 0.5, height: 0.5,
+    };
+    expect(maskToVideoMask(beforeMask, videoUnits)).toBeNull();
+
+    const afterMask: MaskRegion = {
+      id: "after",
+      start: new Date(baseTime + 300_000).toISOString(),
+      end: new Date(baseTime + 360_000).toISOString(),
+      x: 0, y: 0, width: 0.5, height: 0.5,
+    };
+    expect(maskToVideoMask(afterMask, videoUnits)).toBeNull();
+
+    const intersectingMask: MaskRegion = {
+      id: "inter",
+      start: new Date(baseTime + 65_000).toISOString(),
+      end: new Date(baseTime + 95_000).toISOString(),
+      x: 0.1, y: 0.1, width: 0.3, height: 0.3,
+    };
+    const mapped = maskToVideoMask(intersectingMask, videoUnits);
+    expect(mapped).not.toBeNull();
+    expect(mapped?.startSec).toBe(1);
+    expect(mapped?.endSec).toBe(2);
+  });
+
+  it("reconciles startSec/endSec with canonical unit timeline", () => {
+    const baseTime = 1_700_000_000_000;
+    const videoUnits: VideoUnit[] = [
+      { capturedAt: new Date(baseTime + 60_000).toISOString(), screenshotId: "2" },
+      { capturedAt: new Date(baseTime + 120_000).toISOString(), screenshotId: "3" },
+    ];
+
+    const mask: MaskRegion = {
+      id: "m",
+      start: new Date(baseTime + 60_000).toISOString(),
+      end: new Date(baseTime + 120_000).toISOString(),
+      startSec: 1.25,
+      endSec: 2.25,
+      x: 0.1, y: 0.1, width: 0.3, height: 0.3,
+    };
+    const mapped = maskToVideoMask(mask, videoUnits);
+    expect(mapped).not.toBeNull();
+    expect(mapped?.startSec).toBe(0.25);
+    expect(mapped?.endSec).toBe(1.25);
+  });
+});

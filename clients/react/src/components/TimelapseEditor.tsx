@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,8 +10,10 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   countCutUnits,
   type ApplyCutsResponse,
+  type MaskRegion,
   type CutInterval,
   type UnitsResponse,
+  type VideoShot,
 } from "@lookout/shared";
 import { createLookoutClient, type LookoutClient } from "../api/client.js";
 import {
@@ -20,11 +23,24 @@ import {
   regionAtTime,
   regionsToCuts,
   elapsedLabel,
+  shotRulerLabel,
   rulerStep,
   rulerTicks,
   unitAtTime,
   unitClockLabel,
+  unitMasksToMasks,
+  masksToUnitMasks,
+  findShotAtTime,
+  snapToNearestShotBoundary,
+  assignMaskTracks,
+  canAddMaskAtTime,
+  activeMasksAtUnit,
+  isMaskActiveAtTime,
+  computeSafeCursorTime,
+  TRACK_PRESETS,
+  MAX_MASK_TRACKS,
   type UnitRegion,
+  type UnitMaskRegion,
 } from "../hooks/editorMath.js";
 import {
   openDecoderFrames,
@@ -42,6 +58,7 @@ import {
 import { injectEditorStyles } from "./editorStyles.js";
 import { Button } from "../ui/Button.js";
 import { MinutesFlow } from "../ui/MinutesFlow.js";
+import NumberFlow from "@number-flow/react";
 import { Spinner } from "../ui/Spinner.js";
 import { ProgressRing } from "../ui/ProgressRing.js";
 import { ErrorDisplay } from "../ui/ErrorDisplay.js";
@@ -66,6 +83,10 @@ export interface TimelapseEditorProps {
    *  whether it differs from what's saved. Lets a host (the desktop
    *  window) publish the current edit when the user closes it. */
   onCutsChange?: (cuts: CutInterval[], dirty: boolean) => void;
+  /** Fired whenever the mask list changes. */
+  onMasksChange?: (masks: MaskRegion[], dirty: boolean) => void;
+  /** Alias for onMasksChange. */
+  onBlursChange?: (masks: MaskRegion[], dirty: boolean) => void;
 }
 
 const STRIP_HEIGHT = 56;
@@ -111,6 +132,13 @@ type DragState =
       grabOffset: number;
       anchorUnit: number;
     }
+  | {
+      kind: "mask";
+      id: string;
+      mode: "move" | "start" | "end";
+      grabOffset: number;
+      initialWidth: number;
+    }
   | null;
 
 /**
@@ -132,6 +160,8 @@ export function TimelapseEditor({
   onApplied,
   onCancel,
   onCutsChange,
+  onMasksChange,
+  onBlursChange,
 }: TimelapseEditorProps) {
   const client = useMemo<LookoutClient>(
     () => clientProp ?? createLookoutClient({ baseUrl: apiBaseUrl, token }),
@@ -159,19 +189,108 @@ export function TimelapseEditor({
   /** Anchored once per preparing spell, so even a genuine change in the
    *  unit count can't restart the estimate. */
   const prepareStartRef = useRef<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoBoxRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const maskTrackRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const timelineAreaRef = useRef<HTMLDivElement>(null);
+  const maskMenuRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const activeScanTokenRef = useRef(0);
+  const probeVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  const [mode, setMode] = useState<"cut" | "mask">("cut");
   const [regions, setRegions] = useState<UnitRegion[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
+  const [masks, setMasks] = useState<UnitMaskRegion[]>([]);
+  const [selectedMaskId, setSelectedMaskId] = useState<string | null>(null);
+  const [drawingMask, setDrawingMask] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const [maskDrag, setMaskDrag] = useState<{
+    id: string;
+    handle: "move" | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+    startX: number;
+    startY: number;
+    initial: UnitMaskRegion;
+  } | null>(null);
+  const [maskMenuOpen, setMaskMenuOpen] = useState(false);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [filmstrip, setFilmstrip] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [expandingMaskId, setExpandingMaskId] = useState<string | null>(null);
+  const [dynamicShots, setDynamicShots] = useState<VideoShot[] | null>(null);
+  const dynamicShotsCacheRef = useRef<Map<string, VideoShot[]>>(new Map());
+  const [maskLimitNotice, setMaskLimitNotice] = useState<string | null>(null);
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomAnchorRef = useRef<{ trackFrac: number; anchorXInViewport: number } | null>(null);
+  const [isSmoothSeek, setIsSmoothSeek] = useState(false);
+  const smoothSeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isTimelineHovered, setIsTimelineHovered] = useState(false);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
+  const activeShots = useMemo(
+    () => (dynamicShots && dynamicShots.length > 0 ? dynamicShots : (data?.shots ?? [])),
+    [dynamicShots, data?.shots],
+  );
+
+  const trackAllocation = useMemo(() => assignMaskTracks(masks), [masks]);
+
+  const drawingTrackIdx = useMemo(() => {
+    if (!drawingMask) return 0;
+    const curTime = videoRef.current?.currentTime ?? time;
+    const active = activeMasksAtUnit(curTime, masks);
+    const usedTracks = new Set(active.map((b) => trackAllocation.assignments[b.id]));
+    for (let t = 0; t < MAX_MASK_TRACKS; t++) {
+      if (!usedTracks.has(t)) return t;
+    }
+    return 0;
+  }, [drawingMask, masks, trackAllocation, time]);
+
+  const [containerSize, setContainerSize] = useState({ width: 900, height: 620 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      setContainerSize({ width, height });
+    });
+    ro.observe(el);
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      setContainerSize({ width: rect.width, height: rect.height });
+    }
+    return () => ro.disconnect();
+  }, []);
+
+  const isVeryShort = containerSize.height <= 400;
+  const isShort = containerSize.height <= 500;
+  const isNarrow = containerSize.width <= 540;
+  const isTinyWidth = containerSize.width <= 440;
+
+  const stripHeight = isVeryShort ? 32 : isShort ? 40 : STRIP_HEIGHT;
+  const rulerHeight = isShort ? 18 : RULER_HEIGHT;
+  const maskTrackHeight = isVeryShort ? 20 : isShort ? 22 : 26;
+  const rootGap = isShort ? 6 : spacing.md;
+  const dockGap = isShort ? 6 : spacing.sm;
+  const playOverlaySize = isVeryShort ? 36 : isShort ? 44 : 56;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
   const dragRef = useRef<DragState>(null);
   const regionsRef = useRef<UnitRegion[]>(regions);
   regionsRef.current = regions;
+  const masksRef = useRef<UnitMaskRegion[]>(masks);
+  masksRef.current = masks;
   const rafRef = useRef<number>(0);
 
   const units = data?.units ?? [];
@@ -210,6 +329,7 @@ export function TimelapseEditor({
         setPreparingUnits(null);
         setData(res);
         setRegions(cutsToRegions(res.cuts, res.units));
+        setMasks(masksToUnitMasks(res.masks ?? (res as any).blurs ?? [], res.units));
         return;
       }
       if (res.editableReason === "preparing" || res.editableReason === "no_original") {
@@ -319,13 +439,22 @@ export function TimelapseEditor({
   // it renews the lease while mounted. No countdown, no deadline to race:
   // the session waits as long as the window is up, and publishes on its
   // own shortly after it isn't. Stops once the session is no longer held.
-  const leaseHeld = useEditLease(client, !saving);
+  const leaseHeld = useEditLease(client, !saving && !saveSuccess);
   useEffect(() => {
-    if (leaseHeld || saving) return;
+    if (leaseHeld || saving || saveSuccess) return;
     setLoadError(
       "This timelapse was already published, so it can no longer be edited.",
     );
-  }, [leaseHeld, saving]);
+  }, [leaseHeld, saving, saveSuccess]);
+
+  const prevEditSig = useRef("");
+  useEffect(() => {
+    const sig = JSON.stringify({ regions, masks });
+    if (prevEditSig.current && prevEditSig.current !== sig) {
+      setSaveSuccess(false);
+    }
+    prevEditSig.current = sig;
+  }, [regions, masks]);
 
   // ── Playhead tracking (rAF for a smooth 60fps playhead) ─────
   useEffect(() => {
@@ -356,6 +485,21 @@ export function TimelapseEditor({
     v.addEventListener("timeupdate", onTimeUpdate);
     return () => v.removeEventListener("timeupdate", onTimeUpdate);
   }, [unitCount, data?.originalVideoUrl]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const updateAspect = () => {
+      if (v.videoWidth && v.videoHeight) {
+        setVideoAspect(v.videoWidth / v.videoHeight);
+      }
+    };
+    v.addEventListener("loadedmetadata", updateAspect);
+    if (v.videoWidth && v.videoHeight) {
+      updateAspect();
+    }
+    return () => v.removeEventListener("loadedmetadata", updateAspect);
+  }, [data?.originalVideoUrl]);
 
   // ── Filmstrip frame source ──────────────────────────────────
   //
@@ -389,6 +533,30 @@ export function TimelapseEditor({
     previewBytesRef.current = null;
   }, [data?.originalVideoUrl]);
 
+  useEffect(() => {
+    const videoSrc = data?.originalVideoUrl;
+    if (!videoSrc) {
+      if (probeVideoRef.current) {
+        probeVideoRef.current.removeAttribute("src");
+        probeVideoRef.current.load();
+        probeVideoRef.current = null;
+      }
+      return;
+    }
+    const v = document.createElement("video");
+    if (!videoSrc.startsWith("blob:")) v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.src = videoSrc;
+    probeVideoRef.current = v;
+    return () => {
+      v.removeAttribute("src");
+      v.load();
+      probeVideoRef.current = null;
+    };
+  }, [data?.originalVideoUrl]);
+
   // Track width drives the filmstrip: tiles are whole frames at the
   // video's own aspect ratio, so how many fit is a function of the track,
   // not of how many minutes were recorded.
@@ -402,7 +570,7 @@ export function TimelapseEditor({
     ro.observe(el);
     setStripWidth(el.getBoundingClientRect().width);
     return () => ro.disconnect();
-  }, [data]);
+  }, [data, zoom]);
 
   /**
    * Filmstrip: whole, uncropped frames tiled across the track — the
@@ -562,13 +730,247 @@ export function TimelapseEditor({
   );
 
   const seekTo = useCallback(
-    (t: number) => {
+    (t: number, smooth: boolean = false) => {
       const v = videoRef.current;
       if (!v) return;
-      v.currentTime = Math.max(0, Math.min(unitCount - 0.05, t));
+      const target = Math.max(0, Math.min(unitCount - 0.05, t));
+      v.currentTime = target;
+      setTime(target);
+      if (smooth) {
+        if (smoothSeekTimerRef.current) clearTimeout(smoothSeekTimerRef.current);
+        setIsSmoothSeek(true);
+        smoothSeekTimerRef.current = setTimeout(() => {
+          setIsSmoothSeek(false);
+        }, 320);
+      }
+      else {
+        setIsSmoothSeek(false);
+      }
     },
     [unitCount],
   );
+
+  const applyZoom = useCallback(
+    (newZoom: number, anchorClientX?: number) => {
+      const clamped = Math.max(1, Math.min(16, Math.round(newZoom * 100) / 100));
+      const prevZoom = zoomRef.current;
+      if (clamped === prevZoom) return;
+      zoomRef.current = clamped;
+
+      const scrollEl = timelineScrollRef.current;
+      if (!scrollEl) {
+        setZoom(clamped);
+        return;
+      }
+
+      const rect = scrollEl.getBoundingClientRect();
+      let anchorXInViewport = rect.width / 2;
+      if (anchorClientX !== undefined) {
+        anchorXInViewport = Math.max(0, Math.min(rect.width, anchorClientX - rect.left));
+      }
+      else {
+        const totalUnits = Math.max(1, unitCount);
+        const curPlayheadFrac = Math.min(time, totalUnits) / totalUnits;
+        const curPlayheadPx = curPlayheadFrac * scrollEl.scrollWidth;
+        const playheadInView = curPlayheadPx - scrollEl.scrollLeft;
+        if (playheadInView >= 0 && playheadInView <= rect.width) {
+          anchorXInViewport = playheadInView;
+        }
+      }
+
+      const trackFrac =
+        (scrollEl.scrollLeft + anchorXInViewport) / Math.max(1, scrollEl.scrollWidth);
+
+      zoomAnchorRef.current = { trackFrac, anchorXInViewport };
+      setZoom(clamped);
+    },
+    [unitCount, time],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor || !timelineScrollRef.current) return;
+    const scrollEl = timelineScrollRef.current;
+    const newScrollLeft = anchor.trackFrac * scrollEl.scrollWidth - anchor.anchorXInViewport;
+    scrollEl.scrollLeft = Math.max(0, newScrollLeft);
+    zoomAnchorRef.current = null;
+  }, [zoom]);
+
+  const zoomIn = useCallback(() => {
+    applyZoom(zoomRef.current * 1.5);
+  }, [applyZoom]);
+
+  const zoomOut = useCallback(() => {
+    applyZoom(zoomRef.current / 1.5);
+  }, [applyZoom]);
+
+  const resetZoom = useCallback(() => {
+    applyZoom(1);
+  }, [applyZoom]);
+
+  useEffect(() => {
+    const target = timelineAreaRef.current || timelineScrollRef.current;
+    if (!target) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (dragRef.current) return;
+      const scrollEl = timelineScrollRef.current;
+      if (!scrollEl) return;
+
+      // 1. Shift + scroll: shifts the timeline horizontally left/right
+      if (e.shiftKey) {
+        e.preventDefault();
+        const shiftDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        scrollEl.scrollLeft += shiftDelta;
+        return;
+      }
+
+      // 2. Trackpad pinch in Chrome / Ctrl+scroll / Cmd+scroll: zoom centered on cursor
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.01);
+        applyZoom(zoomRef.current * factor, e.clientX);
+        return;
+      }
+
+      // 3. Trackpad horizontal swipe: pan horizontally
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 1) {
+        scrollEl.scrollLeft += e.deltaX;
+        return;
+      }
+
+      // 4. Mouse vertical scroll wheel: increases or decreases the size
+      if (Math.abs(e.deltaY) > 0) {
+        e.preventDefault();
+        if (Math.abs(e.deltaY) >= 40 || e.deltaMode !== 0) {
+          const factor = e.deltaY < 0 ? 1.25 : (1 / 1.25);
+          applyZoom(zoomRef.current * factor, e.clientX);
+        }
+        else {
+          const factor = Math.exp(-e.deltaY * 0.005);
+          applyZoom(zoomRef.current * factor, e.clientX);
+        }
+      }
+    };
+
+    // Safari / WebKit trackpad pinch gesture support
+    let gestureStartZoom = 1;
+
+    const onGestureStart = (e: Event) => {
+      if (dragRef.current) return;
+      e.preventDefault();
+      gestureStartZoom = zoomRef.current;
+    };
+
+    const onGestureChange = (e: Event) => {
+      if (dragRef.current) return;
+      e.preventDefault();
+      const ge = e as UIEvent & { scale?: number; clientX?: number };
+      if (typeof ge.scale === "number" && ge.scale > 0) {
+        const targetZoom = gestureStartZoom * ge.scale;
+        const clientX = typeof ge.clientX === "number" ? ge.clientX : undefined;
+        applyZoom(targetZoom, clientX);
+      }
+    };
+
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+    };
+
+    target.addEventListener("wheel", onWheel, { passive: false });
+    target.addEventListener("gesturestart", onGestureStart, { passive: false });
+    target.addEventListener("gesturechange", onGestureChange, { passive: false });
+    target.addEventListener("gestureend", onGestureEnd, { passive: false });
+
+    return () => {
+      target.removeEventListener("wheel", onWheel);
+      target.removeEventListener("gesturestart", onGestureStart);
+      target.removeEventListener("gesturechange", onGestureChange);
+      target.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, [applyZoom]);
+
+  useEffect(() => {
+    if (!playing || zoom <= 1) return;
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl || unitCount <= 0) return;
+
+    const playheadPx = (time / unitCount) * scrollEl.scrollWidth;
+    const scrollLeft = scrollEl.scrollLeft;
+    const clientWidth = scrollEl.clientWidth;
+
+    const margin = clientWidth * 0.15;
+    if (playheadPx > scrollLeft + clientWidth - margin) {
+      scrollEl.scrollLeft = playheadPx - clientWidth + margin;
+    }
+    else if (playheadPx < scrollLeft + margin) {
+      scrollEl.scrollLeft = Math.max(0, playheadPx - margin);
+    }
+  }, [playing, time, zoom, unitCount]);
+
+  const [scrollProgress, setScrollProgress] = useState(0);
+  const [isMinimapDragging, setIsMinimapDragging] = useState(false);
+  const [isMinimapThumbHovered, setIsMinimapThumbHovered] = useState(false);
+
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      if (maxScroll > 0) {
+        setScrollProgress(el.scrollLeft / maxScroll);
+      }
+      else {
+        setScrollProgress(0);
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [zoom, stripWidth]);
+
+  const onMinimapPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const track = e.currentTarget;
+    const rect = track.getBoundingClientRect();
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl) return;
+    const maxScroll = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (maxScroll <= 0) return;
+
+    const currentZoom = zoomRef.current;
+    const thumbRatio = 1 / currentZoom;
+    const thumbW = rect.width * thumbRatio;
+    const usableW = rect.width - thumbW;
+    if (usableW <= 0) return;
+
+    setIsMinimapDragging(true);
+
+    const updateScroll = (clientX: number) => {
+      const xInTrack = Math.max(0, Math.min(usableW, clientX - rect.left - thumbW / 2));
+      const frac = xInTrack / usableW;
+      scrollEl.scrollLeft = frac * maxScroll;
+      setScrollProgress(frac);
+    };
+
+    updateScroll(e.clientX);
+
+    let rafId: number | null = null;
+    const onPointerMove = (moveEv: PointerEvent) => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        updateScroll(moveEv.clientX);
+      });
+    };
+    const onPointerUp = () => {
+      setIsMinimapDragging(false);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }, []);
 
   const beginDrag = useCallback((e: React.PointerEvent, state: DragState) => {
     dragRef.current = state;
@@ -580,9 +982,14 @@ export function TimelapseEditor({
   const onTimelinePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (saving) return;
+      if (mode === "mask") {
+        beginDrag(e, { kind: "scrub" });
+        seekTo(unitFromEvent(e));
+        return;
+      }
       beginDrag(e, { kind: "maybe", downUnitF: unitFromEvent(e) });
     },
-    [beginDrag, saving, unitFromEvent],
+    [beginDrag, mode, saving, seekTo, unitFromEvent],
   );
 
   const onRulerPointerDown = useCallback(
@@ -590,6 +997,7 @@ export function TimelapseEditor({
       if (saving) return;
       beginDrag(e, { kind: "scrub" });
       seekTo(unitFromEvent(e));
+      setSelectedMaskId(null);
     },
     [beginDrag, saving, seekTo, unitFromEvent],
   );
@@ -606,6 +1014,7 @@ export function TimelapseEditor({
       }
 
       if (drag.kind === "maybe") {
+        if (mode !== "cut") return;
         // Click-vs-drag disambiguation: past a third of a unit of travel,
         // the gesture becomes a new cut region growing from the press point.
         if (Math.abs(unitF - drag.downUnitF) < 0.34) return;
@@ -626,36 +1035,77 @@ export function TimelapseEditor({
         return;
       }
 
-      setRegions((prev) => {
-        const next = prev.map((r) => ({ ...r }));
-        const r = next[drag.index];
-        if (!r) return prev;
-        if (drag.mode === "move") {
-          const width = r.endUnit - r.startUnit;
-          let start = Math.round(unitF - drag.grabOffset);
-          start = Math.max(0, Math.min(unitCount - width, start));
-          r.startUnit = start;
-          r.endUnit = start + width;
-        } else if (drag.mode === "start") {
-          r.startUnit = Math.max(0, Math.min(r.endUnit - 1, Math.round(unitF)));
-          seekTo(r.startUnit + 0.02);
-        } else {
-          const anchor = drag.anchorUnit;
-          const rounded = Math.round(unitF);
-          if (rounded <= anchor) {
-            r.startUnit = Math.max(0, rounded);
-            r.endUnit = anchor + 1;
+      if (drag.kind === "region") {
+        if (mode !== "cut") return;
+        setRegions((prev) => {
+          const next = prev.map((r) => ({ ...r }));
+          const r = next[drag.index];
+          if (!r) return prev;
+          if (drag.mode === "move") {
+            const width = r.endUnit - r.startUnit;
+            let start = Math.round(unitF - drag.grabOffset);
+            start = Math.max(0, Math.min(unitCount - width, start));
+            r.startUnit = start;
+            r.endUnit = start + width;
+          } else if (drag.mode === "start") {
+            r.startUnit = Math.max(0, Math.min(r.endUnit - 1, Math.round(unitF)));
             seekTo(r.startUnit + 0.02);
           } else {
-            r.endUnit = Math.min(unitCount, Math.max(r.startUnit + 1, rounded));
-            seekTo(Math.min(unitCount - 0.05, r.endUnit + 0.02));
+            const anchor = drag.anchorUnit;
+            const rounded = Math.round(unitF);
+            if (rounded <= anchor) {
+              r.startUnit = Math.max(0, rounded);
+              r.endUnit = anchor + 1;
+              seekTo(r.startUnit + 0.02);
+            } else {
+              r.endUnit = Math.min(unitCount, Math.max(r.startUnit + 1, rounded));
+              seekTo(Math.min(unitCount - 0.05, r.endUnit + 0.02));
+            }
           }
+          return next;
+        });
+        setSelected(drag.index);
+        return;
+      }
+
+      if (drag.kind === "mask") {
+        const id = drag.id;
+        const m = masksRef.current.find((item) => item.id === id);
+        if (!m) return;
+
+        if (drag.mode === "move") {
+          const width = drag.initialWidth;
+          let start = Math.round(unitF - drag.grabOffset);
+          start = Math.max(0, Math.min(unitCount - width, start));
+          const end = start + width;
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, startUnit: start, endUnit: end } : item,
+            ),
+          );
+          seekTo(start + 0.01);
+        } else if (drag.mode === "start") {
+          const newStart = Math.max(0, Math.min(m.endUnit - 1, Math.round(unitF)));
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, startUnit: newStart } : item,
+            ),
+          );
+          seekTo(newStart + 0.01);
+        } else if (drag.mode === "end") {
+          const newEnd = Math.min(unitCount, Math.max(m.startUnit + 1, Math.round(unitF)));
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, endUnit: newEnd } : item,
+            ),
+          );
+          seekTo(Math.min(unitCount - 0.05, newEnd - 0.01));
         }
-        return next;
-      });
-      setSelected(drag.index);
+        setSelectedMaskId(id);
+        return;
+      }
     },
-    [seekTo, unitCount, unitFromEvent],
+    [seekTo, unitCount, unitFromEvent, mode, data?.shots],
   );
 
   const onPointerUp = useCallback(() => {
@@ -666,9 +1116,15 @@ export function TimelapseEditor({
       // A plain click on open track: seek there and drop any selection.
       seekTo(drag.downUnitF);
       setSelected(null);
+      setSelectedMaskId(null);
+      return;
+    }
+    if (drag.kind === "mask") {
+      setSelectedMaskId(drag.id);
       return;
     }
     if (drag.kind === "region") {
+      if (mode !== "cut") return;
       // Keep the region selected after the gesture. Clearing it here meant
       // a selection could never outlive the click that made it, so "Remove
       // cut" was unreachable. Normalizing can merge regions and shift
@@ -684,23 +1140,24 @@ export function TimelapseEditor({
         : -1;
       setSelected(idx >= 0 ? idx : null);
     }
-  }, [seekTo]);
+  }, [seekTo, mode]);
 
   const onRegionPointerDown = useCallback(
-    (e: React.PointerEvent, index: number, mode: "move" | "start" | "end") => {
-      if (saving) return;
+    (e: React.PointerEvent, index: number, dragMode: "move" | "start" | "end") => {
+      if (saving || mode !== "cut") return;
       const r = regionsRef.current[index];
       if (!r) return;
       setSelected(index);
+      setSelectedMaskId(null);
       beginDrag(e, {
         kind: "region",
         index,
-        mode,
+        mode: dragMode,
         grabOffset: unitFromEvent(e) - r.startUnit,
         anchorUnit: r.startUnit,
       });
     },
-    [beginDrag, saving, unitFromEvent],
+    [beginDrag, mode, saving, unitFromEvent],
   );
 
   const togglePlay = useCallback(() => {
@@ -716,6 +1173,7 @@ export function TimelapseEditor({
   }, [unitCount]);
 
   const cutHere = useCallback(() => {
+    if (mode !== "cut") return;
     const v = videoRef.current;
     if (!v || unitCount === 0) return;
     const at = unitAtTime(v.currentTime, unitCount);
@@ -724,7 +1182,702 @@ export function TimelapseEditor({
       setSelected(next.findIndex((r) => at >= r.startUnit && at < r.endUnit));
       return next;
     });
-  }, [unitCount]);
+  }, [mode, unitCount]);
+
+  const onStagePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (saving || mode !== "mask") return;
+      const curTime = videoRef.current?.currentTime ?? 0;
+      if (!canAddMaskAtTime(curTime, masksRef.current)) {
+        setMaskLimitNotice("Maximum 3 overlapping masks allowed");
+        setTimeout(() => setMaskLimitNotice(null), 2500);
+        return;
+      }
+      const rect = overlayRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return;
+      const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+
+      setSelectedMaskId(null);
+      setSelected(null);
+      setDrawingMask({ startX: x, startY: y, currentX: x, currentY: y });
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      }
+      catch {
+        // Fallback for Safari pointer capture
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [mode, saving],
+  );
+
+  const onMaskBoxPointerDown = useCallback(
+    (
+      e: React.PointerEvent,
+      id: string,
+      handle: "move" | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w",
+    ) => {
+      if (saving || mode !== "mask") return;
+      const mask = masksRef.current.find((b) => b.id === id);
+      if (!mask) return;
+      setSelectedMaskId(id);
+      setSelected(null);
+
+      const rect = overlayRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return;
+      const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+
+      setMaskDrag({
+        id,
+        handle,
+        startX: x,
+        startY: y,
+        initial: { ...mask },
+      });
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      }
+      catch {
+        // Fallback for Safari pointer capture
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [mode, saving],
+  );
+
+  const onStagePointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const rect = overlayRef.current?.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return;
+      const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+
+      if (drawingMask) {
+        setDrawingMask((prev) => (prev ? { ...prev, currentX: x, currentY: y } : null));
+        return;
+      }
+
+      if (maskDrag) {
+        const { handle, startX, startY, initial, id } = maskDrag;
+        const dx = x - startX;
+        const dy = y - startY;
+
+        setMasks((prev) =>
+          prev.map((b) => {
+            if (b.id !== id) return b;
+            const updated = { ...b };
+            if (handle === "move") {
+              const newX = Math.max(0, Math.min(1 - initial.width, initial.x + dx));
+              const newY = Math.max(0, Math.min(1 - initial.height, initial.y + dy));
+              updated.x = newX;
+              updated.y = newY;
+            }
+            else if (handle === "se") {
+              updated.width = Math.max(0.02, Math.min(1 - initial.x, initial.width + dx));
+              updated.height = Math.max(0.02, Math.min(1 - initial.y, initial.height + dy));
+            }
+            else if (handle === "nw") {
+              const newX = Math.max(0, Math.min(initial.x + initial.width - 0.02, initial.x + dx));
+              const newY = Math.max(0, Math.min(initial.y + initial.height - 0.02, initial.y + dy));
+              updated.width = initial.width - (newX - initial.x);
+              updated.height = initial.height - (newY - initial.y);
+              updated.x = newX;
+              updated.y = newY;
+            }
+            else if (handle === "ne") {
+              const newY = Math.max(0, Math.min(initial.y + initial.height - 0.02, initial.y + dy));
+              updated.height = initial.height - (newY - initial.y);
+              updated.y = newY;
+              updated.width = Math.max(0.02, Math.min(1 - initial.x, initial.width + dx));
+            }
+            else if (handle === "sw") {
+              const newX = Math.max(0, Math.min(initial.x + initial.width - 0.02, initial.x + dx));
+              updated.width = initial.width - (newX - initial.x);
+              updated.x = newX;
+              updated.height = Math.max(0.02, Math.min(1 - initial.y, initial.height + dy));
+            }
+            else if (handle === "n") {
+              const newY = Math.max(0, Math.min(initial.y + initial.height - 0.02, initial.y + dy));
+              updated.height = initial.height - (newY - initial.y);
+              updated.y = newY;
+            }
+            else if (handle === "s") {
+              updated.height = Math.max(0.02, Math.min(1 - initial.y, initial.height + dy));
+            }
+            else if (handle === "e") {
+              updated.width = Math.max(0.02, Math.min(1 - initial.x, initial.width + dx));
+            }
+            else if (handle === "w") {
+              const newX = Math.max(0, Math.min(initial.x + initial.width - 0.02, initial.x + dx));
+              updated.width = initial.width - (newX - initial.x);
+              updated.x = newX;
+            }
+            return updated;
+          }),
+        );
+      }
+    },
+    [drawingMask, maskDrag],
+  );
+
+  const seekProbeVideo = useCallback((video: HTMLVideoElement, time: number): Promise<void> => {
+    return new Promise((resolve) => {
+      if (Math.abs(video.currentTime - time) < 0.02) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        resolve();
+      };
+      const onSeeked = () => done();
+      const onError = () => done();
+      video.addEventListener("seeked", onSeeked, { once: true });
+      video.addEventListener("error", onError, { once: true });
+      setTimeout(done, 250);
+      try {
+        video.currentTime = time;
+      }
+      catch {
+        done();
+      }
+    });
+  }, []);
+
+  const scanRegionShots = useCallback(
+    async (mask: UnitMaskRegion, anchorTime?: number, updateMaskDuration = true) => {
+      setExpandingMaskId(mask.id);
+      const scanToken = ++activeScanTokenRef.current;
+      try {
+        const probeVideo = probeVideoRef.current;
+        const liveVideo = videoRef.current;
+        if (!probeVideo || !liveVideo) return;
+
+        const vw = liveVideo.videoWidth || 1280;
+        const vh = liveVideo.videoHeight || 720;
+        const sampleW = 48;
+        const sampleH = 48;
+        const sampleCanvas = document.createElement("canvas");
+        sampleCanvas.width = sampleW;
+        sampleCanvas.height = sampleH;
+        const sCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+        if (!sCtx) return;
+
+        const cropSx = Math.max(0, Math.floor(mask.x * vw));
+        const cropSy = Math.max(0, Math.floor(mask.y * vh));
+        const cropSw = Math.max(16, Math.floor(mask.width * vw));
+        const cropSh = Math.max(16, Math.floor(mask.height * vh));
+
+        const totalDur = probeVideo.duration || unitCount;
+        if (totalDur <= 0) return;
+
+        const targetTime = anchorTime ?? videoRef.current?.currentTime ?? mask.startUnit;
+        const WINDOW_RADIUS = 30;
+        const windowStart = Math.max(0, targetTime - WINDOW_RADIUS);
+        const windowEnd = Math.min(totalDur, targetTime + WINDOW_RADIUS);
+
+        const cacheKey = `${mask.x.toFixed(2)}:${mask.y.toFixed(2)}:${mask.width.toFixed(2)}:${mask.height.toFixed(2)}@${Math.floor(windowStart)}_${Math.floor(windowEnd)}`;
+        const cached = dynamicShotsCacheRef.current.get(cacheKey);
+        if (cached && cached.length > 0) {
+          setDynamicShots(cached);
+          if (updateMaskDuration) {
+            const matchingShot = cached.find((s) => targetTime >= s.startSec - 0.001 && targetTime < s.endSec + 0.001)
+              ?? cached.find((s) => s.endSec >= targetTime)
+              ?? cached[0];
+            if (matchingShot) {
+              setMasks((prev) =>
+                prev.map((b) =>
+                  b.id === mask.id
+                    ? { ...b, startUnit: matchingShot.startSec, endUnit: matchingShot.endSec }
+                    : b,
+                ),
+              );
+              seekTo(computeSafeCursorTime(matchingShot.startSec, matchingShot.endSec, targetTime), true);
+            }
+          }
+          return;
+        }
+
+        const baseShots = data?.shots && data.shots.length > 0 ? data.shots : [];
+        const candidateTimes: { t: number; boundary: number }[] = [];
+
+        if (baseShots.length > 1) {
+          for (const s of baseShots) {
+            if (s.endSec >= windowStart && s.startSec <= windowEnd) {
+              candidateTimes.push({
+                t: (s.startSec + s.endSec) / 2,
+                boundary: s.startSec,
+              });
+            }
+          }
+        }
+        else {
+          const step = 0.2;
+          const scanStart = Math.max(0.1, windowStart);
+          for (let t = scanStart; t <= windowEnd; t += step) {
+            candidateTimes.push({
+              t: Math.round(t * 100) / 100,
+              boundary: Math.round(t * 100) / 100,
+            });
+          }
+        }
+
+        const detectedCuts: number[] = [];
+        let prevImgData: ImageData["data"] | null = null;
+
+        for (let i = 0; i < candidateTimes.length; i++) {
+          if (scanToken !== activeScanTokenRef.current) return;
+          const { t, boundary } = candidateTimes[i];
+
+          await seekProbeVideo(probeVideo, Math.max(0, Math.min(totalDur - 0.05, t)));
+          if (scanToken !== activeScanTokenRef.current) return;
+
+          let curData: ImageData["data"] | null = null;
+          try {
+            sCtx.drawImage(probeVideo, cropSx, cropSy, cropSw, cropSh, 0, 0, sampleW, sampleH);
+            curData = sCtx.getImageData(0, 0, sampleW, sampleH).data;
+          }
+          catch {
+            break;
+          }
+
+          if (prevImgData && curData) {
+            let diffSum = 0;
+            for (let p = 0; p < curData.length; p += 4) {
+              const dr = Math.abs(prevImgData[p] - curData[p]);
+              const dg = Math.abs(prevImgData[p + 1] - curData[p + 1]);
+              const db = Math.abs(prevImgData[p + 2] - curData[p + 2]);
+              diffSum += (dr + dg + db) / (3 * 255);
+            }
+            const meanDiff = diffSum / (curData.length / 4);
+            if (meanDiff > 0.035 && boundary > 0.05) {
+              detectedCuts.push(boundary);
+              prevImgData = curData;
+            }
+          }
+          else if (curData) {
+            prevImgData = curData;
+          }
+
+          if (i % 2 === 0) {
+            await new Promise((r) => setTimeout(r, 16));
+          }
+        }
+
+        if (scanToken !== activeScanTokenRef.current) return;
+
+        const outsideCuts = baseShots.length > 1
+          ? baseShots.map((s) => s.startSec).filter((c) => c > 0.05 && c < totalDur - 0.05 && (c < windowStart || c > windowEnd))
+          : [];
+        const allCuts = [...outsideCuts, ...detectedCuts];
+        const sortedCuts = Array.from(new Set(allCuts)).sort((a, b) => a - b);
+        const boundaries = [0, ...sortedCuts.filter((c) => c > 0.05 && c < totalDur - 0.05), totalDur];
+        const newShots: VideoShot[] = [];
+        for (let i = 0; i < boundaries.length - 1; i++) {
+          const s = Math.round(boundaries[i] * 10_000) / 10_000;
+          const e = Math.round(boundaries[i + 1] * 10_000) / 10_000;
+          const dur = Math.round((e - s) * 10_000) / 10_000;
+          if (dur > 0.01) {
+            newShots.push({
+              id: `region-shot-${i}`,
+              unitIndex: Math.floor(s),
+              frameIndex: i,
+              startSec: s,
+              endSec: e,
+              duration: dur,
+            });
+          }
+        }
+
+        if (newShots.length > 0) {
+          dynamicShotsCacheRef.current.set(cacheKey, newShots);
+          setDynamicShots(newShots);
+          if (updateMaskDuration) {
+            const matchingShot = newShots.find((s) => targetTime >= s.startSec - 0.001 && targetTime < s.endSec + 0.001)
+              ?? newShots.find((s) => s.endSec >= targetTime)
+              ?? newShots[0];
+            if (matchingShot) {
+              setMasks((prev) =>
+                prev.map((b) =>
+                  b.id === mask.id
+                    ? { ...b, startUnit: matchingShot.startSec, endUnit: matchingShot.endSec }
+                    : b,
+                ),
+              );
+              seekTo(computeSafeCursorTime(matchingShot.startSec, matchingShot.endSec, targetTime), true);
+            }
+          }
+        }
+      }
+      catch (err) {
+        console.warn("[editor] scanRegionShots failed:", err);
+      }
+      finally {
+        if (scanToken === activeScanTokenRef.current) {
+          setTimeout(() => setExpandingMaskId(null), 250);
+        }
+      }
+    },
+    [data?.shots, unitCount, seekProbeVideo, seekTo],
+  );
+
+  const recalculateMaskSpan = useCallback(
+    async (
+      mask: UnitMaskRegion,
+      curTime: number,
+      direction: "forward" | "backward" | "both",
+    ) => {
+      setExpandingMaskId(mask.id);
+      const scanToken = ++activeScanTokenRef.current;
+      try {
+        const probeVideo = probeVideoRef.current;
+        const liveVideo = videoRef.current;
+        if (!probeVideo || !liveVideo) return;
+
+        const vw = liveVideo.videoWidth || 1280;
+        const vh = liveVideo.videoHeight || 720;
+        const sampleW = 48;
+        const sampleH = 48;
+        const sampleCanvas = document.createElement("canvas");
+        sampleCanvas.width = sampleW;
+        sampleCanvas.height = sampleH;
+        const sCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+        if (!sCtx) return;
+
+        const cropSx = Math.max(0, Math.floor(mask.x * vw));
+        const cropSy = Math.max(0, Math.floor(mask.y * vh));
+        const cropSw = Math.max(16, Math.floor(mask.width * vw));
+        const cropSh = Math.max(16, Math.floor(mask.height * vh));
+
+        const shots = activeShots.length > 0 ? activeShots : [];
+        if (shots.length === 0) return;
+
+        let curIdx = shots.findIndex((s) => curTime >= s.startSec - 0.001 && curTime < s.endSec + 0.001);
+        if (curIdx === -1) {
+          curIdx = shots.findIndex((s) => s.endSec >= curTime);
+          if (curIdx === -1) curIdx = 0;
+        }
+
+        const baseTime = (shots[curIdx].startSec + shots[curIdx].endSec) / 2;
+        await seekProbeVideo(probeVideo, Math.max(0, Math.min(probeVideo.duration - 0.05, baseTime)));
+        if (scanToken !== activeScanTokenRef.current) return;
+
+        let baseImgData: ImageData["data"] | null = null;
+        try {
+          sCtx.drawImage(probeVideo, cropSx, cropSy, cropSw, cropSh, 0, 0, sampleW, sampleH);
+          baseImgData = sCtx.getImageData(0, 0, sampleW, sampleH).data;
+        }
+        catch {
+          return;
+        }
+        if (!baseImgData) return;
+
+        let curStart = mask.startUnit;
+        let curEnd = mask.endUnit;
+
+        const checkMatch = async (t: number, lastData: ImageData["data"]) => {
+          await seekProbeVideo(probeVideo, Math.max(0, Math.min(probeVideo.duration - 0.05, t)));
+          sCtx.drawImage(probeVideo, cropSx, cropSy, cropSw, cropSh, 0, 0, sampleW, sampleH);
+          const probeData = sCtx.getImageData(0, 0, sampleW, sampleH).data;
+          let diffSum = 0;
+          for (let p = 0; p < probeData.length; p += 4) {
+            const dr = Math.abs(lastData[p] - probeData[p]);
+            const dg = Math.abs(lastData[p + 1] - probeData[p + 1]);
+            const db = Math.abs(lastData[p + 2] - probeData[p + 2]);
+            diffSum += (dr + dg + db) / (3 * 255);
+          }
+          const meanDiff = diffSum / (probeData.length / 4);
+          return { matches: meanDiff <= 0.04, imgData: probeData };
+        };
+
+        if (direction === "forward" || direction === "both") {
+          let lastData = baseImgData;
+          for (let i = curIdx + 1; i < shots.length; i++) {
+            if (scanToken !== activeScanTokenRef.current) return;
+            const res = await checkMatch((shots[i].startSec + shots[i].endSec) / 2, lastData);
+            if (res.matches) {
+              lastData = res.imgData;
+              curEnd = shots[i].endSec;
+              setMasks((prev) =>
+                prev.map((b) => (b.id === mask.id ? { ...b, endUnit: curEnd } : b)),
+              );
+              await new Promise((r) => setTimeout(r, 16));
+            }
+            else {
+              break;
+            }
+          }
+        }
+
+        if (direction === "backward" || direction === "both") {
+          let lastData = baseImgData;
+          for (let i = curIdx - 1; i >= 0; i--) {
+            if (scanToken !== activeScanTokenRef.current) return;
+            const res = await checkMatch((shots[i].startSec + shots[i].endSec) / 2, lastData);
+            if (res.matches) {
+              lastData = res.imgData;
+              curStart = shots[i].startSec;
+              setMasks((prev) =>
+                prev.map((b) => (b.id === mask.id ? { ...b, startUnit: curStart } : b)),
+              );
+              await new Promise((r) => setTimeout(r, 16));
+            }
+            else {
+              break;
+            }
+          }
+        }
+      }
+      catch (err) {
+        console.warn("[editor] recalculateMaskSpan failed:", err);
+      }
+      finally {
+        if (scanToken === activeScanTokenRef.current) {
+          setTimeout(() => setExpandingMaskId(null), 250);
+        }
+      }
+    },
+    [activeShots, seekProbeVideo],
+  );
+
+  const onStagePointerUp = useCallback(() => {
+    if (drawingMask) {
+      const w = Math.abs(drawingMask.currentX - drawingMask.startX);
+      const h = Math.abs(drawingMask.currentY - drawingMask.startY);
+      if (w >= 0.02 && h >= 0.02) {
+        const curTime = videoRef.current?.currentTime ?? 0;
+        if (!canAddMaskAtTime(curTime, masksRef.current)) {
+          setDrawingMask(null);
+          setMaskLimitNotice("Maximum 3 overlapping masks allowed");
+          setTimeout(() => setMaskLimitNotice(null), 2500);
+          return;
+        }
+        const snappedTime = activeShots.length > 0
+          ? snapToNearestShotBoundary(curTime, activeShots, unitCount)
+          : curTime;
+        const lookupTime = Math.abs(curTime - snappedTime) < 0.05 ? snappedTime + 0.001 : curTime;
+        const shot = findShotAtTime(lookupTime, activeShots) ?? findShotAtTime(curTime, activeShots);
+        const safeStart = shot
+          ? shot.startSec
+          : Math.max(0, Math.min(Math.max(0, unitCount - 1), Math.floor(curTime)));
+        const safeEnd = shot
+          ? shot.endSec
+          : Math.max(safeStart + 1, Math.min(unitCount, safeStart + 1));
+        const newMask: UnitMaskRegion = {
+          id: `mask-${Math.random().toString(36).slice(2, 9)}`,
+          startUnit: safeStart,
+          endUnit: safeEnd,
+          x: Math.min(drawingMask.startX, drawingMask.currentX),
+          y: Math.min(drawingMask.startY, drawingMask.currentY),
+          width: w,
+          height: h,
+        };
+        setMasks((prev) => [...prev, newMask]);
+        setSelectedMaskId(newMask.id);
+        seekTo(computeSafeCursorTime(safeStart, safeEnd, curTime), true);
+        void scanRegionShots(newMask, curTime, true);
+      }
+      setDrawingMask(null);
+    }
+    if (maskDrag) {
+      const { id, initial } = maskDrag;
+      const b = masksRef.current.find((item) => item.id === id);
+      if (
+        b &&
+        (Math.abs(b.x - initial.x) > 0.005 ||
+          Math.abs(b.y - initial.y) > 0.005 ||
+          Math.abs(b.width - initial.width) > 0.005 ||
+          Math.abs(b.height - initial.height) > 0.005)
+      ) {
+        const curTime = videoRef.current?.currentTime ?? b.startUnit;
+        const adjustedMask: UnitMaskRegion = { ...b, startUnit: initial.startUnit, endUnit: initial.endUnit };
+        setMasks((prev) => prev.map((item) => (item.id === id ? adjustedMask : item)));
+        void scanRegionShots(adjustedMask, curTime, false);
+      }
+      setMaskDrag(null);
+    }
+  }, [drawingMask, maskDrag, unitCount, activeShots, seekTo, scanRegionShots]);
+
+  const onMaskTrackPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (saving) return;
+      seekTo(unitFromEvent(e));
+      setSelectedMaskId(null);
+      setSelected(null);
+    },
+    [saving, seekTo, unitFromEvent],
+  );
+
+  const onMaskSpanPointerDown = useCallback(
+    (
+      e: React.PointerEvent,
+      id: string,
+      dragType: "move" | "start" | "end",
+    ) => {
+      if (saving) return;
+      if (mode !== "mask") return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const b = masksRef.current.find((item) => item.id === id);
+      if (!b) return;
+
+      setSelectedMaskId(id);
+      setSelected(null);
+
+      const timelineEl = maskTrackRef.current || timelineRef.current;
+      if (!timelineEl) return;
+      const rect = timelineEl.getBoundingClientRect();
+      if (rect.width === 0) return;
+
+      const initialStart = b.startUnit;
+      const initialEnd = b.endUnit;
+      const initialWidth = Math.max(0.01, initialEnd - initialStart);
+      const startClientX = e.clientX;
+      const totalUnits = Math.max(1, unitCount);
+      let shiftHeld = e.shiftKey;
+      let hasDragged = false;
+
+      if (dragType === "end") {
+        seekTo(Math.max(b.startUnit + 0.005, b.endUnit - 0.05), true);
+      }
+      else {
+        seekTo(initialStart + 0.005, true);
+      }
+
+      const onWindowPointerMove = (ev: PointerEvent) => {
+        ev.preventDefault();
+        const deltaPx = ev.clientX - startClientX;
+        if (Math.abs(deltaPx) > 3) {
+          hasDragged = true;
+        }
+        if (!hasDragged) return;
+
+        shiftHeld = ev.shiftKey || shiftHeld;
+        const deltaUnits = (deltaPx / rect.width) * totalUnits;
+        const isPrecise = ev.shiftKey || shiftHeld;
+
+        if (dragType === "move") {
+          const rawStart = initialStart + deltaUnits;
+          let newStart = Math.max(0, Math.min(totalUnits - initialWidth, rawStart));
+          if (!isPrecise) {
+            const startShot = findShotAtTime(rawStart + 0.001, activeShots);
+            newStart = startShot ? startShot.startSec : snapToNearestShotBoundary(rawStart, activeShots, totalUnits);
+            newStart = Math.max(0, Math.min(totalUnits - initialWidth, newStart));
+          }
+          const newEnd = newStart + initialWidth;
+
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, startUnit: newStart, endUnit: newEnd } : item,
+            ),
+          );
+          seekTo(newStart + 0.005);
+        }
+        else if (dragType === "start") {
+          const rawStart = initialStart + deltaUnits;
+          let newStart = Math.max(0, Math.min(totalUnits - 0.02, rawStart));
+          if (!isPrecise) {
+            const shot = findShotAtTime(rawStart + 0.001, activeShots);
+            newStart = shot ? shot.startSec : snapToNearestShotBoundary(rawStart, activeShots, totalUnits);
+          }
+          let newEnd = initialEnd;
+          if (newStart >= initialEnd) {
+            newStart = Math.max(0, initialEnd - 0.02);
+          }
+
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, startUnit: newStart, endUnit: newEnd } : item,
+            ),
+          );
+          seekTo(newStart + 0.005);
+        }
+        else if (dragType === "end") {
+          const rawEnd = initialEnd + deltaUnits;
+          let newEnd = Math.min(totalUnits, Math.max(0.02, rawEnd));
+          if (!isPrecise) {
+            const shot = findShotAtTime(rawEnd - 0.001, activeShots);
+            newEnd = shot ? shot.endSec : snapToNearestShotBoundary(rawEnd, activeShots, totalUnits);
+          }
+          let newStart = initialStart;
+          if (newEnd <= initialStart) {
+            newEnd = Math.min(totalUnits, initialStart + 0.02);
+          }
+
+          setMasks((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, startUnit: newStart, endUnit: newEnd } : item,
+            ),
+          );
+          seekTo(Math.max(newStart + 0.005, newEnd - 0.05));
+        }
+      };
+
+      const onWindowPointerUp = (ev: PointerEvent) => {
+        ev.preventDefault();
+        window.removeEventListener("pointermove", onWindowPointerMove);
+        window.removeEventListener("pointerup", onWindowPointerUp);
+        window.removeEventListener("pointercancel", onWindowPointerUp);
+
+        if (!hasDragged) return;
+
+        const isPrecise = ev.shiftKey || shiftHeld;
+
+        setMasks((prev) =>
+          prev.map((item) => {
+            if (item.id !== id) return item;
+            let s: number;
+            let e: number;
+            if (isPrecise) {
+              s = Math.max(0, Math.min(totalUnits - 0.033, Math.round(item.startUnit * 10_000) / 10_000));
+              e = Math.max(s + 0.033, Math.min(totalUnits, Math.round(item.endUnit * 10_000) / 10_000));
+            }
+            else {
+              const startShot = findShotAtTime(item.startUnit + 0.001, activeShots);
+              const endShot = findShotAtTime(item.endUnit - 0.001, activeShots);
+              s = startShot ? startShot.startSec : snapToNearestShotBoundary(item.startUnit, activeShots, totalUnits);
+              e = endShot ? endShot.endSec : snapToNearestShotBoundary(item.endUnit, activeShots, totalUnits);
+              if (e <= s) {
+                const shot = findShotAtTime(s + 0.001, activeShots) ?? findShotAtTime(s, activeShots);
+                e = shot ? shot.endSec : Math.min(totalUnits, s + 1);
+              }
+            }
+            if (dragType === "end") {
+              seekTo(Math.max(s + 0.005, e - 0.05));
+            }
+            else {
+              seekTo(s + 0.005);
+            }
+            const updated = { ...item, startUnit: s, endUnit: e };
+            if (dragType === "end") {
+              void recalculateMaskSpan(updated, Math.max(s, e - 0.05), "forward");
+            }
+            else if (dragType === "start") {
+              void recalculateMaskSpan(updated, s + 0.05, "backward");
+            }
+            else if (dragType === "move") {
+              void recalculateMaskSpan(updated, s, "both");
+            }
+            return updated;
+          }),
+        );
+      };
+
+      window.addEventListener("pointermove", onWindowPointerMove);
+      window.addEventListener("pointerup", onWindowPointerUp);
+      window.addEventListener("pointercancel", onWindowPointerUp);
+    },
+    [saving, seekTo, unitCount, activeShots, mode, recalculateMaskSpan],
+  );
 
   // ── Keyboard ────────────────────────────────────────────────
   // Capture phase + preventDefault so hosting apps' global key handlers
@@ -735,22 +1888,51 @@ export function TimelapseEditor({
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === "0") {
+        e.preventDefault();
+        resetZoom();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        zoomIn();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "-" || e.key === "_")) {
+        e.preventDefault();
+        zoomOut();
+        return;
+      }
       if (e.metaKey || e.ctrlKey) return;
       if (e.key === " " || e.key === "k") {
         e.preventDefault();
         togglePlay();
-      } else if (e.key === "x" || e.key === "c") {
+      } else if ((e.key === "x" || e.key === "c") && mode === "cut") {
         e.preventDefault();
         cutHere();
+      } else if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        zoomIn();
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        zoomOut();
+      } else if (e.key === "0") {
+        e.preventDefault();
+        resetZoom();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        if (selected !== null) {
+        if (mode === "mask" && selectedMaskId !== null) {
+          setMasks((prev) => prev.filter((b) => b.id !== selectedMaskId));
+          setSelectedMaskId(null);
+        } else if (mode === "cut" && selected !== null) {
           setRegions((prev) => prev.filter((_, i) => i !== selected));
           setSelected(null);
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
         setSelected(null);
+        setSelectedMaskId(null);
+        setMaskMenuOpen(false);
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
         const step = e.shiftKey ? 10 : 1;
@@ -762,23 +1944,57 @@ export function TimelapseEditor({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [selected, seekTo, togglePlay, cutHere]);
+  }, [selected, selectedMaskId, seekTo, togglePlay, cutHere, zoomIn, zoomOut, resetZoom, mode]);
+
+  useEffect(() => {
+    if (!maskMenuOpen) return;
+    const onPointerDownOutside = (e: PointerEvent) => {
+      if (maskMenuRef.current && !maskMenuRef.current.contains(e.target as Node)) {
+        setMaskMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDownOutside);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDownOutside);
+    };
+  }, [maskMenuOpen]);
 
   // ── Publish ─────────────────────────────────────────────────
   const save = useCallback(async () => {
-    if (!data) return;
+    if (!data || saving) return;
     setSaving(true);
     setSaveError(null);
+    setSaveSuccess(false);
     try {
       const cuts = regionsToCuts(normalizeRegions(regionsRef.current), data.units);
-      await client.setCuts(cuts);
+      const masksList = unitMasksToMasks(masksRef.current, data.units);
+      await client.setCuts(cuts, masksList);
       const result = await client.applyCuts();
+      if (!result.instant && result.status === "compiling") {
+        const pollStart = Date.now();
+        const maxWaitMs = 60_000;
+        while (Date.now() - pollStart < maxWaitMs) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          try {
+            const st = await client.getStatus();
+            if (st.status === "complete") break;
+            if (st.status === "failed") throw new Error("Compilation failed on server");
+            if (!st.editable && st.status !== "compiling") break;
+          }
+          catch (pollErr) {
+            if (pollErr instanceof Error && pollErr.message.includes("Compilation failed")) throw pollErr;
+          }
+        }
+      }
+      setSaveSuccess(true);
+      setSaving(false);
       onApplied?.(result);
-    } catch (err) {
+    }
+    catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
       setSaving(false);
     }
-  }, [client, data, onApplied]);
+  }, [client, data, saving, onApplied]);
 
   // ── Derived display values ──────────────────────────────────
   const normalized = useMemo(() => normalizeRegions(regions), [regions]);
@@ -800,6 +2016,50 @@ export function TimelapseEditor({
     [unitTimesMs, serializedCuts],
   );
   const keptUnits = unitCount - removedUnits;
+  const totalMaskedSec = useMemo(() => {
+    if (masks.length === 0 || unitCount === 0) return 0;
+    const intervals: Array<[number, number]> = masks.map((b) => [
+      Math.max(0, b.startUnit),
+      Math.min(unitCount, b.endUnit),
+    ]);
+    intervals.sort((a, b) => a[0] - b[0]);
+    let mergedUnits = 0;
+    let curInterval: [number, number] | null = null;
+    for (const [start, end] of intervals) {
+      if (!curInterval) {
+        curInterval = [start, end];
+      }
+      else if (start <= curInterval[1]) {
+        curInterval[1] = Math.max(curInterval[1], end);
+      }
+      else {
+        mergedUnits += Math.max(0, curInterval[1] - curInterval[0]);
+        curInterval = [start, end];
+      }
+    }
+    if (curInterval) {
+      mergedUnits += Math.max(0, curInterval[1] - curInterval[0]);
+    }
+    return mergedUnits * 60;
+  }, [masks, unitCount]);
+
+  const [flowMaskedSec, setFlowMaskedSec] = useState(0);
+  useEffect(() => {
+    const target = Math.max(0, Math.round(totalMaskedSec));
+    if (target === 0) {
+      setFlowMaskedSec(0);
+      return;
+    }
+    const raf = requestAnimationFrame(() => {
+      setFlowMaskedSec(target);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [totalMaskedSec]);
+
+  const selectedMask = useMemo(
+    () => masks.find((b) => b.id === selectedMaskId) ?? null,
+    [masks, selectedMaskId],
+  );
   const allCut = unitCount > 0 && keptUnits === 0;
   const gaps = useMemo(() => (data ? gapIndices(data.units) : []), [data]);
   const step = useMemo(
@@ -823,6 +2083,19 @@ export function TimelapseEditor({
       JSON.stringify(serializedCuts) !== saved,
     );
   }, [serializedCuts, data]);
+
+  const onMasksChangeRef = useRef(onMasksChange);
+  onMasksChangeRef.current = onMasksChange;
+  const onBlursChangeRef = useRef(onBlursChange);
+  onBlursChangeRef.current = onBlursChange;
+  useEffect(() => {
+    if (!data) return;
+    const serializedMasks = unitMasksToMasks(masks, data.units);
+    const saved = JSON.stringify(data.masks ?? (data as any).blurs ?? []);
+    const isDirty = JSON.stringify(serializedMasks) !== saved;
+    onMasksChangeRef.current?.(serializedMasks, isDirty);
+    onBlursChangeRef.current?.(serializedMasks, isDirty);
+  }, [masks, data]);
 
   // ── Render ──────────────────────────────────────────────────
   if (loadError) {
@@ -893,19 +2166,21 @@ export function TimelapseEditor({
 
   return (
     <div
+      ref={containerRef}
       style={{
         height: "100%",
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        gap: spacing.md,
+        gap: rootGap,
       }}
     >
-      {/* ── Stage: the only row that flexes ──────────────────── */}
+      {/* ── Stage: shrinks into whatever space the dock leaves ── */}
       <div
         style={{
           flex: "1 1 auto",
           minHeight: 0,
+          minWidth: 0,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -916,27 +2191,323 @@ export function TimelapseEditor({
           overflow: "hidden",
         }}
       >
-        <video
-          ref={videoRef}
-          src={data.originalVideoUrl ?? undefined}
-          playsInline
-          muted
-          onClick={togglePlay}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          // max-* rather than width:100% is what lets the stage shrink:
-          // the video letterboxes into whatever height is left instead of
-          // forcing the dock off the bottom of the window.
+        <div
+          ref={videoBoxRef}
           style={{
+            position: "relative",
+            aspectRatio: videoAspect ? `${videoAspect}` : "16 / 9",
+            // max-* rather than width:100% is what lets the stage shrink:
+            // the video letterboxes into whatever height is left instead of
+            // forcing the dock off the bottom of the window.
             maxWidth: "100%",
             maxHeight: "100%",
-            display: "block",
-            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            isolation: "isolate",
+            transform: "translateZ(0)",
           }}
-        />
+        >
+          <video
+            ref={videoRef}
+            src={data.originalVideoUrl ?? undefined}
+            playsInline
+            muted
+            onClick={mode === "cut" ? togglePlay : undefined}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (v.videoWidth && v.videoHeight) {
+                setVideoAspect(v.videoWidth / v.videoHeight);
+              }
+            }}
+            style={{
+              width: "100%",
+              height: "100%",
+              maxWidth: "100%",
+              maxHeight: "100%",
+              display: "block",
+              objectFit: "contain",
+              cursor: mode === "cut" ? "pointer" : "crosshair",
+            }}
+          />
+
+          {/* Mask overlay layer directly on the video */}
+          <div
+            ref={overlayRef}
+            onPointerDown={mode === "mask" ? onStagePointerDown : undefined}
+            onPointerMove={mode === "mask" ? onStagePointerMove : undefined}
+            onPointerUp={mode === "mask" ? onStagePointerUp : undefined}
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: mode === "mask" ? "auto" : "none",
+              cursor: mode === "mask" ? "crosshair" : "default",
+              userSelect: "none",
+              touchAction: "none",
+            }}
+          >
+            {mode === "mask" && masks.length === 0 && !drawingMask && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  padding: "4px 10px",
+                  borderRadius: 9999,
+                  background: "rgba(0, 0, 0, 0.65)",
+                  backdropFilter: "blur(8px)",
+                  WebkitBackdropFilter: "blur(8px)",
+                  color: "#fff",
+                  fontSize: fontSize.xs,
+                  fontWeight: fontWeight.medium,
+                  pointerEvents: "none",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span>Click and drag on video to mask an area</span>
+              </div>
+            )}
+            {masks.map((b) => {
+              const isSelected = selectedMaskId === b.id && mode === "mask";
+              const isActive = isMaskActiveAtTime(time, b);
+              if (!isActive) return null;
+              const trackIdx = trackAllocation.assignments[b.id] ?? 0;
+              const preset = TRACK_PRESETS[trackIdx] ?? TRACK_PRESETS[0];
+
+              return (
+                <div
+                  key={b.id}
+                  className="lk-ed-mask-box"
+                  onPointerDown={
+                    mode === "mask"
+                      ? (e) => onMaskBoxPointerDown(e, b.id, "move")
+                      : undefined
+                  }
+                  style={{
+                    position: "absolute",
+                    left: `${b.x * 100}%`,
+                    top: `${b.y * 100}%`,
+                    width: `${b.width * 100}%`,
+                    height: `${b.height * 100}%`,
+                    backdropFilter: "blur(12px)",
+                    WebkitBackdropFilter: "blur(12px)",
+                    transform: "translate3d(0, 0, 0)",
+                    backgroundColor: isSelected ? preset.bgSelected : preset.bgUnselected,
+                    borderRadius: 8,
+                    border: isSelected
+                      ? `2px solid ${preset.border}`
+                      : `1.5px solid ${preset.border}`,
+                    boxShadow: isSelected
+                      ? `inset 0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 16px ${preset.color}66`
+                      : "inset 0 0 0 1px rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0,0,0,0.25)",
+                    cursor:
+                      mode === "mask"
+                        ? isSelected
+                          ? "move"
+                          : "pointer"
+                        : "default",
+                    pointerEvents: mode === "mask" ? "auto" : "none",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  {isSelected && (
+                    <>
+                      {(["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((handle) => {
+                        const style: React.CSSProperties = {
+                          position: "absolute",
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: "#fff",
+                          border: `2px solid ${preset.border}`,
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                          zIndex: 10,
+                        };
+                        if (handle === "nw") {
+                          style.top = -5;
+                          style.left = -5;
+                          style.cursor = "nwse-resize";
+                        }
+                        else if (handle === "n") {
+                          style.top = -5;
+                          style.left = "calc(50% - 5px)";
+                          style.cursor = "ns-resize";
+                        }
+                        else if (handle === "ne") {
+                          style.top = -5;
+                          style.right = -5;
+                          style.cursor = "nesw-resize";
+                        }
+                        else if (handle === "e") {
+                          style.top = "calc(50% - 5px)";
+                          style.right = -5;
+                          style.cursor = "ew-resize";
+                        }
+                        else if (handle === "se") {
+                          style.bottom = -5;
+                          style.right = -5;
+                          style.cursor = "nwse-resize";
+                        }
+                        else if (handle === "s") {
+                          style.bottom = -5;
+                          style.left = "calc(50% - 5px)";
+                          style.cursor = "ns-resize";
+                        }
+                        else if (handle === "sw") {
+                          style.bottom = -5;
+                          style.left = -5;
+                          style.cursor = "nesw-resize";
+                        }
+                        else {
+                          style.top = "calc(50% - 5px)";
+                          style.left = -5;
+                          style.cursor = "ew-resize";
+                        }
+                        return (
+                          <div
+                            key={handle}
+                            onPointerDown={(e) =>
+                              onMaskBoxPointerDown(e, b.id, handle)
+                            }
+                            style={style}
+                          />
+                        );
+                      })}
+
+                      <div
+                        onPointerDown={(e) => e.stopPropagation()}
+                        style={{
+                          position: "absolute",
+                          top: 6,
+                          left: 6,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          padding: "2px 6px 2px 8px",
+                          borderRadius: 9999,
+                          background: "#2563eb",
+                          color: "#ffffff",
+                          fontSize: 10,
+                          fontWeight: fontWeight.semibold,
+                          fontVariantNumeric: "tabular-nums",
+                          letterSpacing: "0.01em",
+                          boxShadow: "0 1px 4px rgba(0, 0, 0, 0.4)",
+                          zIndex: 12,
+                          pointerEvents: "auto",
+                          userSelect: "none",
+                        }}
+                      >
+                        <span>Mask {trackIdx + 1}</span>
+                        <button
+                          type="button"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMasks((prev) =>
+                              prev.filter((item) => item.id !== b.id),
+                            );
+                            setSelectedMaskId(null);
+                          }}
+                          style={{
+                            background: "rgba(255, 255, 255, 0.2)",
+                            border: "none",
+                            color: "#ffffff",
+                            cursor: "pointer",
+                            width: 13,
+                            height: 13,
+                            borderRadius: "50%",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            padding: 0,
+                            lineHeight: 1,
+                            transition: "background 0.1s",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "rgba(255, 255, 255, 0.4)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "rgba(255, 255, 255, 0.2)";
+                          }}
+                          title="Delete mask"
+                          aria-label="Delete mask"
+                        >
+                          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+
+            {drawingMask && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: `${Math.min(drawingMask.startX, drawingMask.currentX) * 100}%`,
+                  top: `${Math.min(drawingMask.startY, drawingMask.currentY) * 100}%`,
+                  width: `${Math.abs(drawingMask.currentX - drawingMask.startX) * 100}%`,
+                  height: `${Math.abs(drawingMask.currentY - drawingMask.startY) * 100}%`,
+                  border: `2px dashed ${TRACK_PRESETS[drawingTrackIdx]?.border ?? colors.accent.base}`,
+                  backgroundColor: TRACK_PRESETS[drawingTrackIdx]?.bgSelected ?? "rgba(59, 130, 246, 0.25)",
+                  boxShadow: `0 0 16px ${TRACK_PRESETS[drawingTrackIdx]?.color ?? colors.accent.base}44`,
+                  backdropFilter: "blur(4px)",
+                  WebkitBackdropFilter: "blur(4px)",
+                  borderRadius: 6,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+
+            {maskLimitNotice && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 16,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  padding: "6px 14px",
+                  borderRadius: radii.md,
+                  background: "rgba(220, 38, 38, 0.92)",
+                  backdropFilter: "blur(8px)",
+                  WebkitBackdropFilter: "blur(8px)",
+                  color: "#ffffff",
+                  fontSize: fontSize.xs,
+                  fontWeight: fontWeight.semibold,
+                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  zIndex: 50,
+                  pointerEvents: "none",
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{maskLimitNotice}</span>
+              </div>
+            )}
+          </div>
+        </div>
 
         <AnimatePresence>
-          {!playing && (
+          {!playing && mode === "cut" && (
             <motion.div
               initial={{ opacity: 0, scale: 0.88 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -953,8 +2524,8 @@ export function TimelapseEditor({
             >
               <div
                 style={{
-                  width: 56,
-                  height: 56,
+                  width: playOverlaySize,
+                  height: playOverlaySize,
                   borderRadius: "50%",
                   background: "rgba(0,0,0,0.55)",
                   backdropFilter: "blur(12px)",
@@ -964,7 +2535,13 @@ export function TimelapseEditor({
                   justifyContent: "center",
                 }}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
+                <svg
+                  width={isVeryShort ? 14 : isShort ? 16 : 20}
+                  height={isVeryShort ? 14 : isShort ? 16 : 20}
+                  viewBox="0 0 24 24"
+                  fill="#fff"
+                  aria-hidden="true"
+                >
                   <path d="M8 5v14l11-7z" />
                 </svg>
               </div>
@@ -1017,14 +2594,17 @@ export function TimelapseEditor({
       </div>
 
       {/* ── Dock: transport, timeline, actions ───────────────── */}
-      <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: spacing.sm }}>
+      <div
+        ref={timelineAreaRef}
+        style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: dockGap }}
+      >
         {/* Transport */}
-        <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
+        <div style={{ display: "flex", alignItems: "center", gap: isNarrow ? 6 : spacing.sm, minHeight: isShort ? 26 : 30 }}>
           <button
             className="lk-ed-iconbtn"
             onClick={togglePlay}
             aria-label={playing ? "Pause" : "Play"}
-            style={{ width: 30, height: 30, borderRadius: radii.md }}
+            style={{ width: isShort ? 26 : 30, height: isShort ? 26 : 30, borderRadius: radii.md }}
           >
             {playing ? (
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -1039,32 +2619,291 @@ export function TimelapseEditor({
 
           <div
             style={{
-              fontSize: fontSize.md,
+              fontSize: isNarrow ? fontSize.sm : fontSize.md,
               color: colors.text.primary,
               fontVariantNumeric: "tabular-nums",
               letterSpacing: "-0.01em",
+              whiteSpace: "nowrap",
             }}
           >
             {elapsedLabel(currentUnit, unitCount)}
             <span style={{ color: colors.text.tertiary }}>
-              {" of "}
+              {isTinyWidth ? " / " : " of "}
               {elapsedLabel(unitCount, unitCount)}
-              {" · recorded at "}
-              {unitClockLabel(units[currentUnit])}
+              {units[currentUnit] && (
+                <>
+                  {isNarrow ? " · " : " · recorded at "}
+                  {unitClockLabel(units[currentUnit])}
+                </>
+              )}
             </span>
           </div>
 
-          <div style={{ flex: 1 }} />
+          {/* Center region: Hold Shift precision indicator */}
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              minWidth: 0,
+              padding: "0 8px",
+            }}
+          >
+            <AnimatePresence>
+              {!isNarrow && mode === "mask" && isTimelineHovered && masks.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.95 }}
+                  transition={{ duration: 0.15 }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: isShort ? "1px 6px" : "2px 8px",
+                    borderRadius: 9999,
+                    background: colors.bg.sunken,
+                    border: `1px solid ${colors.border.default}`,
+                    color: colors.text.tertiary,
+                    fontSize: fontSize.xs,
+                    fontWeight: fontWeight.medium,
+                    userSelect: "none",
+                    whiteSpace: "nowrap",
+                    letterSpacing: "-0.01em",
+                  }}
+                  title="Hold Shift while dragging mask handles for frame precision without snapping."
+                >
+                  <kbd
+                    style={{
+                      fontFamily: "inherit",
+                      fontSize: 10,
+                      fontWeight: fontWeight.semibold,
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                      background: colors.bg.surface,
+                      border: `1px solid ${colors.border.hover}`,
+                      color: colors.text.secondary,
+                      boxShadow: "0 1px 2px rgba(0, 0, 0, 0.08)",
+                    }}
+                  >
+                    ⇧ Shift
+                  </kbd>
+                  <span>for precise control</span>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
+          {/* Mode Switcher */}
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              background: colors.bg.sunken,
+              border: `1px solid ${colors.border.default}`,
+              borderRadius: radii.md,
+              padding: isShort ? 1 : 2,
+              gap: isShort ? 1 : 2,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setMode("cut");
+                setSelectedMaskId(null);
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: isNarrow ? 3 : 5,
+                padding: isShort ? "2px 6px" : isNarrow ? "2px 7px" : "3px 10px",
+                fontSize: fontSize.xs,
+                fontWeight: fontWeight.semibold,
+                borderRadius: radii.sm,
+                border: "none",
+                cursor: "pointer",
+                background: mode === "cut" ? colors.bg.surface : "transparent",
+                color: mode === "cut" ? colors.text.primary : colors.text.secondary,
+                boxShadow: mode === "cut" ? "0 1px 2px rgba(0,0,0,0.2)" : "none",
+                transition: "all 120ms ease",
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="6" cy="6" r="3" />
+                <circle cx="6" cy="18" r="3" />
+                <line x1="20" y1="4" x2="8.12" y2="15.88" />
+                <line x1="14.47" y1="14.48" x2="20" y2="20" />
+                <line x1="8.12" y1="8.12" x2="12" y2="12" />
+              </svg>
+              Cut
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode("mask");
+                setSelected(null);
+                videoRef.current?.pause();
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: isNarrow ? 3 : 5,
+                padding: isShort ? "2px 6px" : isNarrow ? "2px 7px" : "3px 10px",
+                fontSize: fontSize.xs,
+                fontWeight: fontWeight.semibold,
+                borderRadius: radii.sm,
+                border: "none",
+                cursor: "pointer",
+                background: mode === "mask" ? colors.bg.surface : "transparent",
+                color: mode === "mask" ? colors.text.primary : colors.text.secondary,
+                boxShadow: mode === "mask" ? "0 1px 2px rgba(0,0,0,0.2)" : "none",
+                transition: "all 120ms ease",
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="8" height="8" rx="1" fill="currentColor" />
+                <rect x="13" y="3" width="8" height="8" rx="1" fill="currentColor" opacity="0.35" />
+                <rect x="3" y="13" width="8" height="8" rx="1" fill="currentColor" opacity="0.35" />
+                <rect x="13" y="13" width="8" height="8" rx="1" fill="currentColor" />
+              </svg>
+              Mask
+            </button>
+          </div>
+
+          {/* Zoom controls */}
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              background: colors.bg.sunken,
+              border: `1px solid ${colors.border.default}`,
+              borderRadius: radii.md,
+              padding: isShort ? 1 : 2,
+              gap: 1,
+            }}
+          >
+            <button
+              type="button"
+              onClick={zoomOut}
+              disabled={zoom <= 1}
+              title="Zoom out (- / Scroll wheel down)"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: isShort ? 20 : 22,
+                height: isShort ? 20 : 22,
+                borderRadius: radii.sm,
+                border: "none",
+                background: "transparent",
+                color: zoom <= 1 ? colors.text.quaternary : colors.text.secondary,
+                cursor: zoom <= 1 ? "not-allowed" : "pointer",
+                padding: 0,
+                transition: "all 120ms ease",
+              }}
+              onMouseEnter={(e) => {
+                if (zoom > 1) e.currentTarget.style.background = colors.bg.surface;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={resetZoom}
+              title={zoom > 1 ? "Click to reset zoom to 1x (Cmd/Ctrl+0)" : "Zoom level"}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: isShort ? "1px 4px" : "2px 6px",
+                fontSize: 10,
+                fontWeight: fontWeight.semibold,
+                fontVariantNumeric: "tabular-nums",
+                borderRadius: radii.sm,
+                border: "none",
+                background: zoom > 1 ? colors.bg.surface : "transparent",
+                color: zoom > 1 ? colors.accent.base : colors.text.tertiary,
+                cursor: zoom > 1 ? "pointer" : "default",
+                transition: "all 120ms ease",
+              }}
+            >
+              {zoom.toFixed(zoom % 1 === 0 ? 0 : 1)}x
+            </button>
+            <button
+              type="button"
+              onClick={zoomIn}
+              disabled={zoom >= 16}
+              title="Zoom in (+ / Scroll wheel up)"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: isShort ? 20 : 22,
+                height: isShort ? 20 : 22,
+                borderRadius: radii.sm,
+                border: "none",
+                background: "transparent",
+                color: zoom >= 16 ? colors.text.quaternary : colors.text.secondary,
+                cursor: zoom >= 16 ? "not-allowed" : "pointer",
+                padding: 0,
+                transition: "all 120ms ease",
+              }}
+              onMouseEnter={(e) => {
+                if (zoom < 16) e.currentTarget.style.background = colors.bg.surface;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
-        {/* Timeline */}
+        {/* Timeline Track & Overlay Container (Zero flow shift) */}
         <div
-          style={{ position: "relative", userSelect: "none", touchAction: "none" }}
+          style={{
+            position: "relative",
+            width: "100%",
+          }}
+          onPointerEnter={() => setIsTimelineHovered(true)}
+          onPointerLeave={() => setIsTimelineHovered(false)}
+        >
+          {/* Timeline Scroll Container */}
+          <div
+            ref={timelineScrollRef}
+          className="lk-ed-scroll-track"
+          style={{
+            position: "relative",
+            width: "100%",
+            overflowX: zoom > 1 ? "auto" : "hidden",
+            overflowY: "hidden",
+            userSelect: "none",
+            touchAction: "pan-x",
+            borderRadius: radii.md,
+          }}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
+          {/* Scaled Timeline Inner Content */}
+          <div
+            style={{
+              position: "relative",
+              width: `${zoom * 100}%`,
+              minWidth: "100%",
+            }}
+          >
           {/* Playhead: a slim cap at the foot of the ruler with a stem
               through the strip. Rendered as a sibling of both lanes (not
               inside the strip) so it isn't clipped by its overflow. */}
@@ -1078,6 +2917,8 @@ export function TimelapseEditor({
                 width: 0,
                 zIndex: 3,
                 pointerEvents: "none",
+                transition: isSmoothSeek ? "left 0.28s cubic-bezier(0.16, 1, 0.3, 1)" : "none",
+                willChange: isSmoothSeek ? "left" : "auto",
               }}
             >
               <div
@@ -1085,7 +2926,7 @@ export function TimelapseEditor({
                 aria-hidden="true"
                 style={{
                   position: "absolute",
-                  top: RULER_HEIGHT - HEAD_H,
+                  top: rulerHeight - HEAD_H,
                   left: -HEAD_HIT / 2,
                   width: HEAD_HIT,
                   height: HEAD_HIT,
@@ -1110,7 +2951,7 @@ export function TimelapseEditor({
               <div
                 style={{
                   position: "absolute",
-                  top: RULER_HEIGHT - 4,
+                  top: rulerHeight - 4,
                   bottom: 0,
                   left: -1,
                   width: 2,
@@ -1127,7 +2968,7 @@ export function TimelapseEditor({
             onPointerDown={onRulerPointerDown}
             style={{
               position: "relative",
-              height: RULER_HEIGHT,
+              height: rulerHeight,
               cursor: "ew-resize",
             }}
           >
@@ -1164,7 +3005,7 @@ export function TimelapseEditor({
                       bottom: 0,
                       left: unit === 0 ? 0 : unit >= unitCount ? -1 : -0.5,
                       width: 1,
-                      height: major ? 7 : 4,
+                      height: major ? (isShort ? 5 : 7) : (isShort ? 3 : 4),
                       background: major
                         ? colors.text.tertiary
                         : colors.text.quaternary,
@@ -1182,14 +3023,18 @@ export function TimelapseEditor({
             className="lk-ed-strip"
             tabIndex={0}
             role="group"
-            aria-label="Timelapse timeline. Drag to remove a stretch of time."
+            aria-label={
+              mode === "mask"
+                ? "Timelapse timeline. Drag or click to scrub video frames."
+                : "Timelapse timeline. Drag to remove a stretch of time."
+            }
             onPointerDown={onTimelinePointerDown}
             style={{
               position: "relative",
-              height: STRIP_HEIGHT,
+              height: stripHeight,
               borderRadius: radii.md,
               overflow: "hidden",
-              cursor: "crosshair",
+              cursor: mode === "mask" ? "ew-resize" : "crosshair",
               background: colors.editor.track,
               border: `1px solid ${colors.border.default}`,
             }}
@@ -1248,7 +3093,7 @@ export function TimelapseEditor({
                 <div
                   key={i}
                   className="lk-ed-region"
-                  onPointerDown={(e) => onRegionPointerDown(e, i, "move")}
+                  onPointerDown={mode === "cut" ? (e) => onRegionPointerDown(e, i, "move") : undefined}
                   style={{
                     position: "absolute",
                     left: pct(r.startUnit),
@@ -1261,21 +3106,22 @@ export function TimelapseEditor({
                     // the hatch layered on top of it.
                     backgroundColor: colors.editor.cutFill,
                     backgroundImage: hatch(10),
-                    boxShadow: isSelected
+                    boxShadow: isSelected && mode === "cut"
                       ? `inset 0 0 0 2px ${colors.editor.cutBorder}`
                       : `inset 0 0 0 1px ${colors.editor.cutBorder}`,
-                    cursor: "grab",
+                    cursor: mode === "cut" ? "grab" : "default",
+                    pointerEvents: mode === "cut" ? "auto" : "none",
                     boxSizing: "border-box",
                   }}
                 >
-                  {[
+                  {mode === "cut" && [
                     { mode: "start" as const, side: { left: -6 } },
                     { mode: "end" as const, side: { right: -6 } },
-                  ].map(({ mode, side }) => (
+                  ].map(({ mode: handleMode, side }) => (
                     <div
-                      key={mode}
+                      key={handleMode}
                       className="lk-ed-handle"
-                      onPointerDown={(e) => onRegionPointerDown(e, i, mode)}
+                      onPointerDown={(e) => onRegionPointerDown(e, i, handleMode)}
                       style={{
                         position: "absolute",
                         top: 0,
@@ -1304,6 +3150,339 @@ export function TimelapseEditor({
             })}
 
           </div>
+
+          {/* Stacked Mask Tracks */}
+          <AnimatePresence initial={false}>
+            {masks.length > 0 && (
+              <motion.div
+                key="timeline-mask-tracks-container"
+                ref={maskTrackRef}
+                tabIndex={0}
+                role="group"
+                aria-label="Mask timeline tracks. Drag mask regions to adjust their duration."
+                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                animate={{
+                  opacity: 1,
+                  height: trackAllocation.trackCount * maskTrackHeight + (trackAllocation.trackCount - 1) * (isShort ? 2 : 4),
+                  marginTop: isShort ? 2 : 4,
+                }}
+                exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                style={{
+                  position: "relative",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: isShort ? 2 : 4,
+                }}
+              >
+                {Array.from({ length: trackAllocation.trackCount }).map((_, trackIdx) => {
+                  const preset = TRACK_PRESETS[trackIdx] ?? TRACK_PRESETS[0];
+                  const trackMasks = trackAllocation.tracks[trackIdx] ?? [];
+                  return (
+                    <div
+                      key={`mask-track-${trackIdx}`}
+                      data-track-index={trackIdx}
+                      onPointerDown={onMaskTrackPointerDown}
+                      style={{
+                        position: "relative",
+                        height: maskTrackHeight,
+                        borderRadius: radii.sm,
+                        background: colors.editor.track,
+                        border: `1px solid ${preset.border}44`,
+                        cursor: "pointer",
+                        overflow: "hidden",
+                      }}
+                    >
+                      {activeShots?.map((s) => (
+                        <div
+                          key={s.id}
+                          style={{
+                            position: "absolute",
+                            left: pct(s.startSec),
+                            top: 0,
+                            bottom: 0,
+                            width: 1,
+                            backgroundColor: "rgba(255, 255, 255, 0.08)",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      ))}
+
+                      {trackMasks.map((b) => {
+                        const isSelected = selectedMaskId === b.id && mode === "mask";
+                        const isExpanding = expandingMaskId === b.id;
+                        const durationSec = Math.max(0.01, b.endUnit - b.startUnit);
+                        const totalUnits = Math.max(1, unitCount);
+                        const widthRatio = durationSec / totalUnits;
+                        const shotsCovered = activeShots?.filter(
+                          (s) => s.startSec >= b.startUnit - 0.001 && s.endSec <= b.endUnit + 0.001,
+                        ).length;
+                        const shotCount =
+                          shotsCovered && shotsCovered > 0
+                            ? shotsCovered
+                            : Math.max(1, Math.round(durationSec));
+                        return (
+                          <div
+                            key={b.id}
+                            className="lk-ed-mask-span"
+                            onPointerDown={mode === "mask" ? (e) => onMaskSpanPointerDown(e, b.id, "move") : undefined}
+                            title={
+                              mode === "mask"
+                                ? `Mask: ${durationSec.toFixed(1)}s (${shotCount} shot${shotCount === 1 ? "" : "s"}). Hold Shift while dragging for precise control.`
+                                : `Mask: ${durationSec.toFixed(1)}s (${shotCount} shot${shotCount === 1 ? "" : "s"}). Switch to Mask tab to edit.`
+                            }
+                            style={{
+                              position: "absolute",
+                              left: pct(b.startUnit),
+                              width: pct(durationSec),
+                              minWidth: 8,
+                              top: 2,
+                              bottom: 2,
+                              borderRadius: radii.sm,
+                              backgroundColor: isExpanding
+                                ? preset.bgSelected
+                                : isSelected
+                                  ? preset.bgSelected
+                                  : mode === "mask"
+                                    ? preset.bgUnselected
+                                    : `${preset.color}33`,
+                              border: `1px solid ${
+                                isExpanding
+                                  ? preset.border
+                                  : isSelected
+                                    ? preset.border
+                                    : mode === "mask"
+                                      ? preset.border
+                                      : `${preset.border}55`
+                              }`,
+                              boxShadow: isExpanding
+                                ? `0 0 12px ${preset.color}, 0 0 0 1px ${preset.border}`
+                                : isSelected
+                                  ? `0 0 8px ${preset.color}99, 0 0 0 1px ${preset.border}`
+                                  : undefined,
+                              cursor: mode === "mask" ? "grab" : "default",
+                              pointerEvents: mode === "mask" ? "auto" : "none",
+                              boxSizing: "border-box",
+                              transition: isExpanding
+                                ? "left 0.22s cubic-bezier(0.16, 1, 0.3, 1), width 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s, border-color 0.15s, box-shadow 0.15s"
+                                : "background-color 0.15s, border-color 0.15s",
+                            }}
+                          >
+                            <span
+                              style={{
+                                position: "absolute",
+                                inset: 0,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: 10,
+                                fontWeight: fontWeight.bold,
+                                fontVariantNumeric: "tabular-nums",
+                                letterSpacing: "-0.01em",
+                                color: colors.text.primary,
+                                pointerEvents: "none",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                padding: "0 6px",
+                                zIndex: 1,
+                              }}
+                            >
+                              {isExpanding
+                                ? "Scanning…"
+                                : widthRatio >= 0.03
+                                  ? "Mask"
+                                  : ""}
+                            </span>
+
+                            {mode === "mask" && [
+                              { mode: "start" as const, pos: { left: 0 } },
+                              { mode: "end" as const, pos: { left: "100%" } },
+                            ].map(({ mode: handleMode, pos }) => (
+                              <div
+                                key={handleMode}
+                                className="lk-ed-mask-handle"
+                                onPointerDown={(e) => onMaskSpanPointerDown(e, b.id, handleMode)}
+                                title="Drag handle to extend mask across shots (Hold Shift for frame precision)"
+                                style={{
+                                  position: "absolute",
+                                  top: -3,
+                                  bottom: -3,
+                                  width: 12,
+                                  ...pos,
+                                  transform: "translateX(-50%)",
+                                  cursor: "ew-resize",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  zIndex: 10,
+                                  touchAction: "none",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: 3,
+                                    height: "100%",
+                                    maxHeight: isShort ? 14 : 18,
+                                    borderRadius: 1.5,
+                                    background: isSelected ? "#ffffff" : preset.handleColor,
+                                    boxShadow: "0 0 2px rgba(0,0,0,0.7), 0 1px 3px rgba(0,0,0,0.5)",
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+
+          {/* VS Code Style Minimap / Horizontal Overview Map */}
+          <AnimatePresence initial={false}>
+            {zoom > 1 && (
+              <motion.div
+                key="timeline-minimap"
+                onPointerDown={onMinimapPointerDown}
+                role="scrollbar"
+                aria-label="Timeline zoom overview"
+                aria-valuenow={Math.round(scrollProgress * 100)}
+                title="Timeline zoom overview. Click or drag to pan."
+                initial={{ opacity: 0, y: 3 }}
+                animate={{
+                  opacity: isTimelineHovered || isMinimapDragging ? 1 : 0.4,
+                  y: 0,
+                }}
+                exit={{ opacity: 0, y: 3 }}
+                transition={{ duration: 0.15 }}
+                style={{
+                  position: "absolute",
+                  bottom: 2,
+                  left: 6,
+                  right: 6,
+                  height: isTimelineHovered || isMinimapDragging ? (isShort ? 8 : 10) : (isShort ? 5 : 6),
+                  zIndex: 15,
+                  borderRadius: 3,
+                  background: isTimelineHovered || isMinimapDragging
+                    ? "color-mix(in srgb, var(--color-bg-sunken) 50%, transparent)"
+                    : "color-mix(in srgb, var(--color-bg-sunken) 20%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--color-border-default) 40%, transparent)",
+                  cursor: "pointer",
+                  userSelect: "none",
+                  touchAction: "none",
+                  overflow: "hidden",
+                  transition: "height 0.15s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.15s ease, background 0.15s ease",
+                }}
+              >
+                {/* Cut regions overview */}
+                {unitCount > 0 &&
+                  normalized.map((r, i) => {
+                    const leftPct = (r.startUnit / unitCount) * 100;
+                    const widthPct = Math.max(0.5, ((r.endUnit - r.startUnit) / unitCount) * 100);
+                    return (
+                      <div
+                        key={`map-cut-${i}`}
+                        style={{
+                          position: "absolute",
+                          left: `${leftPct}%`,
+                          width: `${widthPct}%`,
+                          top: 1,
+                          bottom: 1,
+                          borderRadius: 1,
+                          background: colors.editor.cutBorder,
+                          opacity: 0.65,
+                          pointerEvents: "none",
+                          zIndex: 1,
+                        }}
+                      />
+                    );
+                  })}
+
+                {/* Mask regions overview */}
+                {unitCount > 0 &&
+                  masks.map((b) => {
+                    const leftPct = (b.startUnit / unitCount) * 100;
+                    const widthPct = Math.max(0.5, ((b.endUnit - b.startUnit) / unitCount) * 100);
+                    const isSelected = selectedMaskId === b.id && mode === "mask";
+                    return (
+                      <div
+                        key={`map-mask-${b.id}`}
+                        style={{
+                          position: "absolute",
+                          left: `${leftPct}%`,
+                          width: `${widthPct}%`,
+                          top: 1,
+                          bottom: 1,
+                          borderRadius: 1,
+                          background: colors.accent.base,
+                          opacity: isSelected ? 0.95 : 0.7,
+                          boxShadow: isSelected ? `0 0 4px ${colors.accent.base}` : undefined,
+                          pointerEvents: "none",
+                          zIndex: 1,
+                        }}
+                      />
+                    );
+                  })}
+
+                {/* Playhead marker */}
+                {unitCount > 0 && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: `${Math.max(0, Math.min(1, time / unitCount)) * 100}%`,
+                      top: 0,
+                      bottom: 0,
+                      width: 1.5,
+                      marginLeft: -0.75,
+                      background: colors.text.primary,
+                      opacity: 0.85,
+                      borderRadius: 1,
+                      pointerEvents: "none",
+                      zIndex: 2,
+                      transition: isSmoothSeek ? "left 0.28s cubic-bezier(0.16, 1, 0.3, 1)" : "none",
+                      willChange: isSmoothSeek ? "left" : "auto",
+                    }}
+                  />
+                )}
+
+                {/* VS Code Style Translucent Viewport Slider */}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${scrollProgress * (1 - 1 / zoom) * 100}%`,
+                    width: `${(1 / zoom) * 100}%`,
+                    minWidth: 16,
+                    top: 0,
+                    bottom: 0,
+                    borderRadius: 2,
+                    background: isMinimapDragging
+                      ? "color-mix(in srgb, var(--color-text-primary) 30%, transparent)"
+                      : isMinimapThumbHovered
+                        ? "color-mix(in srgb, var(--color-text-primary) 22%, transparent)"
+                        : "color-mix(in srgb, var(--color-text-primary) 14%, transparent)",
+                    border: `1px solid ${
+                      isMinimapDragging
+                        ? colors.accent.base
+                        : isMinimapThumbHovered
+                          ? "color-mix(in srgb, var(--color-text-primary) 45%, transparent)"
+                          : "color-mix(in srgb, var(--color-text-primary) 25%, transparent)"
+                    }`,
+                    cursor: isMinimapDragging ? "grabbing" : "grab",
+                    zIndex: 3,
+                    transition: "background 0.12s, border-color 0.12s",
+                    boxSizing: "border-box",
+                  }}
+                  onMouseEnter={() => setIsMinimapThumbHovered(true)}
+                  onMouseLeave={() => setIsMinimapThumbHovered(false)}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Actions */}
@@ -1311,64 +3490,276 @@ export function TimelapseEditor({
           style={{
             display: "flex",
             alignItems: "center",
-            gap: spacing.md,
+            gap: isNarrow ? 6 : spacing.md,
             flexWrap: "wrap",
-            marginTop: spacing.xs,
+            marginTop: isShort ? 0 : spacing.xs,
           }}
         >
           <div
             style={{
               minWidth: 0,
-              fontSize: fontSize.lg,
+              fontSize: isNarrow ? fontSize.sm : fontSize.lg,
               color: colors.text.primary,
               fontWeight: fontWeight.semibold,
               letterSpacing: "-0.01em",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: isNarrow ? 6 : 8,
+              flexWrap: "wrap",
             }}
           >
-            <MinutesFlow minutes={keptUnits} /> kept
+            <span>
+              <MinutesFlow minutes={keptUnits} /> kept
+            </span>
             {removedUnits > 0 && (
-              <span style={{ color: colors.editor.cutBorder, fontWeight: fontWeight.medium }}>
-                {" · "}
-                <MinutesFlow minutes={removedUnits} color={colors.editor.cutBorder} /> removed
-              </span>
+              <>
+                <span style={{ color: colors.text.quaternary, userSelect: "none" }} aria-hidden="true">
+                  ·
+                </span>
+                <span style={{ color: colors.editor.cutBorder, fontWeight: fontWeight.medium }}>
+                  <MinutesFlow minutes={removedUnits} color={colors.editor.cutBorder} /> removed
+                </span>
+              </>
+            )}
+            {totalMaskedSec > 0 && (
+              <>
+                <span style={{ color: colors.text.quaternary, userSelect: "none" }} aria-hidden="true">
+                  ·
+                </span>
+                <span
+                  style={{
+                    color: colors.accent.base,
+                    fontWeight: fontWeight.medium,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  {totalMaskedSec < 60 ? (
+                    <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                      <NumberFlow value={flowMaskedSec} suffix="s" />
+                    </span>
+                  ) : (
+                    <MinutesFlow
+                      minutes={Math.max(1, Math.round(flowMaskedSec / 60))}
+                      color={colors.accent.base}
+                    />
+                  )}
+                  <span>masked</span>
+                </span>
+              </>
             )}
           </div>
 
           <div style={{ flex: 1, minWidth: spacing.md }} />
 
-          {selected !== null && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setRegions((prev) => prev.filter((_, i) => i !== selected));
-                setSelected(null);
+          {mode === "mask" && masks.length > 0 && (
+            <div
+              ref={maskMenuRef}
+              style={{
+                position: "relative",
+                display: "inline-flex",
+                alignItems: "center",
+                borderRadius: radii.md,
+                border: `1px solid ${colors.border.hover}`,
+                background: "transparent",
               }}
             >
-              Remove cut
-            </Button>
+              <button
+                type="button"
+                disabled={selectedMaskId === null}
+                onClick={() => {
+                  if (selectedMaskId === null) return;
+                  setMasks((prev) => prev.filter((b) => b.id !== selectedMaskId));
+                  setSelectedMaskId(null);
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 5,
+                  padding: isNarrow ? "4px 8px" : "6px 12px",
+                  fontSize: 12,
+                  fontWeight: fontWeight.semibold,
+                  color: selectedMaskId !== null ? colors.text.secondary : colors.text.quaternary,
+                  background: "transparent",
+                  border: "none",
+                  borderTopLeftRadius: radii.md - 1,
+                  borderBottomLeftRadius: radii.md - 1,
+                  cursor: selectedMaskId !== null ? "pointer" : "not-allowed",
+                  opacity: selectedMaskId !== null ? 1 : 0.5,
+                  transition: "background 0.15s, color 0.15s",
+                }}
+                onMouseEnter={(e) => {
+                  if (selectedMaskId !== null) e.currentTarget.style.background = colors.bg.surface;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+                <span>Remove</span>
+              </button>
+              <div
+                style={{
+                  width: 1,
+                  height: 16,
+                  background: colors.border.hover,
+                }}
+              />
+              <button
+                type="button"
+                aria-label="More mask options"
+                aria-expanded={maskMenuOpen}
+                onClick={() => setMaskMenuOpen((prev) => !prev)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "6px 8px",
+                  fontSize: 12,
+                  fontWeight: fontWeight.semibold,
+                  color: colors.text.secondary,
+                  background: maskMenuOpen ? colors.bg.surface : "transparent",
+                  border: "none",
+                  borderTopRightRadius: radii.md - 1,
+                  borderBottomRightRadius: radii.md - 1,
+                  cursor: "pointer",
+                  transition: "background 0.15s, color 0.15s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!maskMenuOpen) e.currentTarget.style.background = colors.bg.surface;
+                }}
+                onMouseLeave={(e) => {
+                  if (!maskMenuOpen) e.currentTarget.style.background = "transparent";
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+
+              <AnimatePresence>
+                {maskMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                    transition={{ duration: 0.12 }}
+                    style={{
+                      position: "absolute",
+                      bottom: "calc(100% + 4px)",
+                      left: 0,
+                      right: 0,
+                      background: colors.bg.panel,
+                      border: `1px solid ${colors.border.hover}`,
+                      borderRadius: radii.md,
+                      boxShadow: "0 4px 16px rgba(0, 0, 0, 0.4)",
+                      padding: 4,
+                      zIndex: 50,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMasks([]);
+                        setSelectedMaskId(null);
+                        setMaskMenuOpen(false);
+                      }}
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 6,
+                        padding: "6px 8px",
+                        fontSize: 12,
+                        fontWeight: fontWeight.medium,
+                        color: colors.text.primary,
+                        background: "transparent",
+                        border: "none",
+                        borderRadius: radii.sm,
+                        cursor: "pointer",
+                        transition: "background 0.1s",
+                        whiteSpace: "nowrap",
+                        boxSizing: "border-box",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = colors.bg.surface;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "transparent";
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                      Clear all
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           )}
-          {normalized.length > 0 && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setRegions([]);
-                setSelected(null);
-              }}
-            >
-              Clear all
-            </Button>
+
+          {mode === "cut" && (
+            <>
+              {selected !== null && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setRegions((prev) => prev.filter((_, i) => i !== selected));
+                    setSelected(null);
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ marginRight: 5 }}>
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                  Remove
+                </Button>
+              )}
+              {normalized.length > 0 && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setRegions([]);
+                    setSelected(null);
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ marginRight: 5 }}>
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  Clear all
+                </Button>
+              )}
+            </>
           )}
           <Button
-            variant="primary"
+            variant={saveSuccess ? "secondary" : "primary"}
             size="sm"
             onClick={save}
             loading={saving}
-            disabled={allCut}
+            disabled={allCut || saving}
             title={allCut ? "You can't remove the entire timelapse" : undefined}
+            style={
+              saveSuccess
+                ? {
+                    borderColor: colors.accent.base,
+                    color: colors.accent.base,
+                    fontWeight: fontWeight.semibold,
+                  }
+                : undefined
+            }
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? "Saving…" : saveSuccess ? "Saved ✓" : "Save"}
           </Button>
         </div>
 
