@@ -23,7 +23,7 @@
     "versions": "npm run versions -w packages/server --"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.4"
   },
   "dependencies": {}
 }
