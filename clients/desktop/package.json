@@ -15,7 +15,7 @@
     "@lookout/shared": "*",
     "@number-flow/react": "^0.6.2",
     "@phosphor-icons/react": "^2.1.10",
-    "@sentry/react": "^10.45.0",
+    "@sentry/react": "^11.0.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-deep-link": "^2.4.7",
     "@tauri-apps/plugin-dialog": "^2.0.0",
