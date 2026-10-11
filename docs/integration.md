@@ -170,6 +170,28 @@ curl -X POST https://lookout.hackclub.com/api/internal/sessions/SESSION_ID/recom
   -H "X-API-Key: your-api-key"
 ```
 
+### Delete a session
+
+```bash
+curl -X DELETE https://lookout.hackclub.com/api/internal/sessions/SESSION_ID \
+  -H "X-API-Key: your-api-key"
+```
+
+Use this when a user asks you to delete their data (a GDPR request, or the
+Hack Club privacy hub calling your program), or when you discard a recording
+for good. Your program must delete its Lookout sessions as part of erasing a
+user: Lookout has no accounts, so nobody else can find them.
+
+The session disappears immediately — the recorder, the batch endpoint and the
+media URLs all treat it as gone — and is destroyed for good an hour later.
+Until then, `POST /api/internal/sessions/SESSION_ID/restore` brings it back,
+so a bug or a wrong user id in your program is recoverable. Calling `DELETE`
+again is safe and doesn't extend the hour.
+
+You can only delete sessions your own key created. See
+[`packages/server/API.md`](../packages/server/API.md#delete-session) for the
+full contract.
+
 ## Part 2: Client (Browser) Flow
 
 If you're using React, the [`@lookout/react` SDK](../clients/react/API.md) handles

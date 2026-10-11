@@ -285,6 +285,16 @@ export const sessions = pgTable(
     // job (which auto-publishes uncut). Editing is only possible during
     // this hold — never after complete, because programs act on complete.
     editHoldUntil: timestamp("edit_hold_until", { withTimezone: true }),
+    // When the owning program asked for this session to be deleted (e.g. a
+    // user's GDPR erasure), this is when the purge job may destroy it — R2
+    // objects first, then the row, which cascades to screenshots. Until
+    // then it is recoverable via POST /api/internal/sessions/:id/restore.
+    //
+    // A scheduled session is gone as far as everyone but its program is
+    // concerned: token and media endpoints 404, and the compiler refuses to
+    // claim it, so nothing new is written to R2 behind the purge's back.
+    // NULL = not scheduled.
+    deleteAfter: timestamp("delete_after", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -303,6 +313,9 @@ export const sessions = pgTable(
     index("idx_sessions_program_created")
       .on(table.programId, table.createdAt.desc())
       .where(sql`program_id IS NOT NULL`),
+    index("idx_sessions_delete_after")
+      .on(table.deleteAfter)
+      .where(sql`delete_after IS NOT NULL`),
   ],
 );
 

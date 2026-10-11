@@ -1037,7 +1037,56 @@ Re-enqueues compilation for a failed session.
 
 **Errors:**
 - `404` — Session not found
-- `409` — Session not in `failed` state
+- `409` — Session not in `failed` state, or scheduled for deletion
+
+---
+
+### Delete Session
+
+```
+DELETE /api/internal/sessions/:sessionId
+```
+
+Schedules the session for permanent deletion one hour out (`SESSION_DELETION_GRACE_MINUTES`). Nothing is destroyed yet, but the session is hidden immediately: every token-authenticated endpoint, the batch endpoint, and the media redirects answer `404`, and the compiler refuses to build it. Once the deadline passes, the `check-timeouts` job deletes every R2 object under the session (captures, original, edited and published video, thumbnail) and then the row and its screenshots.
+
+Only the program that created the session can delete it. Idempotent: calling it again returns the deadline the first call set, never a later one.
+
+**Response `202 Accepted`:**
+```json
+{
+  "sessionId": "137c9b2f-3e74-4c25-a295-b41bd4d2c5d1",
+  "deleteAfter": "2026-10-11T17:00:00.000Z"
+}
+```
+
+**Errors:**
+- `404` — Session not found, belongs to another program, or already purged
+
+While scheduled, `GET /api/internal/sessions/:sessionId` and the session list still return the session, with `deleteAfter` set. Force-stop and recompile answer `409`.
+
+Media already fetched through `R2_PUBLIC_DOMAIN` is a direct R2 URL and may keep working from caches until the purge removes the object.
+
+---
+
+### Restore Session
+
+```
+POST /api/internal/sessions/:sessionId/restore
+```
+
+Cancels a pending deletion while the grace period is still running. The session comes back exactly as it was; one that was stopped but not yet compiled is re-enqueued for compilation.
+
+**Response `200 OK`:**
+```json
+{
+  "restored": true
+}
+```
+
+**Errors:**
+- `404` — Session not found, belongs to another program, or already purged
+- `409` — Session is not scheduled for deletion
+- `410` — The grace period has ended; the purge is underway
 
 ---
 
@@ -1048,7 +1097,7 @@ The server uses **PG Boss** for background job processing.
 | Job | Schedule | Description |
 |-----|----------|-------------|
 | `compile-timelapse` | On demand | Compiles screenshots into an H.264 MP4 timelapse. Retries 3x with backoff. |
-| `check-timeouts` | Every 1 min | Auto-pauses sessions idle >10 min, auto-stops sessions idle >24 h, resets stuck compilations >60 min. |
+| `check-timeouts` | Every 1 min | Auto-pauses sessions idle >10 min, auto-stops sessions idle >24 h, resets stuck compilations >60 min, purges sessions whose deletion grace period has ended. |
 | `cleanup-unconfirmed` | Every 5 min | Deletes unconfirmed screenshot records older than 10 minutes. |
 
 ---

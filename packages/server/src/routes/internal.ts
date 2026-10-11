@@ -1,10 +1,20 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { eq, sql, and, desc, inArray, isNotNull, lt } from "drizzle-orm";
+import { eq, sql, and, desc, inArray, isNotNull, isNull, lt, gt } from "drizzle-orm";
+import { SESSION_DELETION_GRACE_MINUTES } from "@lookout/shared";
 import { db, schema } from "../db/index.js";
 import { requireApiKey } from "../middleware/apiKey.js";
 import { boss, COMPILE_JOB } from "../lib/queue.js";
 
 // ── Shared schema fragments ─────────────────────────────────
+
+type WritableSession = {
+  id: string;
+  programId: string | null;
+  panelResolvedAt: Date | null;
+  deleteAfter: Date | null;
+  status: (typeof schema.sessionStatusEnum.enumValues)[number];
+  originalVideoR2Key: string | null;
+};
 
 const sessionIdParamSchema = {
   type: "object" as const,
@@ -280,6 +290,7 @@ export async function internalRoutes(app: FastifyInstance) {
               ? `${baseUrl}/api/media/${s.id}/video.mp4`
               : null,
             metadata: s.metadata ?? {},
+            deleteAfter: s.deleteAfter?.toISOString() ?? null,
           };
         }),
         nextCursor,
@@ -444,6 +455,10 @@ export async function internalRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Session not found" });
       }
 
+      if (session.deleteAfter) {
+        return reply.code(409).send({ error: "Session is scheduled for deletion" });
+      }
+
       if (
         session.status === "stopped" ||
         session.status === "compiling" ||
@@ -496,6 +511,7 @@ export async function internalRoutes(app: FastifyInstance) {
         .where(and(
           eq(schema.sessions.id, sessionId),
           sql`${schema.sessions.status} IN ('active', 'paused', 'pending')`,
+          isNull(schema.sessions.deleteAfter),
         ))
         .returning({ id: schema.sessions.id });
 
@@ -525,10 +541,17 @@ export async function internalRoutes(app: FastifyInstance) {
   async function writableSession(
     request: FastifyRequest,
     sessionId: string,
-  ): Promise<{ id: string; panelResolvedAt: Date | null } | null> {
+  ): Promise<WritableSession | null> {
     const session = await db.query.sessions.findFirst({
       where: eq(schema.sessions.id, sessionId),
-      columns: { id: true, programId: true, panelResolvedAt: true },
+      columns: {
+        id: true,
+        programId: true,
+        panelResolvedAt: true,
+        deleteAfter: true,
+        status: true,
+        originalVideoR2Key: true,
+      },
     });
 
     if (!session) return null;
@@ -544,7 +567,7 @@ export async function internalRoutes(app: FastifyInstance) {
     const caller = request.programId ?? null;
     if (owner !== caller) return null;
 
-    return { id: session.id, panelResolvedAt: session.panelResolvedAt };
+    return session;
   }
 
   // Mark a session's program panel as satisfied.
@@ -633,6 +656,123 @@ export async function internalRoutes(app: FastifyInstance) {
     },
   );
 
+  // Delete a session, after a grace period.
+  //
+  // For programs honouring a user's erasure request, or discarding a
+  // recording outright. Nothing is destroyed on this call: the session is
+  // hidden at once — every token and media endpoint answers 404, so the
+  // recorder drops it and the video stops being served — and the purge job
+  // destroys captures, video and rows once SESSION_DELETION_GRACE_MINUTES
+  // have passed. Until then POST …/restore puts it back exactly as it was,
+  // which is the point of the window: a program bug, a leaked key or a wrong
+  // user id costs an hour of downtime instead of someone's work.
+  //
+  // Idempotent, and retries don't extend the window: a second call answers
+  // with the deadline the first one set. 202 because the deletion hasn't
+  // happened yet.
+  app.delete<{
+    Params: { sessionId: string };
+  }>(
+    "/api/internal/sessions/:sessionId",
+    {
+      schema: { params: sessionIdParamSchema },
+    },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+
+      const session = await writableSession(request, sessionId);
+      if (!session) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      // Guarded on still being unscheduled, so two racing calls agree on one
+      // deadline rather than the later one quietly pushing it out.
+      await db
+        .update(schema.sessions)
+        .set({
+          deleteAfter: new Date(
+            Date.now() + SESSION_DELETION_GRACE_MINUTES * 60_000,
+          ),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessions.id, sessionId),
+            isNull(schema.sessions.deleteAfter),
+          ),
+        );
+
+      const [scheduled] = await db
+        .select({ deleteAfter: schema.sessions.deleteAfter })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, sessionId));
+
+      // Gone between the two queries: the purge got there first.
+      if (!scheduled?.deleteAfter) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      return reply.code(202).send({
+        sessionId,
+        deleteAfter: scheduled.deleteAfter.toISOString(),
+      });
+    },
+  );
+
+  // Cancel a pending deletion while the grace period is still running.
+  //
+  // The session comes back as it was, with one thing to pick back up: the
+  // compiler refuses scheduled sessions, so one that was stopped but not yet
+  // built when it was scheduled would otherwise sit in `stopped` forever.
+  // Re-enqueueing is safe — the claim is atomic.
+  app.post<{
+    Params: { sessionId: string };
+  }>(
+    "/api/internal/sessions/:sessionId/restore",
+    {
+      schema: { params: sessionIdParamSchema },
+    },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+
+      const session = await writableSession(request, sessionId);
+      if (!session) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      if (!session.deleteAfter) {
+        return reply
+          .code(409)
+          .send({ error: "Session is not scheduled for deletion" });
+      }
+
+      // Past the deadline the purge may already be destroying it, so the
+      // answer has to be no even while the row is still here.
+      const [restored] = await db
+        .update(schema.sessions)
+        .set({ deleteAfter: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sessions.id, sessionId),
+            gt(schema.sessions.deleteAfter, new Date()),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+
+      if (!restored) {
+        return reply
+          .code(410)
+          .send({ error: "Grace period has ended; the session is being deleted" });
+      }
+
+      if (session.status === "stopped" && !session.originalVideoR2Key) {
+        await boss.send(COMPILE_JOB, { sessionId });
+      }
+
+      return { restored: true };
+    },
+  );
+
   // Re-trigger compilation for failed sessions
   app.post<{
     Params: { sessionId: string };
@@ -652,6 +792,10 @@ export async function internalRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Session not found" });
       }
 
+      if (session.deleteAfter) {
+        return reply.code(409).send({ error: "Session is scheduled for deletion" });
+      }
+
       if (session.status !== "failed") {
         return reply
           .code(409)
@@ -661,7 +805,11 @@ export async function internalRoutes(app: FastifyInstance) {
       const [updated] = await db
         .update(schema.sessions)
         .set({ status: "compiling", updatedAt: new Date() })
-        .where(and(eq(schema.sessions.id, sessionId), eq(schema.sessions.status, "failed")))
+        .where(and(
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessions.status, "failed"),
+          isNull(schema.sessions.deleteAfter),
+        ))
         .returning({ id: schema.sessions.id });
 
       if (!updated) {
