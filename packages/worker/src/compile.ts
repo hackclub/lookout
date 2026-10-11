@@ -12,7 +12,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, isNull } from "drizzle-orm";
 import {
   computeKeptRanges,
   computeCutSeconds,
@@ -300,6 +300,17 @@ async function getCaptureRowsForCuts(
   }));
 }
 
+/**
+ * The session's program asked for it to be deleted. Not a failure: there is
+ * nothing to retry, and marking it `failed` would change what a restore
+ * brings back.
+ */
+export class DeletionScheduledError extends Error {
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} is scheduled for deletion`);
+  }
+}
+
 export async function compileTimelapse(sessionId: string): Promise<{
   videoUrl: string;
   videoR2Key: string;
@@ -316,6 +327,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
   });
 
   if (!session) throw new Error(`Session ${sessionId} not found`);
+  if (session.deleteAfter) throw new DeletionScheduledError(sessionId);
 
   // Atomically claim the compilation (concurrency guard).
   // Allow re-entry from 'compiling' so pg-boss retries can re-claim after a crash.
@@ -329,6 +341,9 @@ export async function compileTimelapse(sessionId: string): Promise<{
       and(
         eq(schema.sessions.id, sessionId),
         sql`${schema.sessions.status} IN ('stopped', 'compiling')`,
+        // Never write new objects for a session the purge is about to
+        // destroy; it would race the R2 sweep and leave orphans.
+        isNull(schema.sessions.deleteAfter),
       ),
     )
     .returning({ id: schema.sessions.id });

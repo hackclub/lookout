@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { eq, sql, and, inArray, isNotNull } from "drizzle-orm";
+import { eq, sql, and, inArray, isNotNull, isNull } from "drizzle-orm";
 import {
   PutObjectCommand,
   HeadObjectCommand,
@@ -198,10 +198,16 @@ const sessionIdParamSchema = {
   required: ["sessionId"] as const,
 };
 
-/** Helper to look up session by token */
+/**
+ * Helper to look up session by token. Sessions scheduled for deletion are
+ * already gone as far as the token holder is concerned.
+ */
 async function findSession(token: string) {
   return db.query.sessions.findFirst({
-    where: eq(schema.sessions.token, token),
+    where: and(
+      eq(schema.sessions.token, token),
+      isNull(schema.sessions.deleteAfter),
+    ),
   });
 }
 
@@ -1926,7 +1932,12 @@ export async function sessionRoutes(app: FastifyInstance) {
       const rows = await db
         .select()
         .from(schema.sessions)
-        .where(inArray(schema.sessions.token, validTokens));
+        .where(
+          and(
+            inArray(schema.sessions.token, validTokens),
+            isNull(schema.sessions.deleteAfter),
+          ),
+        );
 
       // Get screenshot counts for all sessions in one query.
       // For bucket-mode sessions we still compute live tracked-seconds from
@@ -2022,7 +2033,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const session = await db.query.sessions.findFirst({
-        where: eq(schema.sessions.id, request.params.sessionId),
+        where: and(
+          eq(schema.sessions.id, request.params.sessionId),
+          isNull(schema.sessions.deleteAfter),
+        ),
       });
       if (!session || !session.thumbnailR2Key) {
         return reply.code(404).send({ error: "Thumbnail not available" });
@@ -2083,7 +2097,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const session = await db.query.sessions.findFirst({
-        where: eq(schema.sessions.id, request.params.sessionId),
+        where: and(
+          eq(schema.sessions.id, request.params.sessionId),
+          isNull(schema.sessions.deleteAfter),
+        ),
       });
       if (!session || session.status !== "complete" || !session.videoR2Key) {
         return reply.code(404).send({ error: "Video not available" });
