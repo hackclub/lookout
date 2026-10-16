@@ -12,6 +12,7 @@
     "db:migrate": "npx --env-file=../../.env drizzle-kit migrate",
     "tip": "tsx --env-file-if-exists=../../.env src/scripts/tip.ts",
     "versions": "tsx --env-file-if-exists=../../.env src/scripts/versions.ts",
+    "nuke": "tsx --env-file-if-exists=../../.env src/scripts/nuke.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

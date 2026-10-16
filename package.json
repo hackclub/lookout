@@ -20,7 +20,8 @@
     "db:generate": "npm run db:generate -w packages/server",
     "db:migrate": "npm run db:migrate -w packages/server",
     "tip": "npm run tip -w packages/server --",
-    "versions": "npm run versions -w packages/server --"
+    "versions": "npm run versions -w packages/server --",
+    "nuke": "npm run nuke -w packages/server --"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
