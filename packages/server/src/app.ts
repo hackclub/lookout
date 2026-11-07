@@ -6,6 +6,7 @@ import { adminRoutes } from "./routes/admin.js";
 import { programRoutes } from "./routes/programs.js";
 import { announcementRoutes } from "./routes/announcements.js";
 import { tipRoutes } from "./routes/tips.js";
+import { healthRoutes } from "./routes/health.js";
 
 /**
  * Methods allowed on CORS preflight. @fastify/cors 11 narrowed its default to
@@ -42,6 +43,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(programRoutes);
   await app.register(announcementRoutes);
   await app.register(tipRoutes);
+  await app.register(healthRoutes);
 
   return app;
 }
