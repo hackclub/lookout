@@ -161,7 +161,7 @@ impl Indicator {
     fn detach(&self) {
         PILL_ATTACHED.store(false, Ordering::Relaxed);
         if self.state.active {
-            let _ = crate::tray::show_tray(self.state.time.clone(), self.app.clone());
+            let _ = crate::tray::show(&self.app, &self.state.time, self.state.paused);
         }
     }
 

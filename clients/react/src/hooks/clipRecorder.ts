@@ -205,6 +205,11 @@ export interface ClipRecorderOptions {
   maxWidth?: number;
   maxHeight?: number;
   jpegQuality?: number;
+  /** The caller drives the frame cadence by calling `recordFrame()` (the
+   *  shared capture loop does, at the server's interval); the recorder
+   *  runs no timer of its own and `cut()` does not draw a final frame —
+   *  the caller already recorded it. */
+  externalCadence?: boolean;
   /** @deprecated Faster cadence for the FIRST clip only, from when the
    *  opening clip was cut after CLIP_FIRST_CUT_DELAY_MS. The seed tick now
    *  fires immediately (see useLookout), so there is no opening window to
@@ -259,9 +264,10 @@ export class ClipRecorder {
    *  the SERVER's cadence, not the default constant, so a server that
    *  dictates a different frameIntervalMs still gets a correct cap. */
   private maxFrames: number;
+  private externalCadence: boolean;
   // Opening cadence lives in its own field (cleared after the first cut),
   // so it's excluded from the always-resolved options.
-  private opts: Required<Omit<ClipRecorderOptions, "openingFrameIntervalMs">>;
+  private opts: Required<Omit<ClipRecorderOptions, "openingFrameIntervalMs" | "externalCadence">>;
 
   static isSupported(): boolean {
     return (
@@ -282,6 +288,7 @@ export class ClipRecorder {
     this.video = video;
     this.frameIntervalMs = frameIntervalMs;
     this.openingFrameIntervalMs = opts?.openingFrameIntervalMs ?? null;
+    this.externalCadence = opts?.externalCadence ?? false;
     this.maxFrames =
       Math.ceil(SCREENSHOT_INTERVAL_MS / Math.max(1, frameIntervalMs)) *
       MAX_CLIP_FRAME_OVERRUN;
@@ -328,8 +335,22 @@ export class ClipRecorder {
     }
 
     this.drawFrame();
+    if (this.externalCadence) return;
     const cadence = this.openingFrameIntervalMs ?? this.frameIntervalMs;
     this.frameTimer = setInterval(() => this.drawFrame(), cadence);
+  }
+
+  /** Record the current video frame into the clip (external cadence).
+   *  Starts a clip if none is in progress. Throws when the video is not
+   *  ready or no encoder is available. */
+  recordFrame(): void {
+    if (!this.engine) this.start();
+    this.drawFrame();
+  }
+
+  /** Whether a clip is in progress. */
+  get recording(): boolean {
+    return this.engine !== null;
   }
 
   private drawFrame(): void {
@@ -375,8 +396,9 @@ export class ClipRecorder {
     if (!engine || !canvas) return null;
 
     // Final frame + timestamp: capturedAt is the moment the clip is cut,
-    // which is what keeps the per-minute credit cadence monotonic.
-    this.drawFrame();
+    // which is what keeps the per-minute credit cadence monotonic. Under
+    // an external cadence the caller recorded the final frame itself.
+    if (!this.externalCadence) this.drawFrame();
     const capturedAtMs = Date.now();
     const frameCount = this.frameCount;
     const truncated = frameCount >= this.maxFrames;

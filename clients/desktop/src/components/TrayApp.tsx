@@ -2,33 +2,9 @@ import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "../logger.js";
 import { isGlassSupported, setLiquidGlassEffect, GlassMaterialVariant } from "tauri-plugin-liquid-glass-api";
-import { Button, colors, spacing, fontSize, fontWeight, deriveDisplaySeconds } from "@lookout/react";
+import { Button, colors, spacing, fontSize, fontWeight } from "@lookout/react";
 import NumberFlow from "@number-flow/react";
-
-interface TrayState {
-  /** Ratcheted server-authoritative tracked seconds (the anchor value). */
-  baseSeconds: number;
-  screenshotCount: number;
-  controlMode: "recording" | "paused";
-  /** `Date.now()` when `baseSeconds` last advanced. */
-  anchorAt: number;
-}
-
-/**
- * Re-derive the ticking clock from the anchor the main window pushed, using
- * the *same* shared function the main window's own timer uses. Rolling a
- * local version of this is how the popup ended up showing a different time
- * from the main app: it extrapolated without a cap, from an already
- * interpolated value.
- */
-function deriveLiveSeconds(state: TrayState, now: number): number {
-  return deriveDisplaySeconds(
-    state.baseSeconds,
-    state.anchorAt,
-    state.controlMode === "recording",
-    now,
-  );
-}
+import { useRecorderClock, type RecorderState } from "../recorder.js";
 
 function TrayTimer({ totalSeconds }: { totalSeconds: number }) {
   const h = Math.floor(totalSeconds / 3600);
@@ -55,15 +31,16 @@ function TrayTimer({ totalSeconds }: { totalSeconds: number }) {
   );
 }
 
+/**
+ * The tray popup. Draws the same `RecorderState` the main window draws —
+ * it comes from the core, on the app-wide `recorder-state` event — and
+ * ticks its clock from the same anchor with the same derivation, so it
+ * cannot disagree with the main window or the menu bar. Buttons go to the
+ * recorder through `tray_action`.
+ */
 export function TrayApp() {
-  const [state, setState] = useState<TrayState>({
-    baseSeconds: 0,
-    screenshotCount: 0,
-    controlMode: "recording",
-    anchorAt: Date.now(),
-  });
-
-  const [liveSeconds, setLiveSeconds] = useState(0);
+  const [state, setState] = useState<RecorderState | null>(null);
+  const liveSeconds = useRecorderClock(state?.clock ?? null);
 
   const [isWindows, setIsWindows] = useState(false);
   const [cornerRadius, setCornerRadius] = useState(10);
@@ -72,7 +49,7 @@ export function TrayApp() {
     // Force global transparency for the tray window to ensure native glass shows through
     document.documentElement.style.setProperty('background', 'transparent', 'important');
     document.body.style.setProperty('background', 'transparent', 'important');
-    
+
     // Also explicitly force #root to be transparent
     const root = document.getElementById('root');
     if (root) {
@@ -94,18 +71,18 @@ export function TrayApp() {
       try {
         const supported = await isGlassSupported();
         console.log("Liquid glass supported:", supported);
-        
+
         await setLiquidGlassEffect({
           cornerRadius: isTahoe ? 16 : 10,
           tintColor: "#00000000",
-          variant: GlassMaterialVariant.Sidebar, 
+          variant: GlassMaterialVariant.Sidebar,
         });
       } catch (e) {
         console.error("Failed to setup liquid glass", e);
       }
     }
     setupGlass();
-    
+
     return () => {
       // Cleanup styles if unmounted (though this is the tray entry point)
       document.documentElement.style.removeProperty('background');
@@ -114,53 +91,38 @@ export function TrayApp() {
     };
   }, []);
 
-  // Derive the live real-time seconds ticking up
-  useEffect(() => {
-    setLiveSeconds(deriveLiveSeconds(state, Date.now()));
-
-    if (state.controlMode !== "recording") return;
-
-    // Tick locally so we don't depend on the asleep main window
-    const interval = setInterval(() => {
-      setLiveSeconds(deriveLiveSeconds(state, Date.now()));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [state]);
-
   useEffect(() => {
     let unlistenState: (() => void) | undefined;
     let unlistenOpened: (() => void) | undefined;
-    
+
     const syncState = async () => {
       try {
-        const backendState = await invoke<TrayState>("get_tray_state");
-        setState(backendState);
+        setState(await invoke<RecorderState | null>("recorder_state"));
       } catch (e) {
-        console.error("Failed to sync tray state from backend", e);
+        console.error("Failed to sync recorder state from backend", e);
       }
     };
-    
+
     const setup = async () => {
-      // Listen for regular state updates
-      unlistenState = await listen<TrayState>("tray-state", (event) => {
+      // Every change, app-wide.
+      unlistenState = await listen<RecorderState | null>("recorder-state", (event) => {
         setState(event.payload);
       });
 
       // When the tray window is opened, explicitly request the latest state
       unlistenOpened = await listen("tray-opened", syncState);
-      
+
       // Request initial state on first mount
       syncState();
     };
-    
+
     setup().catch((e) => {
       console.error("Failed to set up tray listeners", e);
     });
-    
+
     // Also sync on window focus just in case
     window.addEventListener("focus", syncState);
-    
+
     return () => {
       if (unlistenState) unlistenState();
       if (unlistenOpened) unlistenOpened();
@@ -179,6 +141,9 @@ export function TrayApp() {
   const handleStop = () => {
     invoke("tray_action", { action: "stop" });
   };
+
+  const controlMode = state?.controlMode ?? "recording";
+  const captureCount = state?.captureCount ?? 0;
 
   return (
     <>
@@ -208,13 +173,13 @@ export function TrayApp() {
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: spacing.md }}>
         <div style={{ display: "flex", alignItems: "center", gap: spacing.sm }}>
-          {state.controlMode === "recording" && (
+          {controlMode === "recording" && (
             <div style={{
               width: 8, height: 8, borderRadius: "50%", background: colors.status.danger,
               animation: "pulse 1.5s ease-in-out infinite", flexShrink: 0,
             }} />
           )}
-          {state.controlMode === "paused" && (
+          {controlMode === "paused" && (
             <span style={{ color: colors.text.tertiary, flexShrink: 0, lineHeight: 1, display: "inline-flex", alignItems: "center" }}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <rect x="7" y="5" width="4" height="14" rx="1" />
@@ -233,12 +198,12 @@ export function TrayApp() {
           </span>
         </div>
         <span style={{ fontSize: fontSize.sm, color: colors.text.secondary }}>
-          {state.screenshotCount} {state.screenshotCount === 1 ? "shot" : "shots"}
+          {captureCount} {captureCount === 1 ? "shot" : "shots"}
         </span>
       </div>
 
       <div style={{ display: "flex", gap: spacing.xs }}>
-        {state.controlMode === "recording" ? (
+        {controlMode === "recording" ? (
           <Button variant="warning" size="sm" onClick={handlePause}>
             Pause
           </Button>

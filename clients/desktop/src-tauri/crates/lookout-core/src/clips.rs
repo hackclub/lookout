@@ -1402,9 +1402,11 @@ mod platform {
     /// useful quality knobs. Measured on 1080p dense-text screen content at
     /// the shipping cadence, against x264 on the same frames:
     ///
-    ///     x264enc      74.8 KB/frame   luma 38.56 dB   rgb 37.48 dB
-    ///     vp9enc       27.8 KB/frame   luma 38.16 dB   rgb 35.64 dB
-    ///     openh264enc  40.7 KB/frame   luma 37.33 dB   rgb 34.96 dB
+    /// ```text
+    /// x264enc      74.8 KB/frame   luma 38.56 dB   rgb 37.48 dB
+    /// vp9enc       27.8 KB/frame   luma 38.16 dB   rgb 35.64 dB
+    /// openh264enc  40.7 KB/frame   luma 37.33 dB   rgb 34.96 dB
+    /// ```
     ///
     /// openh264 is 1.2 dB down on luma and 2.5 dB down overall, and no
     /// combination of usage-type / rate-control / qp-max moves it (all were

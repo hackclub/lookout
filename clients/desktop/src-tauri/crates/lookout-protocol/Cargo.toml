@@ -1,0 +1,19 @@
+[package]
+name = "lookout-protocol"
+version = "0.3.14"
+edition = "2021"
+description = "Lookout's server protocol: the session API, the presign → PUT → confirm upload pipeline, retry policy and error shaping, over any HTTP transport"
+publish = false
+
+[lib]
+name = "lookout_protocol"
+
+[dependencies]
+lookout-session = { path = "../lookout-session" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

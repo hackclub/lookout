@@ -13,7 +13,7 @@ type PlaybackError =
   | { kind: "network"; detail: string }
   | { kind: "unknown"; detail: string };
 
-const Player = createPlayer({ features: videoFeatures });
+const { Player } = createPlayer({ features: videoFeatures });
 
 export function VideoPlayer({ src }: VideoPlayerProps) {
   const [platform, setPlatform] = useState("");
@@ -99,11 +99,11 @@ export function VideoPlayer({ src }: VideoPlayerProps) {
         } as React.CSSProperties
       }
     >
-      <Player.Provider>
+      <Player>
         <VideoSkin style={{ width: "100%", height: "100%" }}>
           <Video src={src} muted playsInline autoPlay={false} />
         </VideoSkin>
-      </Player.Provider>
+      </Player>
       {error && (
         <div className="lookout-video-player__error" role="alert">
           <h3>Can't play this timelapse</h3>

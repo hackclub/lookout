@@ -1,12 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "../logger.js";
-import { listen, emit } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import {
-  useSession,
-  useSessionTimerState,
-  computeBestTrackedSeconds,
-  isTooShortToCompile,
   formatTime,
   Button,
   ErrorDisplay,
@@ -23,14 +17,21 @@ import { getReport } from "../logger.js";
 import { NamingModal } from "./NamingModal.js";
 import { CaptureErrorDialog } from "./CaptureErrorDialog.js";
 import { openEditorWindow } from "./EditorWindow.js";
-import { useNativeCapture } from "../hooks/useNativeCapture.js";
 import { SourceLostPrompt } from "./SourceLostPrompt.js";
-import type { CaptureSource } from "../hooks/useNativeCapture.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { useWindowFocus } from "../hooks/useWindowFocus.js";
-import { useCameraCapture, waitForVideoReady } from "../hooks/useCameraCapture.js";
-import { useSessionNotifications } from "../hooks/useSessionNotifications.js";
+import { useCameraBackend } from "../hooks/useCameraBackend.js";
+import { useRecorderNotices } from "../hooks/useRecorderNotices.js";
 import { setCaptureActive } from "../captureGuard.js";
+import {
+  isPrompting,
+  recorder,
+  recorderErrorMessage,
+  useRecorderClock,
+  useRecorderState,
+  type CaptureSource,
+} from "../recorder.js";
+import { getApiBase } from "../serverConfig.js";
 
 interface DesktopRecorderProps {
   token: string;
@@ -39,9 +40,6 @@ interface DesktopRecorderProps {
   onBack: () => void;
   onViewSession: (token: string) => void;
 }
-
-import { getApiBase } from "../serverConfig.js";
-import { createTauriLookoutClient } from "../api/tauriClient.js";
 
 // Read once per webview load; Settings → Server reloads the view on change.
 const API_BASE = getApiBase();
@@ -102,231 +100,147 @@ function RecorderPreviewItem({
   );
 }
 
-function formatTimeTray(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
+/**
+ * The recording screen. A view over the core's `RecorderState`: the
+ * recording itself — the capture loop, the session's status, the clock, the
+ * order of operations behind every button — lives in Rust and is shared
+ * with the tray popup, the menu bar and any other shell. This component
+ * opens the recording on mount, closes it on unmount, and relays clicks.
+ */
 export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewSession }: DesktopRecorderProps) {
   const isMacOS = navigator.userAgent.includes("Mac");
   const isCamera = source.length === 1 && source[0].type === "camera";
   const windowFocused = useWindowFocus();
-  const session = useSession();
-  const camera = useCameraCapture();
 
-  // Wrap camera.captureFrame to pass the rendered video element
-  const cameraFrameCapture = useCallback(async () => {
-    return camera.captureFrame(cameraVideoRef.current);
-  }, [camera]);
+  // The camera's frames come from this webview; the loop that asks for them
+  // runs in the core. Listeners must be up before the recording opens.
+  const camera = useCameraBackend(isCamera);
+  const { state: anyState, ready } = useRecorderState();
+  // A state from a recording being replaced (the previous source, a previous
+  // token) is not ours to draw.
+  const state = anyState && anyState.token === token ? anyState : null;
 
-  // When the capture loop discovers the server stopped the session (e.g. cron
-  // auto-stop), sync the session hook so the UI navigates correctly.
-  const handleSessionTerminated = useCallback((status: string) => {
-    console.warn(`[session] capture loop detected terminal status: ${status}`);
-    session.syncStatus();
-  }, [session]);
+  const sourceKey = source.map((s) => `${s.type}:${s.id}`).join(",");
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
 
-  // Pass camera captureFrame to the native capture hook for camera sources
-  const capture = useNativeCapture(
-    token,
-    API_BASE,
-    source,
-    isCamera ? cameraFrameCapture : undefined,
-    handleSessionTerminated,
-    session.trackedSeconds,
-  );
+  // Open on mount, close on unmount. Closing flushes the partial minute and
+  // leaves the session itself alone (a source change drops straight back
+  // into recording on the next pick).
+  useEffect(() => {
+    if (!ready || !camera.ready) return;
+    recorder.open(token, API_BASE, sourceRef.current).catch((e) => {
+      console.error("[recorder] open failed:", recorderErrorMessage(e));
+    });
+    return () => {
+      recorder.close().catch(console.error);
+    };
+  }, [token, sourceKey, ready, camera.ready]);
 
-  // Native OS notifications: alert the user when a session pauses, errors,
-  // or fails — useful when the app is in the background.
-  useSessionNotifications({
-    isCapturing: capture.isCapturing,
-    // A lost source counts: the user is most likely looking at something
-    // else when it happens (they just clicked Stop in a system indicator, or
-    // PipeWire fell over), and the window they'd see the prompt in is behind
-    // whatever they're actually doing.
-    captureError: capture.error ?? capture.sourceLost?.message ?? null,
-    status: session.status,
-  });
+  // Native OS notifications for pauses, capture failures and lost sources:
+  // the core decides what's worth one.
+  useRecorderNotices(state?.capturing ?? false);
 
   // Publish capture state for the updater, which must not install (and so
   // exit the process) while a session is recording. See captureGuard.
   useEffect(() => {
-    setCaptureActive(capture.isCapturing);
+    setCaptureActive(state?.capturing ?? false);
     return () => setCaptureActive(false);
-  }, [capture.isCapturing]);
+  }, [state?.capturing]);
 
-
-  // Stale capture detection — warn if no successful capture for 3+ minutes
-  // while the app is visible (ignore sleep/background since that's expected).
-  const STALE_CAPTURE_MS = 3 * 60_000;
-  const [captureStale, setCaptureStale] = useState(false);
-  /** Capture error the user asked to see explained. The banner stays put —
-   *  a recording in progress shouldn't be buried under a modal unless the
-   *  user opens one. */
-  const [captureErrorDetail, setCaptureErrorDetail] = useState<string | null>(null);
+  // The live preview. The core sends the latest frame — in-between frames
+  // at the clip cadence while the window is focused, and every uploaded
+  // capture — on one channel; the same element is a live preview when
+  // watched and the latest capture when not.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!capture.isCapturing || !capture.lastCaptureAt) {
-      setCaptureStale(false);
-      return;
-    }
-    const check = () => {
-      if (document.visibilityState !== "visible") return;
-      const age = Date.now() - capture.lastCaptureAt!;
-      setCaptureStale(age > STALE_CAPTURE_MS);
-    };
-    check();
-    const id = setInterval(check, 10_000);
-    const onVisChange = () => check();
-    document.addEventListener("visibilitychange", onVisChange);
+    let unlisten: (() => void) | undefined;
+    listen<{ previewBase64: string; previewWidth: number; previewHeight: number }>(
+      "capture-preview-frame",
+      (event) => {
+        const { previewBase64 } = event.payload;
+        if (!previewBase64) return;
+        const bytes = Uint8Array.from(atob(previewBase64), (c) => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = url;
+        setPreviewUrl(url);
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
     return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisChange);
-    };
-  }, [capture.isCapturing, capture.lastCaptureAt]);
-
-  // The single authoritative baseline for every surface that shows the time
-  // (main window, menu-bar title, tray popup). Both inputs are server-derived;
-  // `max` rather than `||` so a capture-local value that hasn't caught up with
-  // the session poll yet can't drag the baseline down.
-  const bestTrackedSeconds = computeBestTrackedSeconds({
-    sessionTrackedSeconds: session.trackedSeconds,
-    uploaderTrackedSeconds: capture.trackedSeconds,
-  });
-
-  // Set at the instant pause/stop is CLICKED, before any network round
-  // trip, so the visible clock stops right then — it must not keep ticking
-  // through the flush + pause POST, and it must not snap anywhere: the
-  // flush credits the elapsed seconds underneath the held value.
-  const [timerHoldAt, setTimerHoldAt] = useState<number | null>(null);
-  const timer = useSessionTimerState(
-    bestTrackedSeconds,
-    capture.isCapturing,
-    timerHoldAt,
-  );
-  const displaySeconds = timer.displaySeconds;
-
-  // Under a minute there is nothing for the compile to work with. Stop
-  // still works — the naming modal says so instead. See isTooShortToCompile.
-  const tooShort = isTooShortToCompile(bestTrackedSeconds);
-
-  // Read the baseline from a ref inside async handlers: `session.resume()`
-  // awaits a round trip that itself refreshes `session.trackedSeconds`, so the
-  // value captured at render time is stale by the time we seed the ticker.
-  const bestTrackedRef = useRef(bestTrackedSeconds);
-  bestTrackedRef.current = bestTrackedSeconds;
-
-  const [pauseLoading, setPauseLoading] = useState(false);
-  const [resumeLoading, setResumeLoading] = useState(false);
-  const [stopLoading, setStopLoading] = useState(false);
-  const [isPrompting, setIsPrompting] = useState(false);
-  const stopActionHandled = useRef(false);
-  const autoStarted = useRef(false);
-
-  // Camera video ref for live preview during recording
-  const cameraVideoRef = useRef<HTMLVideoElement>(null);
-
-  // Attach camera stream to video element for live preview
-  useEffect(() => {
-    if (cameraVideoRef.current && camera.stream) {
-      cameraVideoRef.current.srcObject = camera.stream;
-    }
-  }, [camera.stream]);
-
-  // Camera device ID (only meaningful when isCamera is true)
-  const cameraDeviceId = isCamera ? String(source[0].id) : "";
-
-  // Start camera stream, attach to video element, and wait for decoded dimensions.
-  // Must only be called when the <video> element is in the DOM (session not "loading").
-  const startCameraAndWait = useCallback(async () => {
-    await new Promise((r) => requestAnimationFrame(r));
-    const stream = await camera.startStream(cameraDeviceId);
-    if (cameraVideoRef.current && stream) {
-      cameraVideoRef.current.srcObject = stream;
-      try { await cameraVideoRef.current.play(); } catch {}
-      await waitForVideoReady(cameraVideoRef.current);
-      console.log(`[session] camera video ready: ${cameraVideoRef.current?.videoWidth}x${cameraVideoRef.current?.videoHeight}`);
-    }
-  }, [camera, cameraDeviceId]);
-
-  // Auto-start recording (and camera stream) when component mounts and session is ready.
-  // For camera sources, we must wait until cameraVideoRef is in the DOM (i.e. session
-  // is no longer "loading") before starting the stream, otherwise the <video> element
-  // won't exist for captureFrame to draw from.
-  useEffect(() => {
-    if (autoStarted.current) return;
-    if (session.status === "loading" || session.status === "error") return;
-    const isSessionActive = session.status === "active" || session.status === "pending";
-    if (!isSessionActive || capture.isCapturing) return;
-
-    autoStarted.current = true;
-    (async () => {
-      if (isCamera) {
-        await startCameraAndWait();
-        // Camera sources use JS-side capture loop, so we need to
-        // explicitly start the Rust tray ticker for the menu bar time.
-        // Seed it with the session's existing time — hardcoding 0 made the
-        // menu bar restart from "0m" when recording an already-started session.
-        invoke("start_tray_ticker", {
-          trackedSeconds: session.trackedSeconds,
-        }).catch(console.error);
-      }
-      capture.startCapturing();
-    })();
-  }, [session.status, capture.isCapturing, capture, isCamera, cameraDeviceId, camera]);
-
-  // Navigate to session detail when terminal state is reached
-  useEffect(() => {
-    if (["stopped", "compiling", "complete", "failed"].includes(session.status) && !isPrompting && !stopLoading) {
-      onViewSession(token);
-    }
-  }, [session.status, token, onViewSession, isPrompting, stopLoading]);
-
-  // Cleanup camera stream on unmount — use refs to avoid stale closures
-  const isCameraRef = useRef(isCamera);
-  isCameraRef.current = isCamera;
-  const cameraRef = useRef(camera);
-  cameraRef.current = camera;
-  useEffect(() => {
-    return () => {
-      if (isCameraRef.current) {
-        cameraRef.current.stopStream();
+      unlisten?.();
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
       }
     };
   }, []);
 
-  // Finalize stop: optionally name, then stop the session. With `edit`,
-  // the timelapse is held unpublished after compiling so the user can cut
-  // it first — programs only ever observe it once, finished.
-  const finalizeStop = useCallback(async (name: string | null, edit: boolean) => {
-    if (stopActionHandled.current) return;
-    stopActionHandled.current = true;
-    setStopLoading(true);
-    console.log(`[session] stopping, name: ${name?.trim() || "(none)"}, edit: ${edit}`);
-    if (name && name.trim()) {
-      try {
-        await createTauriLookoutClient({ baseUrl: API_BASE, token }).rename(name.trim());
-      } catch (e) {
-        console.warn("[session] rename failed (non-fatal):", e);
-      }
-    }
+  // Navigate to the session view once the recording is over.
+  useEffect(() => {
+    if (state?.phase === "finished") onViewSession(token);
+  }, [state?.phase, token, onViewSession]);
 
-    try {
-      // Name was already applied above via the rename endpoint.
-      await session.stop(undefined, { edit });
-      console.log("[session] stopped, navigating to session detail");
-      if (isCamera) camera.stopStream();
-      if (edit) void openEditorWindow(token);
-      setIsPrompting(false);
-      setStopLoading(false);
-    } catch (e) {
-      console.error("[session] failed to stop session", e);
-      setStopLoading(false);
-      stopActionHandled.current = false;
+  const displaySeconds = useRecorderClock(state?.clock ?? null);
+
+  /** Capture error the user asked to see explained. The banner stays put —
+   *  a recording in progress shouldn't be buried under a modal unless the
+   *  user opens one. */
+  const [captureErrorDetail, setCaptureErrorDetail] = useState<string | null>(null);
+
+  /** Back to the source picker, closing whatever is open first.
+   *
+   *  The session is deliberately left alone — still open, still holding its
+   *  tracked time — so the next pick drops straight back into recording
+   *  instead of starting a second session. `onChangeSource` hands the screen
+   *  back to the compositor on the way out. */
+  const reselectSource = useCallback(() => {
+    console.log("[session] source lost — sending the user back to the picker");
+    setCaptureErrorDetail(null);
+    onChangeSource();
+  }, [onChangeSource]);
+
+  const logFailure = (what: string) => (e: unknown) =>
+    console.error(`[recorder] ${what} failed: ${recorderErrorMessage(e)}`);
+
+  const handlePause = useCallback(() => {
+    recorder.pause().catch(logFailure("pause"));
+  }, []);
+
+  const handleResume = useCallback(() => {
+    recorder.resume().catch(logFailure("resume"));
+  }, []);
+
+  const handleStopClick = useCallback(() => {
+    recorder.beginStop().catch(logFailure("stop"));
+  }, []);
+
+  // "Keep recording" from the prompt. Reached from the source-lost prompt
+  // too: there is no stream to resume onto, so it means "give me a source",
+  // not "start the loop again on a dead node".
+  const handleResumeFromModal = useCallback(() => {
+    if (state?.sourceLost) {
+      reselectSource();
+      return;
     }
-  }, [token, session, isCamera, camera]);
+    recorder.cancelStop().catch(logFailure("keep recording"));
+  }, [state?.sourceLost, reselectSource]);
+
+  // Finalize stop: optionally name, then stop the session. With `edit`, the
+  // timelapse is held unpublished after compiling so the user can cut it
+  // first — programs only ever observe it once, finished.
+  const finalizeStop = useCallback(async (name: string | null, edit: boolean) => {
+    try {
+      const outcome = await recorder.finishStop(name, edit);
+      console.log(`[session] stopped (${outcome.status})`);
+      if (outcome.edit) void openEditorWindow(token);
+    } catch (e) {
+      logFailure("finish stop")(e);
+    }
+  }, [token]);
 
   const handleConfirmStop = useCallback(
     (name: string | null) => finalizeStop(name, false),
@@ -338,270 +252,27 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     [finalizeStop],
   );
 
-  /** Back to the source picker, closing whatever is open first.
-   *
-   *  The session is deliberately left alone — still open, still holding its
-   *  tracked time — so the next pick drops straight back into recording
-   *  instead of starting a second session. `onChangeSource` hands the screen
-   *  back to the compositor on the way out. */
-  const reselectSource = useCallback(() => {
-    console.log("[session] source lost — sending the user back to the picker");
-    setIsPrompting(false);
-    setCaptureErrorDetail(null);
-    onChangeSource();
-  }, [onChangeSource]);
-
-  const handlePause = useCallback(async () => {
-    console.log("[session] pausing...");
-    // Freeze every clock surface at the CLICK, before any awaits: the
-    // main-window timer via the hold, the menu bar via the tray ticker.
-    setTimerHoldAt(Date.now());
-    invoke("pause_tray_ticker").catch(console.error);
-    setPauseLoading(true);
-    try {
-      // Stop AND AWAIT the Rust loop before the pause POST: on cancel it
-      // flushes the in-progress partial minute as a `final` capture (pause
-      // at 03:15 resumes at 03:15), and that confirm must land while the
-      // session is still active. The effect-cleanup call to
-      // stop_capture_loop after stopCapturing() is then a no-op.
-      await invoke("stop_capture_loop").catch(console.error);
-      capture.stopCapturing();
-      if (isCamera) camera.stopStream();
-      await session.pause();
-      console.log("[session] paused");
-    } catch (e) {
-      // Pause failed — the session is still recording, so release the
-      // hold and let the clock catch back up rather than lying frozen.
-      setTimerHoldAt(null);
-      throw e;
-    } finally {
-      setPauseLoading(false);
-    }
-  }, [capture, session, isCamera, camera]);
-
-  const handleResume = useCallback(async () => {
-    console.log("[session] resuming...");
-    setTimerHoldAt(null);
-    setResumeLoading(true);
-    await session.resume();
-    if (isCamera) {
-      console.log(`[session] restarting camera stream for device ${cameraDeviceId}`);
-      await startCameraAndWait();
-    }
-    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
-    await capture.startCapturing();
-    console.log("[session] resumed");
-    setResumeLoading(false);
-  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait]);
-
-  // Stop button: pause session + stop capture + show naming modal
-  const handleStopClick = useCallback(async () => {
-    console.log("[session] stop clicked, pausing and opening naming modal");
-    // Freeze the clock at the click, exactly like handlePause.
-    setTimerHoldAt(Date.now());
-    invoke("pause_tray_ticker").catch(console.error);
-    setStopLoading(true);
-    try {
-      // Same ordering as handlePause: let the Rust loop flush the partial
-      // minute before the session leaves "active".
-      await invoke("stop_capture_loop").catch(console.error);
-      capture.stopCapturing();
-      if (isCamera) camera.stopStream();
-      await session.pause();
-    } catch (e) {
-      setTimerHoldAt(null);
-      throw e;
-    } finally {
-      setStopLoading(false);
-    }
-    setIsPrompting(true);
-  }, [capture, session, isCamera, camera]);
-
-  // Resume from naming modal: close modal, resume recording
-  const handleResumeFromModal = useCallback(async () => {
-    // Reached from the source-lost prompt: there is no stream to resume onto,
-    // so "keep recording" means "give me a source", not "start the loop again
-    // on a dead node".
-    if (capture.sourceLost) {
-      reselectSource();
-      return;
-    }
-    console.log("[session] resume from modal, closing and resuming");
-    setIsPrompting(false);
-    setTimerHoldAt(null);
-    setResumeLoading(true);
-    await session.resume();
-    if (isCamera) {
-      await startCameraAndWait();
-    }
-    invoke("resume_tray_ticker", { trackedSeconds: bestTrackedRef.current }).catch(console.error);
-    await capture.startCapturing();
-    setResumeLoading(false);
-  }, [capture, session, isCamera, cameraDeviceId, camera, startCameraAndWait, reselectSource]);
-
-  const isActive = session.status === "active" || session.status === "pending";
-  const isPaused = session.status === "paused";
-
-  // Pin controls to pre-action state during transitions to prevent flashes.
-  let controlMode: "recording" | "paused";
-  if (capture.sourceLost) {
-    // Checked first, ahead of every transition case: the session is still
-    // `active` server-side, so without this the pulsing dot and the menu-bar
-    // clock would both keep claiming a recording that has no source.
-    controlMode = "paused";
-  } else if (pauseLoading || ((stopLoading || isPrompting) && isActive)) {
-    controlMode = "recording";
-  } else if (resumeLoading || ((stopLoading || isPrompting) && isPaused)) {
-    controlMode = "paused";
-  } else if (capture.isCapturing) {
-    controlMode = "recording";
-  } else if (isPaused) {
-    controlMode = "paused";
-  } else {
-    controlMode = "recording";
-  }
-
-  const screenshotCount = session.screenshotCount + capture.screenshotCount;
-
-  // Keep a ref of the latest state for the tray popup.
-  //
-  // This carries the interpolation ANCHOR (`baseSeconds` + `anchorAt`), never
-  // `displaySeconds`. The popup ticks its own clock, so handing it an
-  // already-interpolated value made it extrapolate on top of an
-  // extrapolation — it drifted ahead of the main window and never came back.
-  // `anchorAt` must likewise be when the base last advanced, not `Date.now()`
-  // at push time: re-stamping it on every push restarted the popup's
-  // interpolation window and lost the seconds the main window kept.
-  const trayStateRef = useRef({
-    baseSeconds: timer.baseSeconds,
-    screenshotCount,
-    controlMode,
-    anchorAt: timer.anchorAt,
-  });
-  trayStateRef.current = {
-    baseSeconds: timer.baseSeconds,
-    screenshotCount,
-    controlMode,
-    anchorAt: timer.anchorAt,
-  };
-
-  // Listen for tray requesting initial state (fallback)
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen("tray-ready", () => {
-      emit("tray-state", trayStateRef.current).catch(console.error);
-    }).then(fn => unlisten = fn);
-    return () => unlisten?.();
-  }, []);
-
-  // Sync menu-bar state to Rust + the tray window.
-  //
-  // IMPORTANT: do NOT call `update_tray_time` on every displaySeconds change.
-  // The Rust tray ticker is the authoritative source for the menu-bar title
-  // and runs at 1s cadence; calling update_tray_time from JS every second
-  // creates two writers fighting over the title, which produces the visible
-  // flicker between "0m"/"1m" and "1m"/"2m" at the minute boundaries
-  // (JS interpolates to one second, Rust to another).
-  //
-  // We still split the writes:
-  //   - `update_tray_time`: pause/resume only (the icon/title needs to
-  //     change immediately when paused, which the Rust ticker won't do
-  //     within its 1s tick window).
-  //   - `set_tray_state` + `tray-state` event: tray-window UI updates
-  //     fine-grained per second.
-
-  // controlMode + initial-show effect (low frequency)
-  useEffect(() => {
-    invoke("show_tray", { timeText: formatTimeTray(displaySeconds) }).catch(console.error);
-    invoke("update_tray_time", {
-      timeText: formatTimeTray(displaySeconds),
-      isPaused: controlMode === "paused",
-    }).catch(console.error);
-    // (displaySeconds intentionally read-only here — not in deps. We just
-    // need a sensible initial title; the Rust ticker takes over from there.)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controlMode]);
-
-  // Tray-window state sync — event-driven, NOT per-second.
-  //
-  // The tray window ticks its own clock from the anchor we push, and the Rust
-  // ticker owns the menu-bar title. So the only things worth pushing over IPC
-  // are the ones the tray can't derive locally: screenshot count changes,
-  // pause/resume, and a new anchor when the server credits time. Syncing every
-  // second (3 IPC calls + a broadcast event) was pure overhead that also
-  // drowned the debug log in [ipc] noise.
-  useEffect(() => {
-    const state = trayStateRef.current;
-    invoke("set_tray_state", { state }).catch(console.error);
-    emit("tray-state", state).catch(console.error);
-  }, [screenshotCount, controlMode, timer.baseSeconds, timer.anchorAt]);
-
-  // Sync the baseline to the Rust tray timer whenever it advances. Rust
-  // ratchets and re-anchors on its own, so pushing the same value twice is a
-  // no-op there.
-  //
-  // Uses `bestTrackedSeconds`, not `capture.trackedSeconds`: the latter is
-  // hook-local state that starts at 0, so resuming a session that already had
-  // recorded time (app reopened on a paused session) seeded the menu bar with
-  // 0 and it showed "0m" next to a main window reading 25:00 until the first
-  // confirm landed.
-  useEffect(() => {
-    if (bestTrackedSeconds > 0) {
-      // anchorAtMs aligns the Rust ticker's interpolation anchor with this
-      // window's (including the confirm-latency carry) — without it the
-      // menu bar/waybar ran a few seconds behind the main timer for the
-      // whole session.
-      invoke("sync_tray_tracked_seconds", {
-        trackedSeconds: bestTrackedSeconds,
-        anchorAtMs: timer.anchorAt,
-      }).catch(console.error);
-    }
-  }, [bestTrackedSeconds, timer.anchorAt]);
-
-  // Hide tray on unmount or session end
-  useEffect(() => {
-    return () => {
-      invoke("hide_tray").catch(console.error);
-      invoke("stop_tray_ticker").catch(console.error);
-    };
-  }, []);
-
-  // Listen to tray actions
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<string>("tray-action", (event) => {
-      if (event.payload === "pause") {
-        handlePause();
-      } else if (event.payload === "resume") {
-        // With the source gone there is nothing to resume onto — and the menu
-        // bar shows a paused session, so Resume is exactly what someone would
-        // reach for. Surface the window instead: the prompt asking for a new
-        // source is in it, behind whatever they're working in.
-        if (capture.sourceLost) {
-          console.warn("[session] tray resume ignored — no capture source, asking for one");
-          const win = getCurrentWindow();
-          void win.unminimize().catch(() => {});
-          void win.show().catch(() => {});
-          void win.setFocus().catch(() => {});
-        } else {
-          handleResume();
-        }
-      } else if (event.payload === "stop") {
-        handleStopClick();
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, [handlePause, handleResume, handleStopClick, capture.sourceLost]);
+  // The hidden video element for camera sources. In the DOM for the whole
+  // life of the recording — the core's start request arrives while the
+  // session is still being fetched.
+  const hiddenVideo = isCamera ? (
+    <video
+      ref={camera.videoRef}
+      autoPlay
+      muted
+      playsInline
+      style={{ position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
+    />
+  ) : null;
 
   // Loading/skeleton state
-  if (session.status === "loading") {
+  if (!state || state.phase === "loading") {
     return (
       <div style={{
         display: "flex", flexDirection: "column", height: "100%",
         maxWidth: 480, margin: "0 auto", padding: spacing.lg, boxSizing: "border-box",
       }}>
+        {hiddenVideo}
         <div style={{ flexShrink: 0, marginBottom: spacing.lg }}>
           <Skeleton height={56} borderRadius={radii.md} />
         </div>
@@ -616,34 +287,48 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
     );
   }
 
-  if (session.status === "error") {
+  if (state.phase === "loadError") {
     return (
       <PageContainer centered>
+        {hiddenVideo}
         <ErrorDisplay
           variant="page"
           title="Session Error"
-          error={session.error || "Unknown error"}
-          action={{ label: isMacOS ? "\u2190 Gallery" : "Back to Gallery", onClick: onBack }}
+          error={state.sessionError || "Unknown error"}
+          action={{ label: isMacOS ? "← Gallery" : "Back to Gallery", onClick: onBack }}
         />
       </PageContainer>
     );
   }
 
-  // Terminal states — show spinner while navigation happens
-  if (["stopped", "compiling", "complete", "failed"].includes(session.status)) {
+  // Terminal state — show spinner while navigation happens
+  if (state.phase === "finished") {
     return (
       <PageContainer centered>
+        {hiddenVideo}
         <Spinner size="md" />
       </PageContainer>
     );
   }
+
+  const { phase, controlMode, captureCount, sourceLost, captureError, actionError } = state;
+  const pauseLoading = phase === "pausing";
+  const resumeLoading = phase === "resuming";
+  const stopLoading = phase === "stopPausing" || phase === "stopFinishing";
+  const prompting = isPrompting(phase);
+  // The core reads the SERVER-credited count for this, never the on-screen
+  // clock: the clock interpolates between confirms, so it passes 1:00 a
+  // round trip before that minute exists as a capture unit.
+  const tooShort = state.tooShortToCompile;
+  const captureStale = state.stale && !captureError;
 
   return (
     <div style={{
       display: "flex", flexDirection: "column", height: "100%",
       maxWidth: 480, margin: "0 auto", padding: spacing.lg, boxSizing: "border-box",
     }}>
-      {/* Status card — recording indicator + timer + screenshot count */}
+      {hiddenVideo}
+      {/* Status card — recording indicator + timer + capture count */}
       <div style={{
         flexShrink: 0,
         display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -678,42 +363,31 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
         </div>
         <span style={{ fontSize: fontSize.md, color: colors.text.secondary }}>
           {/* One capture unit per recorded minute — a JPEG screenshot on
-              legacy sessions, a ~15-frame clip on clips sessions. */}
-          {screenshotCount} {screenshotCount === 1 ? "capture" : "captures"}
+              legacy sessions, a ~6-frame clip on clips sessions. */}
+          {captureCount} {captureCount === 1 ? "capture" : "captures"}
         </span>
       </div>
 
-      {/* Preview — fills available space. Once the Rust capture loop is
-          running it feeds this image directly: in-between frames arrive at
-          the clip cadence (20/min) while the window is focused, and stop
-          when it isn't — so the same element is a live preview when watched
-          and the latest capture when not. No separate preview loop. */}
+      {/* Preview — fills available space. The core feeds this image
+          directly once the loop is running (see the preview listener
+          above); until the first frame, the native preview protocol
+          shows the sources. */}
       <div style={{
         flex: 1,
         minHeight: 0,
         display: "flex",
         flexDirection: isCamera ? "column" : "row",
-        gap: !isCamera && source.length > 1 && !capture.lastScreenshotUrl ? spacing.xs : 0,
+        gap: !isCamera && source.length > 1 && !previewUrl ? spacing.xs : 0,
         marginBottom: spacing.lg
       }}>
-        {/* Hidden video element for camera sources — needed for captureFrame to draw from canvas */}
-        {isCamera && (
-          <video
-            ref={cameraVideoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{ position: "absolute", width: 0, height: 0, opacity: 0, pointerEvents: "none" }}
-          />
-        )}
-        {capture.lastScreenshotUrl ? (
+        {previewUrl ? (
           <div style={{
             position: "relative", borderRadius: radii.lg,
             overflow: "hidden", background: colors.bg.sunken, border: `1px solid ${colors.border.default}`,
             flex: 1, minHeight: 0, minWidth: 0,
           }}>
             <img
-              src={capture.lastScreenshotUrl}
+              src={previewUrl}
               alt="Screen preview"
               style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
             />
@@ -722,7 +396,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
               color: colors.badge.overlayText, background: colors.badge.overlayBg,
               padding: "2px 6px", borderRadius: radii.sm,
             }}>
-              {windowFocused && !isCamera ? "Preview" : "Latest capture"}
+              {windowFocused && state.capturing ? "Preview" : "Latest capture"}
             </span>
           </div>
         ) : (
@@ -738,7 +412,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
         )}
       </div>
 
-      {captureStale && !capture.error && (
+      {captureStale && (
         <div style={{
           padding: `${spacing.sm}px ${spacing.md}px`,
           background: colors.status.warning + "1a",
@@ -752,13 +426,22 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
         </div>
       )}
 
-      {capture.error && (
+      {captureError && (
         <ErrorDisplay
           variant="banner"
-          error={capture.error}
+          error={captureError}
           reassurance="Your earlier progress is saved. Restart the app if this keeps happening."
-          action={{ label: "Details", onClick: () => setCaptureErrorDetail(capture.error) }}
-          onCopy={() => navigator.clipboard.writeText(getReport(capture.error ?? undefined))}
+          action={{ label: "Details", onClick: () => setCaptureErrorDetail(captureError) }}
+          onCopy={() => navigator.clipboard.writeText(getReport(captureError))}
+        />
+      )}
+
+      {actionError && !captureError && (
+        <ErrorDisplay
+          variant="banner"
+          error={actionError}
+          reassurance="The recording is unchanged — try again."
+          onCopy={() => navigator.clipboard.writeText(getReport(actionError))}
         />
       )}
 
@@ -779,7 +462,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
               size="lg"
               loading={pauseLoading}
               onClick={handlePause}
-              disabled={stopLoading || isPrompting}
+              disabled={stopLoading || prompting}
               fullWidth
               style={{ flex: 1 }}
             >
@@ -790,7 +473,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
               size="lg"
               loading={stopLoading}
               onClick={handleStopClick}
-              disabled={pauseLoading || stopLoading || isPrompting}
+              disabled={pauseLoading || stopLoading || prompting}
               fullWidth
               style={{ flex: 1 }}
             >
@@ -806,7 +489,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
               size="lg"
               loading={resumeLoading}
               onClick={handleResume}
-              disabled={stopLoading || isPrompting || !!capture.sourceLost}
+              disabled={stopLoading || prompting || !!sourceLost}
               fullWidth
               style={{ flex: 1 }}
             >
@@ -817,7 +500,7 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
               size="lg"
               loading={stopLoading}
               onClick={handleStopClick}
-              disabled={resumeLoading || stopLoading || isPrompting}
+              disabled={resumeLoading || stopLoading || prompting}
               fullWidth
               style={{ flex: 1 }}
             >
@@ -827,10 +510,10 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
         )}
       </div>
 
-      {isPrompting && (
+      {prompting && (
         <NamingModal
           tooShort={tooShort}
-          loading={stopLoading}
+          loading={phase === "stopFinishing"}
           onConfirm={handleConfirmStop}
           onEditAndSave={handleEditAndSave}
           onResume={handleResumeFromModal}
@@ -841,14 +524,14 @@ export function DesktopRecorder({ token, source, onChangeSource, onBack, onViewS
           this can capture anything, so ask for a new source outright —
           stood down while one of the other two dialogs is up, since both
           are reached from its own buttons. */}
-      {capture.sourceLost && !isPrompting && !captureErrorDetail && (
+      {sourceLost && !prompting && !captureErrorDetail && (
         <SourceLostPrompt
-          loss={capture.sourceLost}
+          loss={sourceLost}
           onReselect={reselectSource}
           onStop={handleStopClick}
           onDetails={
-            capture.sourceLost.detail
-              ? () => setCaptureErrorDetail(capture.sourceLost!.detail!)
+            sourceLost.detail
+              ? () => setCaptureErrorDetail(sourceLost.detail!)
               : undefined
           }
           stopping={stopLoading}

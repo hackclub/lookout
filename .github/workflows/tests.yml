@@ -241,12 +241,29 @@ jobs:
           node-version: lts/*
           cache: npm
 
+      # @lookout/react loads the recorder from @lookout/wasm (crates/lookout-web
+      # compiled to WebAssembly), so the clients can't build or test without it.
+      - name: Install Rust stable (wasm32)
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "./clients/desktop/src-tauri -> target"
+          shared-key: rust-wasm
+
+      - name: Install wasm-bindgen
+        run: packages/wasm/install-bindgen.sh
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Build shared + react packages
+      - name: Build shared + wasm + react packages
         run: |
           npm run build -w packages/shared
+          npm run build -w packages/wasm
           npm run build -w clients/react
 
       - name: Type-check desktop frontend

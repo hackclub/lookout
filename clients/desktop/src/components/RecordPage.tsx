@@ -12,7 +12,7 @@ import {
   fontWeight,
 } from "@lookout/react";
 import { isLinux } from "../platform.js";
-import type { CaptureSource } from "../hooks/useNativeCapture.js";
+import { finishSession, type CaptureSource } from "../recorder.js";
 import { SourcePicker } from "./SourcePicker.js";
 import { DesktopRecorder } from "./DesktopRecorder.js";
 import { NamingModal } from "./NamingModal.js";
@@ -104,18 +104,13 @@ export function RecordPage({ token, onBack, onViewSession, onSourcePicker }: Rec
     console.log(
       `[record] stopping session, name: ${name?.trim() || "(none)"}, edit: ${edit}`,
     );
-    if (name && name.trim()) {
-      try {
-        await client.rename(name.trim());
-      } catch (e) {
-        console.warn("[record] rename failed:", e);
-      }
-    }
     try {
-      // `edit: true` holds the timelapse unpublished after it compiles so
-      // the user can cut it first — programs only ever see it finished.
-      await client.stop(edit ? { edit: true } : undefined);
-      console.log("[record] session stopped");
+      // The core's stop routine: rename (non-fatal), then stop with the
+      // same retries and 409 handling the recorder uses. `edit: true`
+      // holds the timelapse unpublished after it compiles so the user can
+      // cut it first — programs only ever see it finished.
+      const outcome = await finishSession(token, API_BASE, name?.trim() || null, edit);
+      console.log(`[record] session stopped (${outcome.status})`);
     } catch (e) {
       console.error("[record] stop failed:", e);
     }

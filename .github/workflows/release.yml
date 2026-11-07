@@ -95,12 +95,22 @@ jobs:
           workspaces: "./clients/desktop/src-tauri -> target"
           shared-key: rust-${{ matrix.platform }}-${{ matrix.args || 'native' }}
 
+      # @lookout/react, which the desktop frontend bundles, loads the recorder
+      # from @lookout/wasm; build it before react.
+      - name: Install wasm toolchain
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          packages/wasm/install-bindgen.sh
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build workspace dependencies
+        shell: bash
         run: |
           npm run build -w packages/shared
+          npm run build -w packages/wasm
           npm run build -w clients/react
 
       # A placeholder key here fails silently: the package installs fine and

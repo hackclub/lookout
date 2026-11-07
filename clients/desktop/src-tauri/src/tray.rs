@@ -1,7 +1,18 @@
-use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+//! The menu-bar / tray item for a recording, and the popup it opens.
+//!
+//! The item's presence and its paused glyph follow the recorder's state
+//! (`TauriFrontend::sync_tray`), and its clock text is written by the
+//! core's once-a-second ticker (`TauriFrontend::set_tray_title`) — one
+//! writer, so the title can't flicker between two surfaces' idea of the
+//! second. The webview never touches the tray.
+//!
+//! Actions from the popup, the Linux menu and the GNOME pill all come
+//! through [`tray_action`], which drives the recorder directly.
+
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 #[cfg(not(target_os = "macos"))]
 use tauri::image::Image;
 #[cfg(target_os = "linux")]
@@ -9,6 +20,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 #[cfg(not(target_os = "macos"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::AppState;
 
 #[cfg(target_os = "linux")]
 const MENU_TOGGLE: &str = "tray_toggle_pause";
@@ -28,55 +41,21 @@ static TRAY_PAUSED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static TRAY_TOGGLE: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
 
-/// State handed to the tray popup window, which ticks its own clock so it
-/// stays live while the main WebView is throttled.
-///
-/// It carries the interpolation *anchor*, not a display value: the popup
-/// re-derives the ticking time with the same rules as the main window
-/// (see `useSessionTimerState` in @lookout/react). Passing the main
-/// window's already-interpolated `displaySeconds` here meant the popup
-/// extrapolated on top of an extrapolation and drifted ahead of it.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrayState {
-    /// Ratcheted server-authoritative tracked seconds.
-    pub base_seconds: u32,
-    pub screenshot_count: u32,
-    pub control_mode: String,
-    /// `Date.now()` (ms) when `base_seconds` last advanced.
-    pub anchor_at: u64,
-}
-
-impl Default for TrayState {
-    fn default() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        Self {
-            base_seconds: 0,
-            screenshot_count: 0,
-            control_mode: "recording".to_string(),
-            anchor_at: now,
-        }
-    }
-}
-
-pub struct TrayStateMutex(pub Mutex<TrayState>);
-
-#[tauri::command]
-pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
+/// Put the tray item up for a recording, showing `time_text`.
+pub fn show(app: &AppHandle, time_text: &str, paused: bool) -> Result<(), String> {
     // macOS gets a native NSStatusItem rendered with SwiftUI so the time
     // digits animate with contentTransition(.numericText()) — see
     // swift/lookout-tray. Other platforms keep the tauri tray.
     #[cfg(target_os = "macos")]
-    return crate::native_tray::show(&app, &time_text);
+    {
+        crate::native_tray::show(app, time_text)?;
+        return crate::native_tray::update(time_text, Some(paused));
+    }
 
     #[cfg(target_os = "linux")]
     {
-        let paused = TRAY_PAUSED.load(Ordering::Relaxed);
-        crate::gnome_indicator::publish(true, &time_text, paused);
+        TRAY_PAUSED.store(paused, Ordering::Relaxed);
+        crate::gnome_indicator::publish(true, time_text, paused);
         // The GNOME extension draws the panel pill itself; a StatusNotifier
         // item next to it would be a second indicator for one recording.
         if crate::gnome_indicator::pill_attached() {
@@ -85,13 +64,13 @@ pub fn show_tray(time_text: String, app: AppHandle) -> Result<(), String> {
     }
 
     #[cfg(not(target_os = "macos"))]
-    show_tauri_tray(time_text, app)
+    show_tauri_tray(app, time_text, paused)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
+fn show_tauri_tray(app: &AppHandle, time_text: &str, paused: bool) -> Result<(), String> {
     if app.tray_by_id("timelapse_tray").is_some() {
-        return Ok(());
+        return update(app, time_text, paused);
     }
 
     // Windows gets the app icon, so the tray entry matches the taskbar and
@@ -104,13 +83,14 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
     let icon_bytes: &[u8] = include_bytes!("../icons/32x32.png");
 
     let icon = Image::from_bytes(icon_bytes).map_err(|e| e.to_string())?;
+    let (title, tooltip) = title_and_tooltip(time_text, paused);
 
     #[allow(unused_mut)]
     let mut builder = TrayIconBuilder::with_id("timelapse_tray")
-        .title(&time_text)
+        .title(&title)
         // Windows doesn't render tray titles — the tooltip is the only place
         // the recorded time is visible there.
-        .tooltip(format!("Lookout — {time_text} recorded"))
+        .tooltip(tooltip)
         .icon(icon)
         .on_tray_icon_event(move |tray, event| {
             if let TrayIconEvent::Click {
@@ -139,9 +119,9 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let toggle = MenuItem::with_id(
-            &app,
+            app,
             MENU_TOGGLE,
-            if TRAY_PAUSED.load(Ordering::Relaxed) {
+            if paused {
                 "Resume recording"
             } else {
                 "Pause recording"
@@ -150,12 +130,12 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
             None::<&str>,
         )
         .map_err(|e| e.to_string())?;
-        let stop = MenuItem::with_id(&app, MENU_STOP, "Stop recording", true, None::<&str>)
+        let stop = MenuItem::with_id(app, MENU_STOP, "Stop recording", true, None::<&str>)
             .map_err(|e| e.to_string())?;
-        let open = MenuItem::with_id(&app, MENU_OPEN, "Open Lookout", true, None::<&str>)
+        let open = MenuItem::with_id(app, MENU_OPEN, "Open Lookout", true, None::<&str>)
             .map_err(|e| e.to_string())?;
-        let separator = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
-        let menu = Menu::with_items(&app, &[&toggle, &separator, &stop, &open])
+        let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+        let menu = Menu::with_items(app, &[&toggle, &separator, &stop, &open])
             .map_err(|e| e.to_string())?;
 
         if let Ok(mut slot) = TRAY_TOGGLE.lock() {
@@ -164,14 +144,13 @@ fn show_tauri_tray(time_text: String, app: AppHandle) -> Result<(), String> {
         builder = builder.menu(&menu).on_menu_event(on_tray_menu_event);
     }
 
-    builder.build(&app).map_err(|e| e.to_string())?;
+    builder.build(app).map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-/// Linux tray-menu clicks. Routed through the same `tray-action` event the
-/// popup window uses on the other platforms, so the frontend handlers are
-/// shared.
+/// Linux tray-menu clicks. Routed through the same `tray_action` the popup
+/// window uses on the other platforms, so the handling is shared.
 #[cfg(target_os = "linux")]
 fn on_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let id: &str = event.id().as_ref();
@@ -190,14 +169,9 @@ fn on_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         _ => return,
     };
-
-    let _ = app.emit("tray-action", action);
-    if action == "stop" {
-        focus_main_window(app);
-    }
+    let _ = tray_action(action.to_string(), app.clone());
 }
 
-#[cfg(target_os = "linux")]
 fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -308,46 +282,53 @@ fn position_and_show_window(
     Ok(())
 }
 
-#[tauri::command]
-pub fn update_tray_time(time_text: String, is_paused: bool, app: AppHandle) -> Result<(), String> {
+/// The title and tooltip for a time and pause state, off macOS: a pause
+/// glyph in the menu bar while paused, and a tooltip that says which.
+#[cfg(not(target_os = "macos"))]
+fn title_and_tooltip(time_text: &str, paused: bool) -> (String, String) {
+    if paused {
+        (
+            format!("⏸ {time_text}"),
+            format!("Lookout — paused at {time_text}"),
+        )
+    } else {
+        (
+            time_text.to_string(),
+            format!("Lookout — {time_text} recorded"),
+        )
+    }
+}
+
+/// Write the tray's time text and pause state. The core's ticker calls
+/// this once a second (when something changed), and the state sync calls
+/// it the instant the pause state flips.
+pub fn update(app: &AppHandle, time_text: &str, paused: bool) -> Result<(), String> {
     // The Swift side renders its own pause glyph and tooltip.
     #[cfg(target_os = "macos")]
     {
         let _ = app;
-        return crate::native_tray::update(&time_text, Some(is_paused));
+        return crate::native_tray::update(time_text, Some(paused));
     }
 
-    // Show a pause glyph in the menu bar while paused. The Rust ticker skips
-    // its updates while the timer is paused, so this sticks until resume —
-    // and its first running tick force-refreshes the plain title back.
     #[cfg(not(target_os = "macos"))]
     {
-        let title = if is_paused {
-            format!("⏸ {time_text}")
-        } else {
-            time_text.clone()
-        };
-        let tooltip = if is_paused {
-            format!("Lookout — paused at {time_text}")
-        } else {
-            format!("Lookout — {time_text} recorded")
-        };
+        let (title, tooltip) = title_and_tooltip(time_text, paused);
 
         #[cfg(target_os = "linux")]
         {
-            TRAY_PAUSED.store(is_paused, Ordering::Relaxed);
+            TRAY_PAUSED.store(paused, Ordering::Relaxed);
             // Linux has no tray click, so pause/resume lives in the menu —
             // one item whose label follows the state.
             if let Ok(slot) = TRAY_TOGGLE.lock() {
                 if let Some(toggle) = slot.as_ref() {
-                    let _ = toggle.set_text(if is_paused {
+                    let _ = toggle.set_text(if paused {
                         "Resume recording"
                     } else {
                         "Pause recording"
                     });
                 }
             }
-            crate::gnome_indicator::publish(true, &time_text, is_paused);
+            crate::gnome_indicator::publish_tick(time_text, paused);
         }
 
         if let Some(tray) = app.tray_by_id("timelapse_tray") {
@@ -358,8 +339,8 @@ pub fn update_tray_time(time_text: String, is_paused: bool, app: AppHandle) -> R
     }
 }
 
-#[tauri::command]
-pub fn hide_tray(app: AppHandle) -> Result<(), String> {
+/// Take the tray item down: the recording is over or the window is gone.
+pub fn hide(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     crate::native_tray::hide();
     #[cfg(target_os = "linux")]
@@ -369,49 +350,62 @@ pub fn hide_tray(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("tray") {
         let _ = w.close();
     }
-    Ok(())
 }
 
+/// An action from the tray popup, the Linux menu or the GNOME pill, driven
+/// straight into the recorder. `ready` is the popup asking for the current
+/// state.
 #[tauri::command]
 pub fn tray_action(action: String, app: AppHandle) -> Result<(), String> {
-    // Only hide tray for terminal/interactive actions, not for simple events
+    // Only hide the popup for real actions, not for its own state request.
     if action != "ready" {
         if let Some(w) = app.get_webview_window("tray") {
             let _ = w.hide();
         }
     }
 
-    if action == "ready" {
-        let _ = app.emit("tray-ready", ());
-    } else {
-        let _ = app.emit("tray-action", action.clone());
-    }
-
-    if action == "stop" {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.set_focus();
+    let core = std::sync::Arc::clone(&app.state::<AppState>().core);
+    match action.as_str() {
+        "ready" => {
+            let _ = app.emit("recorder-state", core.recorder_state());
         }
+        "pause" => {
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.recorder_pause().await {
+                    eprintln!("[tray] pause refused: {e}");
+                }
+            });
+        }
+        "resume" => {
+            // With the source gone there is nothing to resume onto — and the
+            // menu bar shows a paused session, so Resume is exactly what
+            // someone would reach for. Surface the window instead: the
+            // prompt asking for a new source is in it, behind whatever
+            // they're working in.
+            let lost = core
+                .recorder_state()
+                .is_some_and(|s| s.source_lost.is_some());
+            if lost {
+                eprintln!("[tray] resume ignored — no capture source, asking for one");
+                focus_main_window(&app);
+            } else {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = core.recorder_resume().await {
+                        eprintln!("[tray] resume refused: {e}");
+                    }
+                });
+            }
+        }
+        "stop" => {
+            // The naming prompt is in the main window.
+            focus_main_window(&app);
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.recorder_begin_stop().await {
+                    eprintln!("[tray] stop refused: {e}");
+                }
+            });
+        }
+        other => return Err(format!("unknown tray action {other:?}")),
     }
     Ok(())
-}
-
-#[tauri::command]
-pub fn set_tray_state(
-    state: TrayState,
-    state_mutex: tauri::State<'_, TrayStateMutex>,
-) -> Result<(), String> {
-    if let Ok(mut s) = state_mutex.0.lock() {
-        *s = state;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn get_tray_state(state_mutex: tauri::State<'_, TrayStateMutex>) -> Result<TrayState, String> {
-    if let Ok(s) = state_mutex.0.lock() {
-        Ok(s.clone())
-    } else {
-        Ok(TrayState::default())
-    }
 }
