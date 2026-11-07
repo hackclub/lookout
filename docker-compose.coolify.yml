@@ -56,6 +56,11 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    # wal_level=logical lets another Postgres (the Orchard database) subscribe
+    # to this one and stay in sync, so Lookout can move hosts with a cutover of
+    # seconds instead of a dump/restore outage. Changing it restarts Postgres
+    # once (a few seconds; the server and workers reconnect, recorders retry).
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_DB: lookout
       POSTGRES_USER: lookout
