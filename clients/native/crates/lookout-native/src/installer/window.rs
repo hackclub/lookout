@@ -136,6 +136,15 @@ struct InstallerView {
     content: Anim,
     /// The badge's one-time entrance.
     badge: Anim,
+    /// What the install put in place, kept across a WebView2 install.
+    installed: Option<PathBuf>,
+    /// WebView2 is still missing after the install (its per-user install
+    /// didn't take): the finish page offers to install it with admin rights.
+    wv2_offer: bool,
+    /// The admin WebView2 install is what's running.
+    wv2_running: bool,
+    /// Why the last admin WebView2 install didn't work.
+    wv2_error: Option<String>,
 }
 
 impl InstallerView {
@@ -149,7 +158,22 @@ impl InstallerView {
         let mut badge = Anim::new(0.0);
         badge.set_delayed(1.0, crate::motion::Curve::tween(520.0, STRONG), 80.0);
         let admin = ops.needs_admin(&dir);
-        Self { flow, ops, dir, admin, phase: Phase::Ready, open_after: true, focus, bar: Anim::new(0.0), content, badge }
+        Self {
+            flow,
+            ops,
+            dir,
+            admin,
+            phase: Phase::Ready,
+            open_after: true,
+            focus,
+            bar: Anim::new(0.0),
+            content,
+            badge,
+            installed: None,
+            wv2_offer: false,
+            wv2_running: false,
+            wv2_error: None,
+        }
     }
 
     fn set_phase(&mut self, phase: Phase, cx: &mut Context<Self>) {
@@ -163,6 +187,29 @@ impl InstallerView {
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
+        let (ops, flow, dir) = (self.ops, self.flow, self.dir.clone());
+        self.wv2_running = false;
+        self.run_job(cx, move |report| match flow {
+            Flow::Install => ops.install(&dir, report).map(Some),
+            Flow::Uninstall => ops.uninstall(report).map(|_| None),
+        });
+    }
+
+    /// The finish page's "Install WebView2": through UAC, for everyone.
+    fn start_webview2(&mut self, cx: &mut Context<Self>) {
+        let ops = self.ops;
+        self.wv2_running = true;
+        self.wv2_error = None;
+        self.run_job(cx, move |report| ops.install_webview2_admin(report).map(|_| None));
+    }
+
+    /// Runs `job` on a worker thread, showing its progress, then the page for
+    /// its outcome.
+    fn run_job(
+        &mut self,
+        cx: &mut Context<Self>,
+        job: impl FnOnce(&dyn Fn(Progress)) -> Result<Option<PathBuf>, String> + Send + 'static,
+    ) {
         if matches!(self.phase, Phase::Working { .. }) {
             return;
         }
@@ -170,17 +217,13 @@ impl InstallerView {
         self.set_phase(Phase::Working { detail: String::new() }, cx);
 
         let (tx, rx) = flume::unbounded::<Result<Progress, Result<Option<PathBuf>, String>>>();
-        let (ops, flow, dir) = (self.ops, self.flow, self.dir.clone());
         std::thread::Builder::new()
             .name("lookout-installer".into())
             .spawn(move || {
                 let report = |p: Progress| {
                     let _ = tx.send(Ok(p));
                 };
-                let result = match flow {
-                    Flow::Install => ops.install(&dir, &report).map(Some),
-                    Flow::Uninstall => ops.uninstall(&report).map(|_| None),
-                };
+                let result = job(&report);
                 let _ = tx.send(Err(result));
             })
             .expect("installer thread");
@@ -209,16 +252,32 @@ impl InstallerView {
                             });
                             cx.background_executor().timer(Duration::from_millis(450)).await;
                         }
-                        let _ = this.update(cx, |v, cx| match result {
-                            Ok(exe) => v.set_phase(Phase::Done { exe }, cx),
-                            Err(e) => v.set_phase(Phase::Failed(e), cx),
-                        });
+                        let _ = this.update(cx, |v, cx| v.job_done(result, cx));
                         return;
                     }
                 }
             }
         })
         .detach();
+    }
+
+    fn job_done(&mut self, result: Result<Option<PathBuf>, String>, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.wv2_running) {
+            // Lookout itself is installed either way: back to the finish page.
+            match result {
+                Ok(_) => self.wv2_offer = self.ops.webview2_missing(),
+                Err(e) => self.wv2_error = Some(e),
+            }
+            return self.set_phase(Phase::Done { exe: self.installed.clone() }, cx);
+        }
+        match result {
+            Ok(exe) => {
+                self.installed = exe.clone();
+                self.wv2_offer = self.flow == Flow::Install && self.ops.webview2_missing();
+                self.set_phase(Phase::Done { exe }, cx)
+            }
+            Err(e) => self.set_phase(Phase::Failed(e), cx),
+        }
     }
 
     fn browse(&mut self, cx: &mut Context<Self>) {
@@ -272,6 +331,9 @@ impl InstallerView {
 
     /// NSIS's page header: `(title, subtitle)`.
     fn header(&self) -> (&'static str, &'static str) {
+        if self.wv2_running {
+            return ("Installing WebView2", "Please wait while Microsoft Edge WebView2 is being installed.");
+        }
         match (self.flow, &self.phase) {
             (Flow::Install, Phase::Ready) => ("Choose Install Location", "Choose the folder in which to install Lookout."),
             (Flow::Install, Phase::Working { .. }) => ("Installing", "Please wait while Lookout is being installed."),
@@ -307,7 +369,11 @@ fn style_primary(b: Button) -> Button {
 }
 
 fn secondary_btn(id: &'static str, label: impl Into<SharedString>) -> Button {
-    Button::new(id, label)
+    secondary_btn_style(Button::new(id, label))
+}
+
+fn secondary_btn_style(b: Button) -> Button {
+    b
         .bg(hex(0xffffff))
         .hover_bg(hex(0xfafaf9))
         .border(ink_a(0.10))
@@ -505,7 +571,21 @@ impl Render for InstallerView {
                         ),
                 )
             }
-            (Phase::Done { .. }, Flow::Install) => page.child(para("Click Finish to close Setup.").mt(px(18.0))).child(
+            (Phase::Done { .. }, Flow::Install) => page
+                .when(self.wv2_offer, |page| {
+                    page.child(
+                        para(
+                            "Lookout requires Microsoft Edge WebView2. Click Install WebView2 to install it.",
+                        )
+                        .mt(px(18.0))
+                        .max_w(px(600.0)),
+                    )
+                    .children(self.wv2_error.clone().map(|e| {
+                        div().mt(px(8.0)).max_w(px(600.0)).ts_lh(13.0, 20.0 / 13.0).text_color(red11()).child(e)
+                    }))
+                })
+                .child(para("Click Finish to close Setup.").mt(px(18.0)))
+                .child(
                 div()
                     .id("open-after")
                     .mt(px(16.0))
@@ -536,9 +616,14 @@ impl Render for InstallerView {
                 .child(ghost_btn("cancel", "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
                 .child(shielded("primary", "Uninstall", self.admin, style_danger).on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
             (Phase::Working { .. }, _) => actions,
-            (Phase::Done { .. }, Flow::Install) => {
-                actions.child(primary_btn("primary", "Finish").on_click(cx.listener(|v, _, _, cx| v.finish(cx))))
-            }
+            (Phase::Done { .. }, Flow::Install) => actions
+                .when(self.wv2_offer, |a| {
+                    a.child(
+                        shielded("webview2", "Install WebView2", true, secondary_btn_style)
+                            .on_click(cx.listener(|v, _, _, cx| v.start_webview2(cx))),
+                    )
+                })
+                .child(primary_btn("primary", "Finish").on_click(cx.listener(|v, _, _, cx| v.finish(cx)))),
             (Phase::Done { .. }, Flow::Uninstall) => {
                 actions.child(primary_btn("primary", "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
             }

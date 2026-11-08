@@ -27,6 +27,10 @@ pub const REG_APP: &str = r"Software\hackclub\Lookout";
 pub const REG_UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Lookout";
 pub const REG_PROTOCOL: &str = r"Software\Classes\lookout";
 
+pub const WEBVIEW2: &str = "Microsoft Edge WebView2";
+/// Demo runs: the simulated admin install of WebView2 has happened.
+static DEMO_WEBVIEW2: AtomicBool = AtomicBool::new(false);
+
 /// What's already on this machine.
 #[derive(Clone, Debug)]
 pub struct Existing {
@@ -91,7 +95,13 @@ impl Ops {
             }
             Ops::Real => install_real(dir, progress),
             Ops::Demo => {
-                demo_steps(progress, &["Extract: lookout.exe...", "Create shortcut: Lookout.lnk", "Writing registry"])?;
+                // With LOOKOUT_INSTALLER_DEMO_NO_WEBVIEW2 the per-user
+                // WebView2 install "fails", so the finish page offers the admin one.
+                let mut steps = vec!["Extract: lookout.exe...", "Create shortcut: Lookout.lnk", "Writing registry"];
+                if self.webview2_missing() {
+                    steps.push("Installing Microsoft Edge WebView2...");
+                }
+                demo_steps(progress, &steps)?;
                 Ok(dir.join(EXE))
             }
         }
@@ -105,6 +115,30 @@ impl Ops {
             Ops::Real => uninstall_real(progress),
             Ops::Demo => demo_steps(progress, &["Delete file: lookout.exe", "Delete file: Lookout.lnk", "Remove folder: Lookout"]),
         }
+    }
+
+    /// Whether the WebView2 Runtime (program pages in the app) is missing.
+    pub fn webview2_missing(self) -> bool {
+        match self {
+            Ops::Real => cfg!(windows) && !webview2_present(),
+            Ops::Demo => std::env::var("LOOKOUT_INSTALLER_DEMO_NO_WEBVIEW2").is_ok() && !DEMO_WEBVIEW2.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Installs the WebView2 Runtime for everyone on this PC, through UAC:
+    /// the window's offer when the per-user install in [`Ops::install`]
+    /// didn't take.
+    pub fn install_webview2_admin(self, progress: &dyn Fn(Progress)) -> Result<(), String> {
+        progress(Progress { fraction: 0.1, step: format!("Installing {WEBVIEW2}...") });
+        match self {
+            Ops::Real => install_webview2_real(true)?,
+            Ops::Demo => {
+                demo_steps(progress, &["Downloading MicrosoftEdgeWebview2Setup.exe", "Installing Microsoft Edge WebView2..."])?;
+                DEMO_WEBVIEW2.store(true, Ordering::Relaxed);
+            }
+        }
+        progress(Progress { fraction: 1.0, step: "Completed".into() });
+        Ok(())
     }
 
     /// Starts the installed app, detached.
@@ -308,6 +342,16 @@ fn install_real(dir: &Path, progress: &dyn Fn(Progress)) -> Result<PathBuf, Stri
         use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
+
+    // Almost always already there (Windows 11, and Windows 10 through Windows
+    // Update), and then this is skipped. Not fatal: without it program pages
+    // open in the browser, and the window offers an admin install afterwards.
+    if !webview2_present() {
+        progress(Progress { fraction: 0.95, step: format!("Installing {WEBVIEW2}...") });
+        if let Err(e) = install_webview2_real(false) {
+            log::warn!("[installer] {WEBVIEW2} wasn't installed: {e}");
+        }
+    }
     progress(Progress { fraction: 1.0, step: "Completed".into() });
     Ok(target)
 }
@@ -381,6 +425,81 @@ fn create_shortcut(lnk: &Path, exe: &Path) -> windows::core::Result<()> {
         }
         r
     }
+}
+
+// ── WebView2 ────────────────────────────────────────────────────────────
+//
+// The program panel is a WebView2 (wry). wry links WebView2's loader
+// statically, so the app runs without the runtime; only that panel needs it.
+// Detection and the bootstrapper are Microsoft's "online-only deployment"
+// (learn.microsoft.com/microsoft-edge/webview2/concepts/distribution): run
+// unelevated it installs for this user, no UAC; run elevated, for everyone.
+
+#[cfg(windows)]
+const WEBVIEW2_CLIENT: &str = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+/// Microsoft's Evergreen Bootstrapper (~2 MB; fetches the right runtime).
+#[cfg(windows)]
+const WEBVIEW2_BOOTSTRAPPER: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+/// A `pv` version above 0.0.0.0 under the per-machine (64- or 32-bit view)
+/// or per-user EdgeUpdate client key.
+#[cfg(windows)]
+fn webview2_present() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let has = |root, path: String| {
+        RegKey::predef(root)
+            .open_subkey(path)
+            .and_then(|k| k.get_value::<String, _>("pv"))
+            .is_ok_and(|v| !v.trim().is_empty() && v.trim() != "0.0.0.0")
+    };
+    has(HKEY_LOCAL_MACHINE, format!(r"SOFTWARE\WOW6432Node\{WEBVIEW2_CLIENT}"))
+        || has(HKEY_LOCAL_MACHINE, format!(r"SOFTWARE\{WEBVIEW2_CLIENT}"))
+        || has(HKEY_CURRENT_USER, format!(r"Software\{WEBVIEW2_CLIENT}"))
+}
+
+#[cfg(not(windows))]
+fn webview2_present() -> bool {
+    true
+}
+
+/// Downloads the bootstrapper and runs it `/silent /install`: as is (per-user
+/// unless this process is already elevated), or through UAC with `admin`.
+#[cfg(windows)]
+fn install_webview2_real(admin: bool) -> Result<(), String> {
+    use windows::Win32::System::Com::IBindStatusCallback;
+    use windows::Win32::System::Com::Urlmon::URLDownloadToFileW;
+    use windows::core::{HSTRING, IUnknown};
+
+    let setup = std::env::temp_dir().join(format!("MicrosoftEdgeWebview2Setup-{}.exe", std::process::id()));
+    unsafe {
+        URLDownloadToFileW(
+            None::<&IUnknown>,
+            &HSTRING::from(WEBVIEW2_BOOTSTRAPPER),
+            &HSTRING::from(setup.as_os_str()),
+            0,
+            None::<&IBindStatusCallback>,
+        )
+    }
+    .map_err(|e| format!("Couldn't download {WEBVIEW2}: {}", e.message()))?;
+    let ran = if admin {
+        shell_run_wait(&setup, "/silent /install", true).map(|_| ())
+    } else {
+        std::process::Command::new(&setup)
+            .args(["/silent", "/install"])
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("Couldn't start the {WEBVIEW2} installer: {e}"))
+    };
+    let _ = std::fs::remove_file(&setup);
+    ran?;
+    // The exit code isn't documented; the registry is the answer.
+    if webview2_present() { Ok(()) } else { Err(format!("{WEBVIEW2} didn't install.")) }
+}
+
+#[cfg(not(windows))]
+fn install_webview2_real(_admin: bool) -> Result<(), String> {
+    Err("WebView2 is only installed on Windows.".into())
 }
 
 #[cfg(windows)]
@@ -538,12 +657,6 @@ fn read_report(report: &Path) -> (Option<Progress>, Option<Result<(), String>>) 
 
 #[cfg(windows)]
 fn run_elevated(mut args: Vec<String>, progress: &dyn Fn(Progress)) -> Result<(), String> {
-    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
-    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-    use windows::core::{HSTRING, PCWSTR, w};
-
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let report = std::env::temp_dir().join(format!("lookout-install-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&report);
@@ -557,12 +670,51 @@ fn run_elevated(mut args: Vec<String>, progress: &dyn Fn(Progress)) -> Result<()
         .collect::<Vec<_>>()
         .join(" ");
 
-    let file = HSTRING::from(me.as_os_str());
+    let code = shell_run_wait_with(&me, &params, true, &mut || {
+        if let (Some(p), _) = read_report(&report) {
+            progress(p);
+        }
+    })
+    .map_err(|e| {
+        if e == UAC_DECLINED {
+            "Administrator permission is needed to install to this folder. Choose another folder, or click Retry and allow it.".into()
+        } else {
+            e
+        }
+    })?;
+    let (_, outcome) = read_report(&report);
+    let _ = std::fs::remove_file(&report);
+    match outcome {
+        Some(r) => r,
+        None if code == 0 => Ok(()),
+        None => Err(format!("The elevated installer stopped unexpectedly (exit code {code}).")),
+    }
+}
+
+#[cfg(windows)]
+const UAC_DECLINED: &str = "Administrator permission wasn't given.";
+
+#[cfg(windows)]
+fn shell_run_wait(file: &Path, params: &str, runas: bool) -> Result<u32, String> {
+    shell_run_wait_with(file, params, runas, &mut || {})
+}
+
+/// Starts `file` (through UAC with `runas`), hidden, and waits for it,
+/// calling `tick` every 120 ms; returns its exit code.
+#[cfg(windows)]
+fn shell_run_wait_with(file: &Path, params: &str, runas: bool, tick: &mut dyn FnMut()) -> Result<u32, String> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::core::{HSTRING, PCWSTR, w};
+
+    let file = HSTRING::from(file.as_os_str());
     let params = HSTRING::from(params);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
-        lpVerb: w!("runas"),
+        lpVerb: if runas { w!("runas") } else { PCWSTR::null() },
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(params.as_ptr()),
         nShow: SW_HIDE.0,
@@ -570,17 +722,17 @@ fn run_elevated(mut args: Vec<String>, progress: &dyn Fn(Progress)) -> Result<()
     };
     if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
         return Err(if e.code() == ERROR_CANCELLED.to_hresult() {
-            "Administrator permission is needed to install to this folder. Choose another folder, or click Retry and allow it.".into()
-        } else {
+            UAC_DECLINED.into()
+        } else if runas {
             format!("Couldn't get administrator permission: {}", e.message())
+        } else {
+            format!("Couldn't start {}: {}", file, e.message())
         });
     }
     let process = info.hProcess;
     loop {
         let waited = unsafe { WaitForSingleObject(process, 120) };
-        if let (Some(p), _) = read_report(&report) {
-            progress(p);
-        }
+        tick();
         if waited == WAIT_OBJECT_0 {
             break;
         }
@@ -590,13 +742,7 @@ fn run_elevated(mut args: Vec<String>, progress: &dyn Fn(Progress)) -> Result<()
         let _ = GetExitCodeProcess(process, &mut code);
         let _ = CloseHandle(process);
     }
-    let (_, outcome) = read_report(&report);
-    let _ = std::fs::remove_file(&report);
-    match outcome {
-        Some(r) => r,
-        None if code == 0 => Ok(()),
-        None => Err(format!("The elevated installer stopped unexpectedly (exit code {code}).")),
-    }
+    Ok(code)
 }
 
 #[cfg(not(windows))]
