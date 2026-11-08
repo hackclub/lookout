@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
     AnyElement, App, AppContext, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
+    DispatchPhase, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement,
     PathBuilder, Pixels, Render, RenderImage, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     Window, canvas, div, point, px,
 };
@@ -347,6 +348,12 @@ impl TimelapseEditor {
     fn on_video(&mut self, ev: &VideoEvent, cx: &mut Context<Self>) {
         match ev {
             VideoEvent::Time(t) => {
+                // While dragging, the pointer owns the playhead: the
+                // player's reports trail it (and Media Foundation can briefly
+                // report the pre-seek time), which made the head jump back.
+                if self.drag.is_some() {
+                    return;
+                }
                 self.time = *t;
                 // Playback skips cut stretches; a cut that runs to the end stops.
                 if self.playing && self.drag.is_none() {
@@ -448,7 +455,8 @@ impl TimelapseEditor {
         let next = match drag {
             Drag::Scrub => {
                 self.seek(u, cx);
-                Drag::Scrub
+                self.drag = Some(Drag::Scrub);
+                return;
             }
             Drag::Maybe { down } => {
                 if (u - down).abs() < 0.34 {
@@ -1052,18 +1060,39 @@ impl Render for TimelapseEditor {
                 )
         });
 
+        // While a drag is live, follow the pointer anywhere in the window:
+        // element mouse-move listeners only fire while hovered, so drifting
+        // off the thin strip froze the drag until the pointer came back,
+        // then it snapped.
+        let dragging = self.drag.is_some();
+        let capture = dragging.then(|| {
+            let (mv, up) = (cx.entity(), cx.entity());
+            canvas(|_, _, _| (), move |_, _, window, _| {
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        mv.update(cx, |e, cx| e.on_move(ev.position.x, cx));
+                    }
+                });
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                        up.update(cx, |e, cx| {
+                            e.head_scale.set_css(if e.head_hover { ed_hover(1.25) } else { 1.0 }, ed_ms(120.0), QUART);
+                            e.on_up(cx)
+                        });
+                    }
+                });
+            })
+            .absolute()
+            .size_0()
+        });
+
         let timeline = div()
             .id("editor-timeline")
             .relative()
-            .on_mouse_move(cx.listener(|e, ev: &MouseMoveEvent, _, cx| e.on_move(ev.position.x, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|e, _, _, cx| {
-                e.head_scale.set_css(if e.head_hover { ed_hover(1.25) } else { 1.0 }, ed_ms(120.0), QUART);
-                e.on_up(cx)
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|e, _, _, cx| e.on_up(cx)))
             .child(ruler)
             .child(strip)
-            .children(playhead);
+            .children(playhead)
+            .children(capture);
 
         // ── Actions ──
         let cuts = em::regions_to_cuts(&normalized, &self.units);

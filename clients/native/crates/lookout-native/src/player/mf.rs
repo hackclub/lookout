@@ -353,6 +353,9 @@ fn run(
     // Seeks are chased: one at a time, latest target wins.
     let mut pending_seek: Option<f64> = None;
     let mut seek_started: Option<Instant> = None;
+    // The last target handed to the engine: only that one may clear the
+    // UI-side `seek_target` once it lands (a newer one may be queued).
+    let mut issued: Option<f64> = None;
 
     loop {
         let playing = shared.lock().want_playing;
@@ -403,6 +406,7 @@ fn run(
             }
             if seek_started.is_none() {
                 if let Some(t) = pending_seek.take() {
+                    issued = Some(t);
                     if engine.SetCurrentTime(t).is_ok() {
                         seek_started = Some(Instant::now());
                     }
@@ -462,7 +466,7 @@ fn run(
             s.position = engine.GetCurrentTime();
             s.buffered = buffered;
             s.seeking = seek_started.is_some() || pending_seek.is_some();
-            if !s.seeking {
+            if !s.seeking && (s.seek_target.is_none() || s.seek_target == issued) {
                 s.seek_target = None;
             }
             if ended && s.want_playing {
