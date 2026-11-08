@@ -1088,6 +1088,14 @@ impl MainWindow {
         });
     }
 
+    /// The record page is showing the live recorder (not the source picker).
+    fn in_recorder(&self, cx: &App) -> bool {
+        match self.slots.iter().rev().find(|s| !s.leaving).map(|s| &s.page) {
+            Some(PageView::Record(r)) => r.read(cx).is_recording_view(),
+            _ => false,
+        }
+    }
+
     fn header_nav(&self, cx: &App) -> HeaderNav {
         let current = self.slots.iter().rev().find(|s| !s.leaving);
         if let Some(nav) = current.and_then(|s| s.page.header(cx)) {
@@ -1123,7 +1131,9 @@ impl MainWindow {
                     Some(PageView::Record(r)) => r.read(cx).header_title(),
                     _ => "Recording",
                 };
-                HeaderNav { title: title.into(), subtitle: None, on_back: back(self), app_icon: false }
+                // No way out mid-capture: leaving the page closes the recorder.
+                let on_back = if self.in_recorder(cx) { None } else { back(self) };
+                HeaderNav { title: title.into(), subtitle: None, on_back, app_icon: false }
             }
             Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self), app_icon: false },
             Route::EditorOpen(_) => HeaderNav { title: "Lookout".into(), subtitle: Some("Editing in another window".into()), on_back: None, app_icon: true },
@@ -1216,7 +1226,7 @@ impl MainWindow {
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = ev.keystroke.key.as_str();
         if (key == "escape" || key == "backspace") && !self.route.is_gallery() && !window.default_prevented() {
-            if crate::ui::input::any_input_focused(window, cx) {
+            if crate::ui::input::any_input_focused(window, cx) || self.in_recorder(cx) {
                 return;
             }
             self.back(cx);
