@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      native:
+        description: "Also build Lookout Native (clients/native) artifacts"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -510,6 +515,211 @@ jobs:
             clients/desktop/src-tauri/target/release/*.pdb
             clients/desktop/src-tauri/target/*/release/*.pdb
 
+  # Lookout Native (clients/native, GPUI): builds the Lookout-native_*
+  # artifacts that native-updates (below) signs into update.json, plus a .dmg
+  # for first installs on macOS. Off until the repository variable
+  # NATIVE_RELEASE is "true" (or "native" is ticked on a manual run), so Tauri
+  # releases are untouched until then. The bundling itself lives in
+  # clients/native/packaging/ so it runs the same way on a dev machine.
+  # Untagged (manual) runs build unsigned artifacts for testing; only tags
+  # sign, notarize and stamp the tag's version.
+  native-build:
+    needs: tests
+    if: vars.NATIVE_RELEASE == 'true' || inputs.native
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: darwin-aarch64
+          # Cross-built on Apple Silicon, like the Tauri universal binary.
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            label: darwin-x86_64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+          # glibc 2.39 is the AppImage's floor, the same as the Tauri .deb's.
+          - platform: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Build: GPUI (X11/Wayland/xkbcommon/fontconfig), wry (WebKitGTK 4.1),
+      # the recorder (GStreamer, PipeWire, xcap's xcb/gbm). Bundle: the
+      # GStreamer plugin packages, whose plugins appimage.sh copies into the
+      # AppImage, glib-networking (TLS for libsoup), and the GTK tools
+      # linuxdeploy-plugin-gtk runs.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-randr0-dev \
+            libxcb-shm0-dev \
+            libxcb-xfixes0-dev \
+            libxrandr-dev \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libvulkan-dev \
+            libegl-dev \
+            libgbm-dev \
+            libdbus-1-dev \
+            libpipewire-0.3-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            gstreamer1.0-pipewire \
+            glib-networking \
+            libglib2.0-bin \
+            libgdk-pixbuf2.0-bin \
+            desktop-file-utils \
+            file
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "./clients/native -> target"
+          shared-key: native-${{ matrix.target }}
+
+      # The app reports CARGO_PKG_VERSION to the updater and update.json
+      # carries the tag's, so the two must agree.
+      - name: Stamp the tag's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: clients/native/packaging/version.sh --set "${GITHUB_REF_NAME#v}"
+
+      - name: Build, sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        run: clients/native/packaging/macos/bundle.sh --target ${{ matrix.target }} --out clients/native/dist
+        env:
+          # Empty on untagged runs: bundle.sh then signs ad hoc and skips notarizing.
+          APPLE_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: clients/native/packaging/linux/appimage.sh --out clients/native/dist
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        working-directory: clients/native
+        run: cargo build --release -p lookout-native
+
+      # Same signer, account and preflight as the Tauri job above. sign.cmd is
+      # what makensis calls (!finalize / !uninstfinalize) for the installer
+      # and its uninstaller; lookout.exe is signed before it is packed.
+      - name: Configure Windows code signing
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          cargo install artifact-signing-cli --version 0.11.0 --locked
+          signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
+            -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -V | tail -1)
+          if [ -z "$signtool" ]; then
+            echo "::error::No x64 signtool.exe found under the Windows 10 SDK." >&2
+            exit 1
+          fi
+          signtool=$(cygpath -w "$signtool")
+          # makensis runs SIGN_CMD unquoted through cmd, so its path must have no spaces.
+          sign_cmd="$RUNNER_TEMP\\lookout-sign.cmd"
+          printf '@echo off\r\nartifact-signing-cli -e https://eus.codesigning.azure.net -a hackclub -c hackatime-desktop --sign-tool-path "%s" %%1\r\n' "$signtool" > "$sign_cmd"
+          cat "$sign_cmd"
+          case "$sign_cmd" in *" "*) echo "::error::$sign_cmd has a space in it" >&2; exit 1 ;; esac
+          probe="$RUNNER_TEMP\\probe.exe"
+          cp ~/.cargo/bin/artifact-signing-cli.exe "$probe"
+          cmd //c "$sign_cmd" "$probe"
+          "$signtool" verify //pa "$probe"
+          echo "SIGN_CMD=$sign_cmd" >> "$GITHUB_ENV"
+          echo "SIGNTOOL=$signtool" >> "$GITHUB_ENV"
+
+      - name: Build the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          version=$(clients/native/packaging/version.sh)
+          mkdir -p clients/native/dist
+          src=$(cygpath -w clients/native/target/release)
+          out=$(cygpath -w "clients/native/dist/Lookout-native_${version}_windows-x86_64-setup.exe")
+          sign=()
+          if [ -n "${SIGN_CMD:-}" ]; then
+            cmd //c "$SIGN_CMD" "$src\\lookout.exe"
+            sign=("-DSIGN_CMD=$SIGN_CMD")
+          fi
+          makensis=$(command -v makensis || true)
+          if [ -z "$makensis" ]; then
+            makensis="/c/Program Files (x86)/NSIS/makensis.exe"
+            [ -x "$makensis" ] || choco install nsis -y --no-progress
+          fi
+          "$makensis" -V3 "-DVERSION=$version" "-DSRC_DIR=$src" "-DOUTFILE=$out" "${sign[@]}" \
+            "$(cygpath -w clients/native/packaging/windows/lookout.nsi)"
+
+      - name: Verify the installer and its payload are signed (Windows)
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SIGNTOOL" verify //pa //v clients/native/target/release/lookout.exe
+          for exe in clients/native/dist/Lookout-native_*-setup.exe; do
+            "$SIGNTOOL" verify //pa //v "$exe"
+            payload=$(mktemp -d)
+            7z x -y -o"$payload" "$exe" > /dev/null
+            "$SIGNTOOL" verify //pa "$payload/lookout.exe"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          # native-updates downloads lookout-native-* and keys off the file names.
+          name: lookout-native-${{ matrix.label }}
+          if-no-files-found: error
+          path: clients/native/dist/Lookout-native_*
+
+      - name: Upload Windows debug symbols (.pdb)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pdb-native-${{ matrix.label }}
+          if-no-files-found: warn
+          path: clients/native/target/release/*.pdb
+
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -534,7 +744,9 @@ jobs:
       - name: Rename artifacts with OS labels
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( \
+          # Lookout Native's artifacts (lookout-native-*) are published by the
+          # native-updates job, never mixed into the Tauri assets / latest.json.
+          find artifacts -type f -not -path 'artifacts/lookout-native-*' \( \
             -name "*.dmg" -o \
             -name "*.app.tar.gz" -o \
             -name "*.deb" -o \
@@ -653,6 +865,119 @@ jobs:
             echo "Uploading: $file"
             gh release upload "$TAG" "$file" --clobber
           done
+
+  # Lookout Native ("update v2"): signed update.json + zstd patches for the
+  # GPUI app. A no-op until a build job uploads native artifacts, so the
+  # Tauri release above is unaffected. Contract for that build job:
+  #   actions/upload-artifact name `lookout-native-<anything>`, files named
+  #   Lookout-native_<version>_darwin-aarch64.app.tar.gz   (tar of Lookout.app/)
+  #   Lookout-native_<version>_darwin-x86_64.app.tar.gz
+  #   Lookout-native_<version>_windows-x86_64-setup.exe    (NSIS)
+  #   Lookout-native_<version>_linux-x86_64.AppImage
+  # Stable: update.json + artifacts + patches go on the tag's release (live
+  # once it's published, via releases/latest/download/update.json).
+  # Beta: everything also goes on the rolling `channel-beta` prerelease, live
+  # immediately (draft-release URLs aren't public). Every tag feeds Beta;
+  # only tags without a pre-release suffix (v1.2.3, not v1.2.3-beta.1) feed
+  # Stable. Rollout/blocked/min-supported come from repository variables.
+  native-updates:
+    # Skipped along with native-build while NATIVE_RELEASE is off, and when any
+    # native platform failed, so a release never ships a partial native set.
+    needs: [release, native-build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lookout-native-*
+          merge-multiple: true
+          path: native
+
+      - name: Any native artifacts?
+        id: native
+        run: |
+          shopt -s nullglob
+          files=(native/Lookout-native_*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Lookout Native artifacts in this release — nothing to do."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Native artifact: %s\n' "${files[@]}"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust stable
+        if: steps.native.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build lookout-update-tool
+        if: steps.native.outputs.present == 'true'
+        working-directory: clients/native
+        run: cargo build --release -p lookout-update-tool --locked
+
+      - name: Fetch the previous releases' native artifacts (patch bases)
+        if: steps.native.outputs.present == 'true'
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p prev
+          found=0
+          for t in $(gh release list --limit 30 --json tagName --jq '.[].tagName' | grep '^v' | grep -vx "$TAG"); do
+            gh release download "$t" --pattern 'Lookout-native_*' --dir "prev/$t" 2>/dev/null || true
+            if ls "prev/$t"/Lookout-native_* >/dev/null 2>&1; then
+              found=$((found + 1))
+            else
+              rm -rf "prev/$t"
+            fi
+            [ "$found" -ge 3 ] && break
+          done
+          echo "Patch bases from $found earlier release(s)"; ls -R prev
+
+      - name: Generate, sign and publish update.json
+        if: steps.native.outputs.present == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          ROLLOUT: ${{ vars.NATIVE_UPDATE_ROLLOUT || '1' }}
+          BLOCKED: ${{ vars.NATIVE_UPDATE_BLOCKED || '' }}
+          MIN_SUPPORTED: ${{ vars.NATIVE_UPDATE_MIN_SUPPORTED || '' }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          TOOL=clients/native/target/release/lookout-update-tool
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+          # Release notes: the annotated tag's message, else a pointer to the release.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" >/dev/null 2>&1 || true
+          git tag -l --format='%(contents)' "$TAG" | sed '/-----BEGIN PGP/,$d' > notes.txt
+          [ -s notes.txt ] || echo "See what's new at https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG" > notes.txt
+          PREV_ARGS=()
+          for d in prev/*/; do [ -d "$d" ] && PREV_ARGS+=(--previous "$d"); done
+
+          publish() { # channel base-url out-dir upload-tag
+            "$TOOL" manifest --version "$VERSION" --channel "$1" --artifacts native \
+              --base-url "$2" --out "$3" --notes-file notes.txt \
+              --rollout "$ROLLOUT" --blocked "$BLOCKED" --min-supported "$MIN_SUPPORTED" \
+              "${PREV_ARGS[@]}" --sign
+            "$TOOL" verify "$3/update.json"
+            cat "$3/update.json"
+            gh release upload "$4" native/Lookout-native_* "$3"/* --clobber
+          }
+
+          case "$VERSION" in
+            *-*) echo "Pre-release tag: Beta channel only." ;;
+            *) publish stable "$REPO_URL/$TAG" out-stable "$TAG" ;;
+          esac
+
+          gh release view channel-beta >/dev/null 2>&1 || gh release create channel-beta --prerelease \
+            --title "Lookout Native beta channel" \
+            --notes "Rolling release the Lookout Native beta channel updates from (update.json). Not for direct download."
+          publish beta "$REPO_URL/channel-beta" out-beta channel-beta
 
   packages:
     needs: release

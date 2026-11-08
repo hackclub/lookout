@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lookout Native's Info.plist. bundle.sh fills in @VERSION@ (the release
+  version) and @BUNDLE_VERSION@ (the same without a pre-release suffix,
+  because CFBundleVersion must be numbers and dots).
+
+  CFBundleIdentifier deliberately matches the Tauri app (tauri.conf.json
+  "identifier"): Lookout Native replaces it as /Applications/Lookout.app, and
+  with the same identifier and the same Developer ID team the Screen
+  Recording and Camera grants the user already gave carry over, and the app
+  reads the same com.hackclub.lookout data directories (store.rs APP_ID).
+
+  No LSUIElement, like the Tauri app: Lookout is a regular Dock app that also
+  has a menu-bar item.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Lookout</string>
+	<key>CFBundleName</key>
+	<string>Lookout</string>
+	<key>CFBundleExecutable</key>
+	<string>lookout</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.hackclub.lookout</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUNDLE_VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.15</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Hack Club, a 501(c)(3) nonprofit (EIN: 81-2908499)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.hackclub.lookout</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>lookout</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Lookout uses your camera to capture periodic photos of your work for timelapses.</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+</dict>
+</plist>

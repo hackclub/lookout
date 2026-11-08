@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lookout
+Comment=Record timelapses of your work for Hack Club
+Exec=lookout %u
+Icon=com.hackclub.lookout
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=com.hackclub.lookout
+# lookout:// deep links (session links and program pairing callbacks)
+MimeType=x-scheme-handler/lookout;

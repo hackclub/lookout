@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for Lookout Native. Camera capture
+  (AVCaptureSession) needs the camera entitlement under the hardened runtime.
+  Unlike the Tauri app there is no in-process JavaScript engine (the Program
+  Panel's WKWebView runs its JIT in Apple's own WebContent process), so
+  allow-jit / allow-unsigned-executable-memory are not needed.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+</dict>
+</plist>

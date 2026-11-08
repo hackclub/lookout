@@ -15,6 +15,8 @@ packages/server/public/session/
 
 # Rust / Tauri
 clients/desktop/src-tauri/target/
+# Lookout Native (GPUI)
+clients/native/target/
 clients/desktop/src-tauri/gen/
 # Written by the release workflow so signCommand only applies to signed
 # CI builds; a dev machine has no signing credentials.

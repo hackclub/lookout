@@ -1,0 +1,27 @@
+# Lookout Phoenix — the native (GPUI) Lookout desktop app.
+#
+# A workspace of its own so the GPUI dependency tree never touches the Tauri
+# build in clients/desktop. The recording engine is the same Rust the Tauri
+# shell links: lookout-core and the three platform-free crates under
+# clients/desktop/src-tauri/crates, pulled in by path.
+[workspace]
+members = ["crates/lookout-native", "crates/lookout-dev-server", "crates/lookout-update", "crates/lookout-update-tool"]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+# GPUI is unusable unoptimised (a heavy frame goes from ~13ms to ~127ms), so
+# dependencies build optimised even in dev; our own crate stays fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

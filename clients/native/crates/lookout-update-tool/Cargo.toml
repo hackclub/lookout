@@ -1,0 +1,15 @@
+[package]
+name = "lookout-update-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release side of Lookout Native's update v2: update.json generation, zstd patches, minisign signing, fake releases for local testing"
+publish = false
+
+[dependencies]
+lookout-update = { path = "../lookout-update", default-features = false }
+minisign = "0.10"
+serde_json = "1"
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"

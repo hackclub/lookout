@@ -8,6 +8,11 @@ publish = false
 [lib]
 name = "lookout_core"
 
+[features]
+default = ["ashpd-tokio"]
+ashpd-tokio = ["ashpd/tokio"]
+ashpd-async-io = ["ashpd/async-io"]
+
 [dependencies]
 lookout-session = { path = "../lookout-session" }
 lookout-protocol = { path = "../lookout-protocol" }
@@ -61,7 +66,11 @@ windows = { version = "0.62", features = [
 ] }
 
 [target."cfg(target_os = \"linux\")".dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+# The D-Bus runtime is a feature so a host that already links ashpd with
+# the other runtime (GPUI's Linux backend uses async-io; ashpd refuses both)
+# can pick it: the Tauri shell keeps the default tokio, the native GPUI app
+# builds with `default-features = false, features = ["ashpd-async-io"]`.
+ashpd = { version = "0.13", default-features = false, features = ["screencast"] }
 # `StreamExt::next`, to await the screencast portal's `Closed` signal
 # (screencast.rs). Already in the tree via ashpd/zbus — this is a direct dep
 # on an existing build.

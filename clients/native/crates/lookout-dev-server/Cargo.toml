@@ -1,0 +1,13 @@
+[package]
+name = "lookout-dev-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A tiny in-memory Lookout API for developing the native client without a real server"
+publish = false
+
+[dependencies]
+tiny_http = "0.12"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rand = "0.9"

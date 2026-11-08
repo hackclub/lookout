@@ -1,0 +1,123 @@
+//! Icons. Phosphor icons are exported at the weight each call site used in
+//! the Tauri app; `Lk*` are the hand-drawn SVGs it inlined. GPUI tints SVGs
+//! by their alpha, so colour comes from `text_color`.
+
+use gpui_kit::gpui::{Hsla, Styled, Svg, Transformation, px, svg};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    GearSixFill,
+    PlusBold,
+    ArrowSquareOutBold,
+    XBold,
+    WarningCircleFill,
+    InfoFill,
+    CaretLeftBold,
+    CaretRightBold,
+    FunnelFill,
+    LinkBold,
+    WrenchFill,
+    CheckBold,
+    CopyRegular,
+    Monitor,
+    AppWindow,
+    VideoCamera,
+    Broadcast,
+    LkChevronLeft,
+    LkHeaderBack,
+    LkHeaderClose,
+    LkMonitor,
+    LkCamera,
+    LkErrorCircle,
+    LkCheckLine,
+    LkPauseGlyph,
+    LkArchiveX,
+    LkPencil,
+    LkPlay,
+    LkPauseBars,
+    LkPower,
+    LkEditorWindow,
+}
+
+impl Icon {
+    pub const ALL: &'static [Icon] = &[
+        Icon::GearSixFill,
+        Icon::PlusBold,
+        Icon::ArrowSquareOutBold,
+        Icon::XBold,
+        Icon::WarningCircleFill,
+        Icon::InfoFill,
+        Icon::CaretLeftBold,
+        Icon::CaretRightBold,
+        Icon::FunnelFill,
+        Icon::LinkBold,
+        Icon::WrenchFill,
+        Icon::CheckBold,
+        Icon::CopyRegular,
+        Icon::Monitor,
+        Icon::AppWindow,
+        Icon::VideoCamera,
+        Icon::Broadcast,
+        Icon::LkChevronLeft,
+        Icon::LkHeaderBack,
+        Icon::LkHeaderClose,
+        Icon::LkMonitor,
+        Icon::LkCamera,
+        Icon::LkErrorCircle,
+        Icon::LkCheckLine,
+        Icon::LkPauseGlyph,
+        Icon::LkArchiveX,
+        Icon::LkPencil,
+        Icon::LkPlay,
+        Icon::LkPauseBars,
+        Icon::LkPower,
+        Icon::LkEditorWindow,
+    ];
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Icon::GearSixFill => "icons/gear-six-fill.svg",
+            Icon::PlusBold => "icons/plus-bold.svg",
+            Icon::ArrowSquareOutBold => "icons/arrow-square-out-bold.svg",
+            Icon::XBold => "icons/x-bold.svg",
+            Icon::WarningCircleFill => "icons/warning-circle-fill.svg",
+            Icon::InfoFill => "icons/info-fill.svg",
+            Icon::CaretLeftBold => "icons/caret-left-bold.svg",
+            Icon::CaretRightBold => "icons/caret-right-bold.svg",
+            Icon::FunnelFill => "icons/funnel-fill.svg",
+            Icon::LinkBold => "icons/link-bold.svg",
+            Icon::WrenchFill => "icons/wrench-fill.svg",
+            Icon::CheckBold => "icons/check-bold.svg",
+            Icon::CopyRegular => "icons/copy-regular.svg",
+            Icon::Monitor => "icons/monitor-regular.svg",
+            Icon::AppWindow => "icons/app-window-regular.svg",
+            Icon::VideoCamera => "icons/video-camera-regular.svg",
+            Icon::Broadcast => "icons/broadcast-regular.svg",
+            Icon::LkChevronLeft => "icons/lk-chevron-left.svg",
+            Icon::LkHeaderBack => "icons/lk-header-back.svg",
+            Icon::LkHeaderClose => "icons/lk-header-close.svg",
+            Icon::LkMonitor => "icons/lk-monitor.svg",
+            Icon::LkCamera => "icons/lk-camera.svg",
+            Icon::LkErrorCircle => "icons/lk-error-circle.svg",
+            Icon::LkCheckLine => "icons/lk-check-line.svg",
+            Icon::LkPauseGlyph => "icons/lk-pause-glyph.svg",
+            Icon::LkArchiveX => "icons/lk-archive-x.svg",
+            Icon::LkPencil => "icons/lk-pencil.svg",
+            Icon::LkPlay => "icons/lk-play.svg",
+            Icon::LkPauseBars => "icons/lk-pause-bars.svg",
+            Icon::LkPower => "icons/lk-power.svg",
+            Icon::LkEditorWindow => "icons/lk-editor-window.svg",
+        }
+    }
+
+    pub fn el(self, size: f32, color: Hsla) -> Svg {
+        svg().path(self.path()).size(px(size)).flex_none().text_color(color)
+    }
+
+    /// The icon scaled about its centre (SVG is the one element GPUI can
+    /// transform).
+    pub fn scaled(self, size: f32, color: Hsla, scale: f32) -> Svg {
+        self.el(size, color)
+            .with_transformation(Transformation::scale(gpui_kit::gpui::size(scale, scale)))
+    }
+}
