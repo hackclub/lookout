@@ -58,6 +58,19 @@ pub fn set_header_bar_shown(on: bool) {
     HEADER_BAR.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+static VIBRANT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a system material (macOS vibrancy, Windows Mica) shows through the
+/// main window. Scroll-edge fades are colour overlays here (GPUI has no
+/// gradient masks, which the Tauri app faded content with), and a flat colour
+/// can't fade into a translucent material, so they're skipped while it's on.
+pub fn vibrant() -> bool {
+    VIBRANT.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_vibrant(on: bool) {
+    VIBRANT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `#rrggbb` + alpha → Hsla.
 pub const fn rgba8(r: u8, g: u8, b: u8, a: f32) -> Rgba {
     Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a }

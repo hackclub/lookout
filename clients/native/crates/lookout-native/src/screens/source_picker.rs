@@ -666,8 +666,8 @@ impl Render for SourcePicker {
                             .pb(px(4.0))
                             .children(list),
                     )
-                    .when(show_top, |d| d.child(edge_fade(true, 12.0, t.bg_body)))
-                    .when(show_bottom, |d| d.child(edge_fade(false, 12.0, t.bg_body)))
+                    .when(show_top && !theme::vibrant(), |d| d.child(edge_fade(true, 12.0, t.bg_body)))
+                    .when(show_bottom && !theme::vibrant(), |d| d.child(edge_fade(false, 12.0, t.bg_body)))
                     .children(hint),
             )
             .child(div().flex_none().when(!self.selected.is_empty(), |d| {

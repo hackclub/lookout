@@ -137,6 +137,9 @@ struct Slot {
 
 pub struct MainWindow {
     pub route: Route,
+    /// A system material (vibrancy / Mica) is behind the window, so the
+    /// window background is left unpainted.
+    vibrant: bool,
     history: Vec<Route>,
     slots: Vec<Slot>,
     focus: FocusHandle,
@@ -235,7 +238,8 @@ pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
         } else if is_linux() {
             WindowBackgroundAppearance::Opaque
         } else if is_mac() {
-            WindowBackgroundAppearance::Blurred
+            // See platform::vibrancy: our own Sidebar material goes behind GPUI.
+            WindowBackgroundAppearance::Transparent
         } else {
             WindowBackgroundAppearance::MicaBackdrop
         },
@@ -295,6 +299,7 @@ impl MainWindow {
         }));
         let update_pill = cx.new(|cx| crate::ui::update_pill::UpdatePill::new(updater, is_windows(), cx));
         let mut mw = Self {
+            vibrant: crate::platform::vibrancy::apply(window),
             route: Route::Gallery,
             history: Vec::new(),
             slots: Vec::new(),
@@ -1079,6 +1084,7 @@ impl Render for MainWindow {
         let t = theme(cx).clone();
         let csd = uses_header_bar(window);
         crate::theme::set_header_bar_shown(true);
+        crate::theme::set_vibrant(self.vibrant);
         self.frame_offset = if csd { WINDOW_MARGIN } else { 0.0 };
         self.mount_pending(window, cx);
         if std::mem::take(&mut self.focus_requested) {
@@ -1355,7 +1361,9 @@ impl Render for MainWindow {
         if csd {
             linux_frame(body.into_any_element(), &t, active, window)
         } else {
-            div().size_full().bg(t.bg_body).child(body).into_any_element()
+            let root = div().size_full();
+            let root = if self.vibrant { root } else { root.bg(t.bg_body) };
+            root.child(body).into_any_element()
         }
     }
 }

@@ -26,6 +26,8 @@ pub struct EditorWindows(pub HashMap<String, WindowHandle<EditorWindow>>);
 impl Global for EditorWindows {}
 
 pub struct EditorWindow {
+    /// A system material is behind the window (see platform::vibrancy).
+    vibrant: bool,
     token: String,
     editor: Entity<TimelapseEditor>,
     name: Option<String>,
@@ -63,7 +65,7 @@ pub fn open(token: String, cx: &mut App) {
         } else if is_linux() {
             WindowBackgroundAppearance::Opaque
         } else if is_mac() {
-            WindowBackgroundAppearance::Blurred
+            WindowBackgroundAppearance::Transparent
         } else {
             WindowBackgroundAppearance::MicaBackdrop
         },
@@ -116,6 +118,7 @@ impl EditorWindow {
             me.update(cx, |this, cx| this.request_close(window, cx)).unwrap_or(true)
         });
         Self {
+            vibrant: crate::platform::vibrancy::apply(window),
             token,
             editor,
             name: None,
@@ -342,7 +345,7 @@ impl Render for EditorWindow {
                 .child(linux_frame(body.into_any_element(), &t, active, window))
                 .into_any_element()
         } else {
-            div().size_full().bg(t.bg_body).child(body).into_any_element()
+            div().size_full().when(!self.vibrant, |d| d.bg(t.bg_body)).child(body).into_any_element()
         }
     }
 }

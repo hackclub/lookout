@@ -293,8 +293,8 @@ impl Render for GalleryPage {
                         .p(px(16.0))
                         .child(div().flex().flex_col().gap(px(12.0)).children(cards)),
                 )
-                .when(show_top, |d| d.child(edge_fade(true, 20.0, t.bg_body)))
-                .when(show_bottom, |d| d.child(edge_fade(false, 20.0, t.bg_body))),
+                .when(show_top && !theme::vibrant(), |d| d.child(edge_fade(true, 20.0, t.bg_body)))
+                .when(show_bottom && !theme::vibrant(), |d| d.child(edge_fade(false, 20.0, t.bg_body))),
         )
         .into_any_element()
     }

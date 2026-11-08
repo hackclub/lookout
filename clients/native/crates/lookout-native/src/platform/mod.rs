@@ -11,6 +11,7 @@ pub mod permissions;
 pub mod reduce_motion;
 pub mod single_instance;
 pub mod tray;
+pub mod vibrancy;
 pub mod webview;
 pub mod desktop_appearance;
 
