@@ -230,8 +230,10 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
 - Quitting while a capture is running pauses the session first, from every
   close path: the window button, the Linux header bar and ⌘Q.
 - A deep link that arrives before the tip has loaded still gets its tip moment.
-- In-app confirm dialogs replace the GTK `confirm()` popups, styled like the
-  rest of the app. On Windows the primary button comes first.
+- On Linux, in-app confirm dialogs replace the GTK `confirm()` popups, styled
+  like the rest of the app. macOS and Windows keep the system's own alert
+  (NSAlert / task dialog), as the Tauri app's dialog plugin did, with buttons
+  named for the action ("Archive", "Publish") instead of OK.
 
 ## Known gaps and next steps
 

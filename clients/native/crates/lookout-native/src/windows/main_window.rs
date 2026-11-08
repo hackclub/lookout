@@ -835,6 +835,11 @@ impl MainWindow {
 
     /// A one-button message dialog (Tauri `message()`).
     pub fn alert(&mut self, title: &str, message: &str, cx: &mut Context<Self>) {
+        if let Some(h) = native_handle(cx) {
+            use gpui_kit::gpui::PromptLevel;
+            crate::ui::overlay::native_dialog(h, PromptLevel::Info, title.into(), message.into(), "OK".into(), None, |_, _| {}, cx);
+            return;
+        }
         let me = cx.entity();
         let (title, message) = (title.to_string(), message.to_string());
         let view = cx.new(|cx| {
@@ -864,6 +869,11 @@ impl MainWindow {
         on_ok: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) {
+        if let Some(h) = native_handle(cx) {
+            use gpui_kit::gpui::PromptLevel;
+            crate::ui::overlay::native_dialog(h, PromptLevel::Warning, title.into(), message.into(), ok_label.into(), Some("Cancel".into()), on_ok, cx);
+            return;
+        }
         let me = cx.entity();
         let (title, message, ok_label) = (title.to_string(), message.to_string(), ok_label.to_string());
         let on_ok = std::rc::Rc::new(on_ok);
@@ -894,6 +904,20 @@ impl MainWindow {
         );
         if let Some(d) = detail.filter(|d| !d.is_empty()) {
             message.push_str(&format!("\n\nDetails: {d}"));
+        }
+        if let Some(h) = native_handle(cx) {
+            use gpui_kit::gpui::PromptLevel;
+            crate::ui::overlay::native_dialog(
+                h,
+                PromptLevel::Warning,
+                "Update couldn't be installed".into(),
+                message,
+                "Open Releases Page".into(),
+                Some("Not Now".into()),
+                |_, cx| cx.open_url(crate::updater::RELEASES_URL),
+                cx,
+            );
+            return;
         }
         let me = cx.entity();
         let view = cx.new(|cx| {
@@ -1540,4 +1564,12 @@ impl Render for PanelPrompt {
                     )),
             )
     }
+}
+
+/// The main window's handle when dialogs should be native (macOS/Windows).
+fn native_handle(cx: &App) -> Option<gpui_kit::gpui::AnyWindowHandle> {
+    if !crate::ui::overlay::native_dialogs() {
+        return None;
+    }
+    cx.try_global::<crate::windows::MainHandle>().map(|h| h.0.into())
 }

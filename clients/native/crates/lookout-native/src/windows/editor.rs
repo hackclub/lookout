@@ -133,7 +133,7 @@ impl EditorWindow {
     }
 
     /// `onCloseRequested`: confirm, then publish with the cuts so far.
-    fn request_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.finished {
             return true;
         }
@@ -146,6 +146,20 @@ impl EditorWindow {
         } else {
             "Closing publishes this timelapse as recorded. This can't be undone.".to_string()
         };
+        if crate::ui::overlay::native_dialogs() {
+            let me = cx.entity();
+            crate::ui::overlay::native_dialog(
+                window.window_handle(),
+                gpui_kit::gpui::PromptLevel::Warning,
+                "Finish timelapse?".into(),
+                message,
+                "Publish".into(),
+                Some("Cancel".into()),
+                move |window, cx| me.update(cx, |this, cx| this.finish_and_close(window, cx)),
+                cx,
+            );
+            return false;
+        }
         let me = cx.entity();
         let me2 = cx.entity();
         let dialog = cx.new(|cx| {

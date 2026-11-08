@@ -274,3 +274,42 @@ impl Render for ConfirmDialog {
             .child(buttons)
     }
 }
+
+/// Whether confirms and alerts use the system's own dialog: NSAlert on macOS,
+/// a task dialog on Windows. The Tauri app's `@tauri-apps/plugin-dialog`
+/// showed native dialogs there too. Linux keeps the in-app [`ConfirmDialog`]:
+/// its native counterpart was a GTK popup that matched nothing around it.
+pub fn native_dialogs() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
+/// Show a native dialog over `handle`'s window: `title` is the bold message,
+/// `message` the detail text. `on_ok` runs if the first button is chosen.
+/// Deferred, so it's safe to call while that window is being updated.
+pub fn native_dialog(
+    handle: gpui_kit::gpui::AnyWindowHandle,
+    level: gpui_kit::gpui::PromptLevel,
+    title: String,
+    message: String,
+    ok: String,
+    cancel: Option<String>,
+    on_ok: impl FnOnce(&mut Window, &mut App) + 'static,
+    cx: &mut App,
+) {
+    use gpui_kit::gpui::PromptButton;
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            let mut answers = vec![PromptButton::Ok(ok.into())];
+            if let Some(c) = cancel {
+                answers.push(PromptButton::Cancel(c.into()));
+            }
+            let rx = window.prompt(level, &title, Some(&message), &answers, cx);
+            cx.spawn(async move |cx| {
+                if let Ok(0) = rx.await {
+                    let _ = handle.update(cx, |_, window, cx| on_ok(window, cx));
+                }
+            })
+            .detach();
+        });
+    });
+}
