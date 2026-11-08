@@ -34,7 +34,9 @@ cargo run -p lookout-native
 
 `DEV_TIP=1`, `DEV_ANNOUNCE=1` and `DEV_EDIT=1` on the dev server turn on a tip
 sheet, an announcement banner and an edit-hold session (editor with units and a
-local video). Other knobs:
+local video). `LOOKOUT_DEV_VIDEO=<file>` picks the video and
+`LOOKOUT_DEV_VIDEO_HTTP=1` serves it over HTTP with Range support, like R2, to
+exercise streaming. Other knobs:
 
 | env | effect |
 |---|---|
@@ -61,7 +63,7 @@ crates/lookout-native/src/
   theme.rs           every colour token (dark + light), OKLab accent hover, Linux header-bar vars
   ui/                Button (squircle + press spring), Spinner, Skeleton, Badge, Card/PressScale,
                      HeaderBar, TextInput, Overlay/ConfirmDialog, Sheet (vaul), MenuPopup,
-                     ErrorBanner, ProgressRing, NumberFlow, VideoPlayer (GStreamer), tooltips
+                     ErrorBanner, ProgressRing, NumberFlow, VideoPlayer, tooltips
   screens/           gallery, record (picker ⇄ recorder), source_picker, recorder, modals,
                      session, settings, add_session, permission, editor (TimelapseEditor),
                      program_panel, layout
@@ -69,6 +71,8 @@ crates/lookout-native/src/
   platform/          tray (SNI + GNOME pill / tray-icon / NSStatusItem), camera (GStreamer),
                      permissions (macOS), app_menu (macOS menu bar), desktop_appearance (Linux),
                      single_instance
+  player/            video playback backends: AVPlayer (macOS), IMFMediaEngine (Windows),
+                     GStreamer playbin (Linux); frames drawn as GPU surfaces (see vendor/PATCHES.md)
   services.rs        tip / announcement / Linux-update polling
   updater/           auto-update v2 glue (mod.rs) + per-platform install/rollback (platform.rs)
   programs.rs        program registry, PKCE device pairing, instant start
@@ -243,10 +247,16 @@ The macOS and Windows code type-checks from Linux (`aarch64-apple-darwin`,
 `x86_64-pc-windows-msvc`) but **has not run on either platform yet**. Things
 to check on real hardware first:
 
-- **Video playback and filmstrips** use AVFoundation (`AVAssetReader`) and Media
-  Foundation (`IMFSourceReader`) through `platform/decoder`, clocked by a small
-  player thread. Linux uses GStreamer. Check seek accuracy, rotation metadata
-  (ignored on macOS) and cost of decoding full frames for 112px tiles (Windows).
+- **Video playback** (`player/`) uses `AVPlayer` + `AVPlayerItemVideoOutput`
+  painted zero-copy as a Metal surface (macOS) and `IMFMediaEngine` with a
+  D3D11 device, read back to a reused BGRA texture (Windows). Only Linux has
+  run. Check smooth playback, scrub-seek chasing, streaming from R2, looping,
+  and the patched Metal surface shader, which only compiles on a Mac (CI is
+  its first compile; see `vendor/PATCHES.md`).
+- **Filmstrips and scrub previews** use AVFoundation (`AVAssetReader`) and Media
+  Foundation (`IMFSourceReader`) through `platform/decoder` (Linux: GStreamer).
+  Check seek accuracy, rotation metadata (ignored on macOS) and the cost of
+  decoding full frames for small tiles (Windows).
 - **Camera capture** uses AVCaptureSession / Media Foundation. The macOS bundle
   needs `NSCameraUsageDescription`; check Windows frames come out upright.
 - **Auto-update** install/rollback on macOS (bundle renames, `ditto`, the

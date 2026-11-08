@@ -251,7 +251,27 @@ fn main() {
                     match std::fs::read(&path) {
                         Ok(bytes) => {
                             let ct = if path.ends_with(".webm") { "video/webm" } else { "video/mp4" };
-                            let _ = req.respond(Response::from_data(bytes).with_header(Header::from_bytes("Content-Type", ct).unwrap()));
+                            // Range requests, as R2 serves them (players stream and seek with these).
+                            let range = req.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str().to_string());
+                            let total = bytes.len();
+                            let span = range.as_deref().and_then(|r| r.strip_prefix("bytes=")).and_then(|r| {
+                                let (a, b) = r.split_once('-')?;
+                                let start: usize = a.parse().ok()?;
+                                let end: usize = if b.is_empty() { total - 1 } else { b.parse::<usize>().ok()?.min(total - 1) };
+                                (start <= end).then_some((start, end))
+                            });
+                            let resp = match span {
+                                Some((a, b)) => Response::from_data(bytes[a..=b].to_vec())
+                                    .with_status_code(206)
+                                    .with_header(Header::from_bytes("Content-Range", format!("bytes {a}-{b}/{total}")).unwrap()),
+                                None => Response::from_data(bytes),
+                            };
+                            let _ = req.respond(
+                                resp.with_header(Header::from_bytes("Content-Type", ct).unwrap())
+                                    .with_header(Header::from_bytes("Accept-Ranges", "bytes").unwrap())
+                                    // A real Content-Length (tiny-http would chunk it), as R2 sends.
+                                    .with_chunked_threshold(usize::MAX),
+                            );
                         }
                         Err(_) => { let _ = req.respond(json_resp(json!({ "error": "no video file" }), 404)); }
                     }
@@ -322,7 +342,12 @@ fn main() {
                             s.shots += 1; s.tracked += 60; s.status = "active".into();
                             json_resp(json!({ "confirmed": true, "trackedSeconds": s.tracked, "nextExpectedAt": iso(now_ms() + 60_000), "serverTime": iso(now_ms()) }), 200)
                         }
-                        (Method::Get, ["video"]) => json_resp(json!({ "videoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())) }), 200),
+                        (Method::Get, ["video"]) => json_resp(json!({ "videoUrl": if std::env::var("LOOKOUT_DEV_VIDEO_HTTP").is_ok() {
+                            // Stream over HTTP like a presigned R2 URL.
+                            format!("{base}/media/video/timelapse.mp4")
+                        } else {
+                            format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into()))
+                        } }), 200),
                         (Method::Get, ["units"]) => {
                             if s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() {
                                 let base_ms = now_ms() - 47 * 60_000;

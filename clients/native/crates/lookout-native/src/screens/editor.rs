@@ -105,7 +105,6 @@ pub struct TimelapseEditor {
     prep_started: Instant,
     real_anchor: Option<(f32, Instant)>,
     focus: FocusHandle,
-    play_overlay: Anim,
     cut_ring: Anim,
     hover_region: Option<usize>,
     region_hover: Anim,
@@ -148,7 +147,6 @@ impl TimelapseEditor {
             prep_started: Instant::now(),
             real_anchor: None,
             focus: cx.focus_handle(),
-            play_overlay: Anim::new(1.0),
             cut_ring: Anim::new(0.0),
             hover_region: None,
             region_hover: Anim::new(0.0),
@@ -251,6 +249,7 @@ impl TimelapseEditor {
                 let player = cx.new(|cx| {
                     let mut p = VideoPlayer::new(url, cx);
                     p.controls = false;
+                    p.radius = 11.0;
                     p
                 });
                 self._subs.push(cx.subscribe(&player, |e, _, ev: &VideoEvent, cx| e.on_video(ev, cx)));
@@ -368,7 +367,6 @@ impl TimelapseEditor {
             }
             VideoEvent::Playing(p) => {
                 self.playing = *p;
-                self.play_overlay.set(if *p { 0.0 } else { 1.0 }, Curve::tween(160.0, QUART));
             }
             _ => {}
         }
@@ -573,7 +571,7 @@ impl TimelapseEditor {
         if duration <= 0.0 {
             return;
         }
-        let aspect = video.read(cx).frame().map(|(_, a)| a).unwrap_or(16.0 / 9.0);
+        let aspect = video.read(cx).aspect().unwrap_or(16.0 / 9.0);
         let tile_w = (STRIP_HEIGHT * aspect).round().max(24.0);
         let count = ((w / tile_w).ceil() as usize).clamp(1, 48);
         let key = (w.round() as i32, count);
@@ -692,7 +690,6 @@ impl Render for TimelapseEditor {
         }
         let mut moving = false;
         for a in [
-            &mut self.play_overlay,
             &mut self.cut_ring,
             &mut self.region_hover,
             &mut self.grip,
@@ -708,7 +705,6 @@ impl Render for TimelapseEditor {
 
         // ── Stage ──
         let video = self.video.clone();
-        let po = self.play_overlay.get();
         let ring_o = self.cut_ring.get();
         let stage = div()
             .id("editor-stage")
@@ -725,31 +721,6 @@ impl Render for TimelapseEditor {
             .overflow_hidden()
             .children(video.map(|v| div().absolute().inset_0().child(v)))
             .on_click(cx.listener(|e, _, _, cx| e.toggle_play(cx)))
-            .when(po > 0.001, |d| {
-                let s = 0.88 + 0.12 * po;
-                d.child(
-                    div().absolute().inset_0().flex().items_center().justify_center().opacity(po).child(
-                        canvas(|_, _, _| (), move |b, _, window, _| {
-                            let c = paint::bounds_center(b);
-                            let r = 28.0 * s;
-                            let circle = Bounds { origin: point(px(c.x - r), px(c.y - r)), size: gpui_kit::gpui::size(px(2.0 * r), px(2.0 * r)) };
-                            window.paint_quad(gpui_kit::gpui::fill(circle, theme::black(0.55)).corner_radii(px(r)));
-                            // play triangle (M8 5v14l11-7z in a 20px box)
-                            let k = 20.0 / 24.0 * s;
-                            let o = (c.x - 10.0 * s, c.y - 10.0 * s);
-                            let mut p = PathBuilder::fill();
-                            p.move_to(point(px(o.0 + 8.0 * k), px(o.1 + 5.0 * k)));
-                            p.line_to(point(px(o.0 + 8.0 * k), px(o.1 + 19.0 * k)));
-                            p.line_to(point(px(o.0 + 19.0 * k), px(o.1 + 12.0 * k)));
-                            p.close();
-                            if let Ok(p) = p.build() {
-                                window.paint_path(p, theme::hex(0xffffff));
-                            }
-                        })
-                        .size(px(80.0)),
-                    ),
-                )
-            })
             .when(ring_o > 0.001, |d| {
                 d.child(
                     div()
@@ -797,7 +768,7 @@ impl Render for TimelapseEditor {
                 .inset_0(),
             )
             .relative()
-            .child(if self.playing { Icon::LkPauseBars } else { Icon::LkPlay }.el(12.0, t.text_primary))
+            .child(if self.playing { Icon::VpPause } else { Icon::VpPlay }.el(14.0, t.text_primary))
             .on_hover(cx.listener(|e, h: &bool, _, cx| {
                 e.btn_hover.set_css(if *h { 1.0 } else { 0.0 }, ed_ms(140.0), QUART);
                 cx.notify();
@@ -820,6 +791,7 @@ impl Render for TimelapseEditor {
                 div()
                     .flex()
                     .ts(13.0)
+                    .font_features(gpui_kit::gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])))
                     .text_color(t.text_primary)
                     .child(em::elapsed_label(cur_unit as f64, n))
                     .child(div().text_color(t.text_tertiary).child(format!(" of {} · recorded at {clock}", em::elapsed_label(n as f64, n)))),

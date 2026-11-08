@@ -1,10 +1,7 @@
 //! Native video decoding for macOS (AVFoundation) and Windows (Media
-//! Foundation), behind one small interface. Linux plays through GStreamer
-//! (`ui::video`), so this module only has to produce frames: the generic
-//! [`player`] turns any [`FrameDecoder`] into the playback backend, and the
-//! editor's filmstrip samples it directly.
-
-pub mod player;
+//! Foundation), behind one small interface: the editor's filmstrip and the
+//! player's hover previews sample frames from it. (Playback itself lives in
+//! [`crate::player`].)
 
 #[cfg(target_os = "macos")]
 mod macos;

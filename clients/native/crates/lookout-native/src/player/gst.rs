@@ -311,7 +311,11 @@ impl Backend {
         let s = self.shared.lock();
         let seeking = s.pending.is_some() || s.in_flight.is_some();
         Status {
-            position: if ended { s.duration } else { position.unwrap_or(0.0).min(s.duration.max(0.0)) },
+            position: match (ended, position) {
+                (true, _) => s.duration,
+                (false, p) if s.duration > 0.0 => p.unwrap_or(0.0).min(s.duration),
+                (false, p) => p.unwrap_or(0.0),
+            },
             duration: s.duration,
             playing: s.want_playing,
             buffering: s.buffering || s.downloading || (s.frame.is_none() && s.error.is_none()),
@@ -375,14 +379,32 @@ fn bus_loop(
         match msg.view() {
             MessageView::Error(e) => {
                 let detail = format!("{} ({})", e.error(), e.debug().map(|d| d.to_string()).unwrap_or_default());
+                let err = e.error();
+                let missing_codec = err.matches(gst::CoreError::MissingPlugin)
+                    || err.matches(gst::StreamError::CodecNotFound)
+                    || err.matches(gst::StreamError::Decode);
+                // Only a failure to fetch is worth retrying from a download.
+                let network = err.matches(gst::ResourceError::Read)
+                    || err.matches(gst::ResourceError::OpenRead)
+                    || err.matches(gst::ResourceError::NotFound)
+                    || err.matches(gst::ResourceError::Failed)
+                    || err.matches(gst::ResourceError::Busy)
+                    || err.matches(gst::ResourceError::NotAuthorized);
                 let fallback = {
                     let mut s = shared.lock();
-                    let fallback = s.frame.is_none() && super::is_remote(&url) && !s.fallback_tried;
+                    let fallback = network && s.frame.is_none() && super::is_remote(&url) && !s.fallback_tried;
                     if fallback {
                         s.fallback_tried = true;
                         s.downloading = true;
-                    } else {
-                        s.error = Some(detail.clone());
+                    } else if s.error.is_none() {
+                        // The first error is the cause; later ones are fallout.
+                        s.error = Some(if missing_codec {
+                            "This system is missing a GStreamer decoder for H.264 video. Install gst-libav or \
+                             gst-plugins-bad (gstreamer1.0-libav on Debian/Ubuntu) to watch it here."
+                                .into()
+                        } else {
+                            detail.clone()
+                        });
                     }
                     fallback
                 };

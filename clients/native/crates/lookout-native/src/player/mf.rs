@@ -353,7 +353,6 @@ fn run(
     // Seeks are chased: one at a time, latest target wins.
     let mut pending_seek: Option<f64> = None;
     let mut seek_started: Option<Instant> = None;
-    let mut rate = 1.0f64;
 
     loop {
         let playing = shared.lock().want_playing;
@@ -381,7 +380,6 @@ fn run(
                     }
                     Cmd::Seek(t) => pending_seek = Some(t),
                     Cmd::Rate(r) => {
-                        rate = r;
                         let _ = engine.SetDefaultPlaybackRate(r);
                         let _ = engine.SetPlaybackRate(r);
                     }
@@ -474,7 +472,6 @@ fn run(
                 wake();
             }
         }
-        let _ = rate;
     }
     // SAFETY: shut the engine down on its own thread before it drops.
     unsafe {
