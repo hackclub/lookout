@@ -26,6 +26,8 @@ use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
+/// Windows 11 caption buttons: 46px wide, the title bar's full height.
+const WIN_CAPTION_W: f32 = 46.0;
 
 /// Where the traffic lights go, centred on the bar (`TitlebarOptions`).
 pub const MAC_TRAFFIC_LIGHT_POSITION: (f32, f32) = (16.0, 16.0);
@@ -120,6 +122,11 @@ pub struct HeaderBtn {
     icon: Option<(Icon, f32)>,
     on_click: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
     tooltip: Option<SharedString>,
+    /// Windows' close: system red behind a white glyph on hover/press.
+    danger: bool,
+    /// Windows caption shape: a 46px-wide, full-height square-cornered cell
+    /// flush with the window edge (the OS rounds the window's corner).
+    caption: bool,
 }
 
 impl HeaderBtn {
@@ -129,7 +136,7 @@ impl HeaderBtn {
         content: impl IntoElement,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        Self { id: id.into(), kind, content: content.into_any_element(), icon: None, on_click: Rc::new(on_click), tooltip: None }
+        Self { id: id.into(), kind, content: content.into_any_element(), icon: None, on_click: Rc::new(on_click), tooltip: None, danger: false, caption: false }
     }
     /// A button whose content is `icon` at `size`, tinted with the button's
     /// animated foreground colour.
@@ -146,6 +153,17 @@ impl HeaderBtn {
     }
     pub fn tooltip(mut self, t: impl Into<SharedString>) -> Self {
         self.tooltip = Some(t.into());
+        self
+    }
+    /// Hover/press in the Windows 11 close colours (#C42B1C, a touch lighter
+    /// while pressed) with the glyph turning white.
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+    /// Draw as a Windows 11 caption button instead of a round action.
+    pub fn caption(mut self) -> Self {
+        self.caption = true;
         self
     }
 }
@@ -187,15 +205,22 @@ impl RenderOnce for HeaderBtn {
                 t.text_primary,
             ),
         };
+        let (fg_idle, fg_hover) = if self.caption { (t.text_primary, t.text_primary) } else { (fg_idle, fg_hover) };
+        let (hover, active, fg_hover) = if self.danger {
+            let red: Hsla = theme::rgba8(0xc4, 0x2b, 0x1c, 1.0).into();
+            (red, theme::rgba8(0xc4, 0x2b, 0x1c, 0.9).into(), theme::white(1.0))
+        } else {
+            (hover, active, fg_hover)
+        };
         let bg = theme::mix(theme::mix(idle, hover, h), active, p);
         let fg = theme::mix(fg_idle, fg_hover, h.max(p));
         let (s1, s2, s3, s4) = (st.clone(), st.clone(), st.clone(), st.clone());
         let f = self.on_click.clone();
+        let caption = self.caption;
         let mut el = div()
             .id(self.id)
-            .size(px(size))
+            .map(|d| if caption { d.w(px(WIN_CAPTION_W)).h(px(HEADER_BAR_HEIGHT)) } else { d.size(px(size)).rounded_full() })
             .flex_none()
-            .rounded_full()
             .flex()
             .items_center()
             .justify_center()
@@ -362,7 +387,8 @@ impl RenderOnce for HeaderBar {
                     _ if has_back => 8.0,
                     _ => 12.0,
                 };
-                d.pl(px(lead)).pr(px(8.0))
+                // Windows' caption buttons sit flush with the window edge.
+                d.pl(px(lead)).pr(px(if chrome == HeaderChrome::Windows { 0.0 } else { 8.0 }))
             })
             .opacity(self.backdrop);
         let bar = match chrome {
@@ -392,26 +418,35 @@ impl RenderOnce for HeaderBar {
                     .flex_none()
                     .children(self.actions)
                     .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
-                    .when(chrome == HeaderChrome::Windows, |d| {
-                        let on_close = self.on_close.clone();
-                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default))
-                            .child(
-                                HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 12.0, |_, window, _| {
-                                    window.minimize_window()
-                                })
-                                .tooltip("Minimize"),
-                            )
-                            .child(
-                                HeaderBtn::icon("hb-win-close", HeaderBtnKind::Action, Icon::LkWinClose, 12.0, move |_, window, cx| {
-                                    match &on_close {
-                                        Some(f) => f(window, cx),
-                                        None => window.remove_window(),
-                                    }
-                                })
-                                .tooltip("Close"),
-                            )
-                    }),
+                    .when(chrome == HeaderChrome::Windows, |d| d.child(div().w(px(1.0)).h(px(16.0)).ml(px(4.0)).bg(t.border_default))),
             )
+            .when(chrome == HeaderChrome::Windows, |d| {
+                let on_close = self.on_close.clone();
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .self_stretch()
+                        .child(
+                            HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 10.0, |_, window, _| {
+                                window.minimize_window()
+                            })
+                            .tooltip("Minimize")
+                            .caption(),
+                        )
+                        .child(
+                            HeaderBtn::icon("hb-win-close", HeaderBtnKind::Action, Icon::LkWinClose, 10.0, move |_, window, cx| {
+                                match &on_close {
+                                    Some(f) => f(window, cx),
+                                    None => window.remove_window(),
+                                }
+                            })
+                            .tooltip("Close")
+                            .caption()
+                            .danger(),
+                        ),
+                )
+            })
     }
 }
 
