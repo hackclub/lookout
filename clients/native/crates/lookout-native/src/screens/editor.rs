@@ -259,6 +259,13 @@ impl TimelapseEditor {
         };
         e.load(cx);
         e.start_lease(cx);
+        // Closing the editor frees its filmstrip tiles from the atlas.
+        cx.on_release(|e, cx| {
+            for (_, img) in std::mem::take(&mut e.film_cache) {
+                cx.drop_image(img, None);
+            }
+        })
+        .detach();
         e
     }
 
@@ -1143,7 +1150,9 @@ impl TimelapseEditor {
     }
 
     /// Drop the thumbnails farthest from the view once the cache is full.
-    fn trim_tiles(&mut self) {
+    /// Trimmed tiles leave GPUI's sprite atlas too: a `RenderImage` stays
+    /// uploaded until `drop_image`, so just forgetting the `Arc` leaks it.
+    fn trim_tiles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.film_cache.len() <= TILE_CACHE {
             return;
         }
@@ -1151,7 +1160,9 @@ impl TimelapseEditor {
         let mut keys: Vec<u64> = self.film_cache.keys().copied().collect();
         keys.sort_by_key(|k| std::cmp::Reverse((*k as i64 - mid).abs()));
         for k in keys.into_iter().take(self.film_cache.len() - TILE_CACHE * 85 / 100) {
-            self.film_cache.remove(&k);
+            if let Some(img) = self.film_cache.remove(&k) {
+                cx.drop_image(img, Some(window));
+            }
             self.film_asked.remove(&k);
         }
     }
@@ -1490,7 +1501,7 @@ impl Render for TimelapseEditor {
         // Overview tiles first, so zooming out always has something.
         if have_w {
             self.want_tiles(&keys, cx);
-            self.trim_tiles();
+            self.trim_tiles(window, cx);
         }
         let painted: Vec<(f32, f32, bool, bool, Option<Arc<RenderImage>>)> = cells
             .iter()

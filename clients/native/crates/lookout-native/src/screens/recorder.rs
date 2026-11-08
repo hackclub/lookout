@@ -2,7 +2,7 @@
 //! Opens the recording on mount, closes it when the page goes away, and
 //! draws whatever the core publishes; every button is one recorder action.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
@@ -12,7 +12,6 @@ use gpui_kit::gpui::{
 use lookout_core::{ControlMode, RecorderError, RecorderPhase, RecorderState, RecordingSource, SessionConfig};
 
 use crate::app::{self, RecorderEvent, RecorderModel, api_base};
-use crate::motion;
 use crate::previews;
 use crate::screens::modals::{
     CaptureErrorDialog, CaptureErrorEvent, NamingEvent, NamingModal, SourceLostEvent, SourceLostPrompt,
@@ -47,8 +46,12 @@ pub struct RecorderView {
     opened: bool,
     finished_emitted: bool,
     window_focused: bool,
+    /// The one pending repaint for the clock, and when it fires. Never more than one, so renders can't pile up timers.
+    tick_due: Option<Instant>,
+    _tick: Option<gpui_kit::gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
+
 
 impl EventEmitter<RecorderViewEvent> for RecorderView {}
 
@@ -93,6 +96,8 @@ impl RecorderView {
             opened: false,
             finished_emitted: false,
             window_focused: window.is_window_active(),
+            tick_due: None,
+            _tick: None,
             _subs: subs,
         };
         v.open(cx);
@@ -273,6 +278,25 @@ pub fn close_recording(cx: &mut App) {
     rt.spawn(async move { core.recorder_close().await });
 }
 
+impl RecorderView {
+    /// Repaint after `wait`, unless a repaint is already due sooner.
+    fn schedule_tick(&mut self, wait: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        let due = Instant::now() + wait;
+        if self.tick_due.is_some_and(|d| d <= due) {
+            return;
+        }
+        self.tick_due = Some(due);
+        self._tick = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |v, cx| {
+                v.tick_due = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+}
+
 impl Render for RecorderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -325,20 +349,20 @@ impl Render for RecorderView {
         // only when the second changes (the rAF loop in useRecorderClock).
         let now_ms = chrono::Utc::now().timestamp_millis();
         let display = state.clock.display_seconds(now_ms);
+        let mut wait = None;
         if state.clock.running && state.clock.hold_at_unix_ms.is_none() {
             let next_tick = 1000 - ((now_ms - state.clock.anchor_at_unix_ms).rem_euclid(1000)) as u64;
-            cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(next_tick.max(16))).await;
-                this.update(cx, |_, cx| cx.notify()).ok();
-            })
-            .detach();
+            wait = Some(Duration::from_millis(next_tick.max(16)));
         }
 
         let recording = state.control_mode == ControlMode::Recording;
-        if recording {
-            window.request_animation_frame();
+        if let Some(wait) = wait {
+            self.schedule_tick(wait, window, cx);
         }
-        let dot_opacity = motion::pulse_opacity(1500.0);
+        // The recording dot is steady, not pulsing: a pulse means repainting
+        // the whole window every display frame (~40% CPU plus as much in
+        // WindowServer at 120Hz), so while recording we only repaint once a
+        // second for the clock.
         let status = div()
             .flex_none()
             .flex()
@@ -357,7 +381,7 @@ impl Render for RecorderView {
                     .items_center()
                     .gap(px(8.0))
                     .when(recording, |d| {
-                        d.child(div().size(px(10.0)).rounded_full().bg(theme::status::danger()).opacity(dot_opacity).flex_none())
+                        d.child(div().size(px(10.0)).rounded_full().bg(theme::status::danger()).flex_none())
                     })
                     .when(!recording, |d| d.child(Icon::LkPauseGlyph.el(14.0, t.text_tertiary)))
                     .child(div().ts(32.0).w700().text_color(t.text_primary).child(crate::fmt::format_time(display))),

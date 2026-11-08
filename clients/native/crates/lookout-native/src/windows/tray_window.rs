@@ -11,7 +11,6 @@ use gpui_kit::gpui::{
 use lookout_core::ControlMode;
 
 use crate::app::{self, RecorderModel};
-use crate::motion;
 use crate::platform::tray::TrayAction;
 use crate::theme::{self, is_mac, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
@@ -24,6 +23,8 @@ impl Global for TrayHandle {}
 
 pub struct TrayApp {
     model: gpui_kit::gpui::Entity<RecorderModel>,
+    tick_due: Option<std::time::Instant>,
+    _tick: Option<gpui_kit::gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -105,7 +106,7 @@ impl TrayApp {
                 }
             }),
         ];
-        Self { model, _subs: subs }
+        Self { model, tick_due: None, _tick: None, _subs: subs }
     }
 }
 
@@ -116,8 +117,23 @@ impl Render for TrayApp {
         let recording = state.as_ref().map(|s| s.control_mode == ControlMode::Recording).unwrap_or(true);
         let count = state.as_ref().map(|s| s.capture_count).unwrap_or(0);
         let secs = state.as_ref().map(|s| s.clock.display_seconds(chrono::Utc::now().timestamp_millis())).unwrap_or(0);
-        if state.as_ref().map(|s| s.clock.running && s.clock.hold_at_unix_ms.is_none()).unwrap_or(false) || recording {
-            window.request_animation_frame();
+        // Repaint once a second for the clock (the dot doesn't pulse; see
+        // RecorderView), not every display frame.
+        if let Some(clock) = state.as_ref().map(|s| &s.clock).filter(|c| c.running && c.hold_at_unix_ms.is_none()) {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let next = 1000 - (now_ms - clock.anchor_at_unix_ms).rem_euclid(1000) as u64;
+            let due = std::time::Instant::now() + std::time::Duration::from_millis(next.max(16));
+            if !self.tick_due.is_some_and(|d| d <= due) {
+                self.tick_due = Some(due);
+                self._tick = Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(next.max(16))).await;
+                    this.update(cx, |v, cx| {
+                        v.tick_due = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
         }
         let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
         let colon = || div().mx(px(1.0)).relative().top(px(-1.0)).child(":");
@@ -160,7 +176,7 @@ impl Render for TrayApp {
                             .items_center()
                             .gap(px(8.0))
                             .when(recording, |d| {
-                                d.child(div().size(px(8.0)).rounded_full().bg(theme::status::danger()).opacity(motion::pulse_opacity(1500.0)))
+                                d.child(div().size(px(8.0)).rounded_full().bg(theme::status::danger()))
                             })
                             .when(!recording, |d| d.child(Icon::LkPauseGlyph.el(12.0, t.text_tertiary)))
                             .child(div().ts(13.0).w700().text_color(t.text_primary).child(timer)),
