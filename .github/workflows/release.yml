@@ -714,6 +714,28 @@ jobs:
           if-no-files-found: error
           path: clients/native/dist/Lookout-native_*
 
+      # Native crash reports (minidumps, see src/crash.rs) arrive as raw
+      # addresses; Sentry symbolicates them with these, matched by debug id.
+      # Skipped when the token isn't available (forks, Dependabot).
+      - name: Upload debug symbols to Sentry
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: hack-club
+          SENTRY_PROJECT: lookout-native
+        run: |
+          set -euo pipefail
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo "::warning::SENTRY_AUTH_TOKEN is not set; native crash reports from this build won't be symbolicated."
+            exit 0
+          fi
+          case "$RUNNER_OS" in
+            macOS) files=(clients/native/target/${{ matrix.target }}/release/lookout.dSYM) ;;
+            Windows) files=(clients/native/target/release/lookout.exe clients/native/target/release/lookout.pdb) ;;
+            *) files=(clients/native/target/release/lookout) ;;
+          esac
+          npx --yes @sentry/cli@2 debug-files upload --include-sources --wait "${files[@]}"
+
       - name: Upload Windows debug symbols (.pdb)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
