@@ -127,6 +127,64 @@ pub struct Grab {
     pub clip_error: Option<String>,
 }
 
+/// Where the pointer and the focus were at one instant of a capture run:
+/// interaction metadata sent with each confirm and readable only by
+/// programs (the server never returns it on a token endpoint). Every field
+/// is best effort — what the platform can't tell is `None`, never a guess.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivitySample {
+    /// Corrected (server) unix ms the sample was taken. Set by the loop.
+    pub at: i64,
+    /// How the focused window was found: `"ax"` (macOS Accessibility),
+    /// `"window-order"` (macOS without Accessibility: the frontmost app's
+    /// topmost window), `"win32"`, `"x11"`. Tells a reader how far to
+    /// trust `windows[].active` and `frontmost.captured`.
+    pub method: &'static str,
+    pub cursor: Option<CursorSample>,
+    pub frontmost: Option<FrontmostSample>,
+    /// Each captured window and whether it has the focus. Empty when no
+    /// windows are being captured.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowFocus>,
+}
+
+/// The pointer, as a fraction of the display it's on.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorSample {
+    /// The display's id, the same id a monitor capture source uses.
+    pub display: u32,
+    /// 0 = left edge, 1 = right edge.
+    pub x: f64,
+    /// 0 = top edge, 1 = bottom edge.
+    pub y: f64,
+    /// The pointer is over what's being recorded: on a captured display,
+    /// or over a captured window with nothing on top of it there.
+    pub in_capture: bool,
+}
+
+/// The app the user is working in.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontmostSample {
+    /// Bundle id on macOS, executable name on Windows, `WM_CLASS` on X11.
+    pub app: String,
+    /// The focused window is being recorded: it is a captured window, or
+    /// its centre is on a captured display. `None` when there is no
+    /// focused window to place.
+    pub captured: Option<bool>,
+}
+
+/// One captured window's focus.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowFocus {
+    pub id: u32,
+    /// It is the focused window (or owns the focused dialog).
+    pub active: bool,
+}
+
 /// One capture run's frame and clip pipeline on the host: a loop opens one
 /// when it starts and drops it when it ends. The host keeps the last
 /// grabbed frame (for the flush) and the in-progress clip.
@@ -145,6 +203,12 @@ pub trait CaptureSession: MaybeSend + MaybeSync {
     /// Whether this source can die without saying so, so that a run of
     /// failed grabs means it is gone (the PipeWire watchdog).
     fn watch_for_lost_source(&self) -> bool;
+    /// Where the pointer and the focus are right now, for the interaction
+    /// metadata. `None` when the host can't tell (a camera, a browser,
+    /// Wayland). The loop stamps `at`.
+    fn activity(&self) -> BoxFuture<'_, Option<ActivitySample>> {
+        Box::pin(async { None })
+    }
 }
 
 /// Everything the recorder asks of the platform.

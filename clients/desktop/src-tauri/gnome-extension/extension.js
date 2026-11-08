@@ -12,6 +12,11 @@
  * pushes a StateChanged every second while recording, so the label never
  * ticks a clock of its own — no drift against the app's own timer.
  *
+ * It also answers one question for the app's recorder, which Wayland gives
+ * no client a way to ask: where is the pointer, and which app's window has
+ * the focus (com.hackclub.Lookout.Activity.Sample on the shell's own bus
+ * name). No titles — the app id and the window's frame, nothing more.
+ *
  * Plain Gio.DBusProxy on purpose, rather than makeProxyWrapper: the wrapper's
  * calling convention has shifted between gjs versions, and this file has to
  * load unchanged across GNOME 45 through 50.
@@ -21,6 +26,7 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -39,6 +45,49 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 const BUS_NAME = 'com.hackclub.lookout.Indicator';
 const OBJECT_PATH = '/com/hackclub/Lookout/Indicator';
 const IFACE_NAME = 'com.hackclub.Lookout.Indicator';
+
+// Exported on the shell's connection, so callers address it as
+// org.gnome.Shell at this path. Sample returns JSON (see sampleActivity) so
+// fields can be added without changing the signature.
+const ACTIVITY_PATH = '/com/hackclub/Lookout/Activity';
+const ACTIVITY_XML = `
+<node>
+  <interface name="com.hackclub.Lookout.Activity">
+    <method name="Sample">
+      <arg type="s" direction="out" name="json"/>
+    </method>
+  </interface>
+</node>`;
+
+/**
+ * The pointer, the monitors and the focused window, all in the stage's
+ * logical layout coordinates (the same space the screencast portal reports
+ * monitor streams in).
+ */
+function sampleActivity() {
+    const display = global.display;
+    const [x, y] = global.get_pointer();
+    const monitors = [];
+    for (let i = 0; i < display.get_n_monitors(); i++) {
+        const g = display.get_monitor_geometry(i);
+        monitors.push({x: g.x, y: g.y, w: g.width, h: g.height});
+    }
+    let focus = null;
+    const win = display.focus_window;
+    if (win) {
+        const r = win.get_frame_rect();
+        // The .desktop id names the app best; windows the tracker can't
+        // match get a synthetic "window:N" id, which names nothing.
+        let app = Shell.WindowTracker.get_default().get_window_app(win)?.get_id() ?? null;
+        if (app?.startsWith('window:'))
+            app = null;
+        if (app?.endsWith('.desktop'))
+            app = app.slice(0, -'.desktop'.length);
+        app ??= win.get_sandboxed_app_id?.() || win.get_gtk_application_id() || win.get_wm_class() || null;
+        focus = {app, x: r.x, y: r.y, w: r.width, h: r.height};
+    }
+    return {pointer: [x, y], monitors, focus};
+}
 
 const LookoutIndicator = GObject.registerClass(
 class LookoutIndicator extends PanelMenu.Button {
@@ -119,6 +168,11 @@ export default class LookoutIndicatorExtension extends Extension {
         this._signalId = 0;
         this._cancellable = new Gio.Cancellable();
 
+        this._activity = Gio.DBusExportedObject.wrapJSObject(ACTIVITY_XML, {
+            Sample: () => JSON.stringify(sampleActivity()),
+        });
+        this._activity.export(Gio.DBus.session, ACTIVITY_PATH);
+
         // Watching the name rather than connecting once means the pill
         // survives the app restarting, and costs nothing while it is closed.
         this._watchId = Gio.bus_watch_name(
@@ -130,6 +184,9 @@ export default class LookoutIndicatorExtension extends Extension {
     }
 
     disable() {
+        this._activity?.unexport();
+        this._activity = null;
+
         this._detach();
         this._disconnect();
 

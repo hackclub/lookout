@@ -27,8 +27,26 @@ pub fn capture_pipewire_node(
         .set_state(gstreamer::State::Playing)
         .map_err(|e| format!("Failed to set playing: {}", e))?;
 
-    // Wait up to 2 seconds for a frame.
-    let sample = appsink.try_pull_sample(gstreamer::ClockTime::from_seconds(2));
+    // Wait up to 2 seconds for a whole frame. With the portal's cursor
+    // "metadata" mode a compositor may send cursor-only buffers that carry
+    // no picture; skip anything smaller than the frame its caps describe.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut sample = None;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_nseconds(left.as_nanos() as u64)) else {
+            break;
+        };
+        let whole = (|| {
+            let st = s.caps()?.structure(0)?;
+            let (w, h) = (st.get::<i32>("width").ok()?, st.get::<i32>("height").ok()?);
+            Some(s.buffer()?.size() >= (w.max(0) as usize) * (h.max(0) as usize) * 4)
+        })()
+        .unwrap_or(true);
+        if whole {
+            sample = Some(s);
+            break;
+        }
+    }
 
     // Tear down BEFORE bailing on a timeout: an early return here used to
     // drop the pipeline still PLAYING, stranding its streaming threads and

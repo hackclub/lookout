@@ -5,9 +5,18 @@ use crate::Core;
 #[cfg(target_os = "linux")]
 use crate::CoreEvent;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StreamInfo {
     pub node_id: u32,
+    /// `monitor`, `window` or `virtual`, when the portal says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// A monitor stream's place in the compositor's logical layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<(i32, i32)>,
+    /// The stream's logical size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<(i32, i32)>,
 }
 
 /// Emitted to the webview when the compositor tears a screencast session down
@@ -30,8 +39,14 @@ pub struct ScreencastSession {
     id: u64,
     /// PipeWire nodes this session owns.
     node_ids: Vec<u32>,
+    /// What the portal said about each of them.
+    streams: Vec<StreamInfo>,
     /// Our end of the PipeWire socket. Owned, so it closes exactly once.
     fd: std::os::fd::OwnedFd,
+    /// A second remote on the same session, for the pointer watcher
+    /// (pw_cursor.rs): one PipeWire socket carries one client, and the
+    /// frame grabs speak on `fd`. `None` without the metadata cursor mode.
+    cursor_fd: Option<std::os::fd::OwnedFd>,
     close_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -65,7 +80,7 @@ static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 async fn portal_session_task(
     core: Arc<Core>,
     id: u64,
-    result_tx: tokio::sync::oneshot::Sender<Result<(Vec<StreamInfo>, std::os::fd::RawFd), String>>,
+    result_tx: tokio::sync::oneshot::Sender<Result<(Vec<StreamInfo>, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String>>,
     close_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     use ashpd::desktop::screencast::{
@@ -99,13 +114,22 @@ async fn portal_session_task(
 
     // Past this point the session exists on the portal side, so every bail-out
     // has to close it — a dismissed picker used to leave one behind too.
-    let started: Result<(Vec<StreamInfo>, std::os::fd::RawFd), String> = async {
+    let started: Result<(Vec<StreamInfo>, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String> = async {
+        // The cursor stays out of the pixels either way. "Metadata" also
+        // reports where it is with each buffer — on Wayland the only way
+        // to learn the pointer position (pw_cursor.rs) — where the portal
+        // offers it.
+        let cursor_mode = match proxy.available_cursor_modes().await {
+            Ok(modes) if modes.contains(CursorMode::Metadata) => CursorMode::Metadata,
+            _ => CursorMode::Hidden,
+        };
+
         // Ask user to select sources (multiple selection enabled)
         proxy
             .select_sources(
                 &session,
                 SelectSourcesOptions::default()
-                    .set_cursor_mode(CursorMode::Hidden)
+                    .set_cursor_mode(cursor_mode)
                     .set_sources(SourceType::Monitor | SourceType::Window)
                     .set_multiple(true)
                     .set_persist_mode(PersistMode::DoNot),
@@ -131,14 +155,34 @@ async fn portal_session_task(
         for stream in response.streams() {
             streams.push(StreamInfo {
                 node_id: stream.pipe_wire_node_id(),
+                source_type: stream.source_type().map(|t| {
+                    match t {
+                        SourceType::Monitor => "monitor",
+                        SourceType::Window => "window",
+                        SourceType::Virtual => "virtual",
+                    }
+                    .to_string()
+                }),
+                position: stream.position(),
+                size: stream.size(),
             });
         }
 
-        Ok((streams, fd.into_raw_fd()))
+        let cursor_fd = if matches!(cursor_mode, CursorMode::Metadata) {
+            proxy
+                .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
+                .await
+                .ok()
+                .map(IntoRawFd::into_raw_fd)
+        } else {
+            None
+        };
+
+        Ok((streams, fd.into_raw_fd(), cursor_fd))
     }
     .await;
 
-    let (streams, raw_fd) = match started {
+    let (streams, raw_fd, cursor_raw_fd) = match started {
         Ok(v) => v,
         Err(e) => {
             let _ = session.close().await;
@@ -150,11 +194,14 @@ async fn portal_session_task(
     let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
     eprintln!("[screencast] session {id} started, nodes {node_ids:?}");
 
-    if result_tx.send(Ok((streams, raw_fd))).is_err() {
+    if result_tx.send(Ok((streams, raw_fd, cursor_raw_fd))).is_err() {
         // The caller walked away (command cancelled). Don't leave a cast
-        // running for nobody, and close the fd we just took ownership of.
+        // running for nobody, and close the fds we just took ownership of.
         use std::os::fd::FromRawFd;
         drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) });
+        if let Some(c) = cursor_raw_fd {
+            drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(c) });
+        }
         let _ = session.close().await;
         return;
     }
@@ -205,7 +252,16 @@ async fn portal_session_task(
 #[cfg(target_os = "linux")]
 async fn open_portal_session(
     core: Arc<Core>,
-) -> Result<(u64, Vec<StreamInfo>, std::os::fd::OwnedFd, tokio::sync::oneshot::Sender<()>), String>
+) -> Result<
+    (
+        u64,
+        Vec<StreamInfo>,
+        std::os::fd::OwnedFd,
+        Option<std::os::fd::OwnedFd>,
+        tokio::sync::oneshot::Sender<()>,
+    ),
+    String,
+>
 {
     use std::os::fd::FromRawFd;
     use std::sync::atomic::Ordering;
@@ -217,11 +273,12 @@ async fn open_portal_session(
     tokio::spawn(portal_session_task(core, id, result_tx, close_rx));
 
     match result_rx.await {
-        Ok(Ok((streams, raw_fd))) => {
-            // SAFETY: the task handed ownership of this fd over the channel
-            // and gave up its own claim to it.
+        Ok(Ok((streams, raw_fd, cursor_raw_fd))) => {
+            // SAFETY: the task handed ownership of these fds over the
+            // channel and gave up its own claim to them.
             let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
-            Ok((id, streams, fd, close_tx))
+            let cursor_fd = cursor_raw_fd.map(|c| unsafe { std::os::fd::OwnedFd::from_raw_fd(c) });
+            Ok((id, streams, fd, cursor_fd, close_tx))
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err("Screencast portal task ended unexpectedly".to_string()),
@@ -259,6 +316,24 @@ fn on_session_revoked(core: &Core, id: u64, node_ids: Vec<u32>) {
 }
 
 impl Core {
+    /// Every live screencast stream, with the PipeWire remote the pointer
+    /// watcher reaches it on — `None` for a session without the metadata
+    /// cursor mode, where there is no pointer to read.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn screencast_streams(&self) -> Vec<(StreamInfo, Option<std::os::fd::RawFd>)> {
+        use std::os::fd::AsRawFd;
+        let Ok(sessions) = self.screencast_sessions.lock() else {
+            return Vec::new();
+        };
+        sessions
+            .iter()
+            .flat_map(|s| {
+                let fd = s.cursor_fd.as_ref().map(AsRawFd::as_raw_fd);
+                s.streams.iter().map(move |info| (info.clone(), fd))
+            })
+            .collect()
+    }
+
     /// Replace all existing screencast sources with a fresh portal session.
     /// Linux only; elsewhere it fails with a fixed message.
     pub async fn request_screencast(self: &Arc<Self>) -> Result<Vec<StreamInfo>, String> {
@@ -269,7 +344,7 @@ impl Core {
         #[cfg(target_os = "linux")]
         {
             let state = self;
-            let (id, streams, fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
+            let (id, streams, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
             let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
 
             if let Ok(mut sessions) = state.screencast_sessions.lock() {
@@ -281,7 +356,9 @@ impl Core {
                 sessions.push(ScreencastSession {
                     id,
                     node_ids,
+                    streams: streams.clone(),
                     fd,
+                    cursor_fd,
                     close_tx: Some(close_tx),
                 });
             }
@@ -303,7 +380,7 @@ impl Core {
         #[cfg(target_os = "linux")]
         {
             let state = self;
-            let (id, streams, fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
+            let (id, streams, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
             let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
 
             // Append — keep existing sessions, add the new one
@@ -311,7 +388,9 @@ impl Core {
                 sessions.push(ScreencastSession {
                     id,
                     node_ids,
+                    streams: streams.clone(),
                     fd,
+                    cursor_fd,
                     close_tx: Some(close_tx),
                 });
             }

@@ -40,6 +40,7 @@
 //! screencast portal) uses `tokio::spawn` and so must be called from inside
 //! a tokio runtime.
 
+mod activity;
 pub mod api;
 pub mod apps;
 pub mod capture;
@@ -51,6 +52,10 @@ pub mod host;
 #[cfg(test)]
 pub(crate) mod mock_server;
 mod pipewire;
+#[cfg(target_os = "linux")]
+mod pw_cursor;
+#[cfg(target_os = "linux")]
+mod compositor;
 #[cfg(target_os = "macos")]
 pub mod power;
 pub mod recorder;

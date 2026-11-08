@@ -47,6 +47,22 @@ login; that alias goes away once those can't be running any more.
 The app pushes the time rather than the extension ticking its own clock, so
 the pill can't drift against the window and the menu bar.
 
+### Activity (since 1.3.0)
+
+Wayland gives an app no way to ask where the pointer is or which window has
+the focus, so the extension also answers that for the recorder's interaction
+metadata (`lookout-core/src/compositor.rs`). It exports, on the shell's own
+connection — callers address it as `org.gnome.Shell` —
+
+| Member | Direction | Purpose |
+| --- | --- | --- |
+| `/com/hackclub/Lookout/Activity` `com.hackclub.Lookout.Activity.Sample() → s json` | app → ext | `{pointer: [x, y], monitors: [{x, y, w, h}], focus: {app, x, y, w, h} \| null}` in logical layout coordinates |
+
+`focus.app` is the window's `.desktop` id (without the suffix) when the
+shell's window tracker knows it, else its sandboxed app id, GTK application
+id or `WM_CLASS`. No titles. Like any upgrade of this extension it takes
+effect from the next login.
+
 ## Working on it
 
 GNOME scans the extension directories when a session starts and offers no way

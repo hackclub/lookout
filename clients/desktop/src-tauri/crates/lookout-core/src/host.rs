@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use lookout_protocol::transport::Transport;
 use lookout_recorder::host::{
-    BoxFuture, CaptureSession, CaptureSpec, ClipOutput, Frame, Grab, GrabJpeg, Host, Runtime,
+    ActivitySample, BoxFuture, CaptureSession, CaptureSpec, ClipOutput, Frame, Grab, GrabJpeg, Host, Runtime,
 };
 use lookout_recorder::CoreEvent;
 use lookout_session::source::RecordingSource;
@@ -273,6 +273,26 @@ impl CaptureSession for NativeCaptureSession {
 
     fn watch_for_lost_source(&self) -> bool {
         self.source.has_pipewire()
+    }
+
+    fn activity(&self) -> BoxFuture<'_, Option<ActivitySample>> {
+        Box::pin(async move {
+            let FrameSource::Screen(sources) = &self.source else {
+                return None;
+            };
+            let sources = sources.clone();
+            #[cfg(target_os = "linux")]
+            let streams = self.core.upgrade().map(|c| c.screencast_streams()).unwrap_or_default();
+            #[cfg(not(target_os = "linux"))]
+            let streams: Vec<crate::activity::PortalStream> = Vec::new();
+            // Window-server (or compositor) round trips; bounded so a wedged
+            // one can't hold up the frame cadence.
+            let task = tokio::task::spawn_blocking(move || crate::activity::sample(&sources, &streams));
+            match tokio::time::timeout(Duration::from_secs(2), task).await {
+                Ok(Ok(sample)) => sample,
+                _ => None,
+            }
+        })
     }
 }
 

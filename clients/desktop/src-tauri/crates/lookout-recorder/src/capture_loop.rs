@@ -20,7 +20,7 @@ use crate::base64_encode;
 use crate::events::{
     CapturePreviewFrame, CaptureSourceLost, CaptureTickError, CoreEvent,
 };
-use crate::host::{timeout, AbortOnDrop, CaptureSpec, GrabJpeg, TaskHandle};
+use crate::host::{timeout, AbortOnDrop, ActivitySample, CaptureSession, CaptureSpec, GrabJpeg, TaskHandle};
 use crate::recorder::Recorder;
 use crate::uploader::{check_session, uploader_task, SessionCheck, UploadJob, UploadOutcome};
 
@@ -94,6 +94,34 @@ const MAX_CLIP_ENCODER_FAILURES: u32 = 3;
 /// few times in a row is ordinary (locked screen, sleeping display) and
 /// must not end the recording.
 const MAX_CONSECUTIVE_SOURCE_FAILURES: u32 = 3;
+
+/// Interaction samples one interval carries at most (one per frame wake
+/// plus the tick; the 500ms cadence floor would make 120 a minute). The
+/// oldest go first. Matches the server's `activity.samples` maxItems.
+const MAX_ACTIVITY_SAMPLES: usize = 120;
+
+/// Take one interaction sample (pointer and focus) into `samples`,
+/// stamped with the corrected time the query started.
+async fn sample_activity(recorder: &Recorder, session: &dyn CaptureSession, samples: &mut Vec<ActivitySample>) {
+    let at = recorder.corrected_now_ms();
+    if let Some(mut sample) = session.activity().await {
+        sample.at = at;
+        if samples.len() >= MAX_ACTIVITY_SAMPLES {
+            samples.remove(0);
+        }
+        samples.push(sample);
+    }
+}
+
+/// The confirm's `activity` for the samples gathered since the last
+/// upload, which it consumes. `None` (nothing sent) when there are none.
+fn take_activity(samples: &mut Vec<ActivitySample>) -> Option<serde_json::Value> {
+    if samples.is_empty() {
+        return None;
+    }
+    let samples = std::mem::take(samples);
+    Some(serde_json::json!({ "v": 1, "samples": samples }))
+}
 
 /// Record one clip-encoder failure, and latch clips off for the rest of the
 /// run once they stop looking transient. Any clip that finalizes
@@ -257,6 +285,10 @@ pub(crate) async fn capture_loop_task(
     // Whether anything was ever grabbed, so the flush knows there is a
     // frame to encode.
     let mut have_frame = false;
+    // Interaction samples since the last capture handed to the uploader.
+    // Kept across a failed tick: each is timestamped, so they ride with
+    // the next capture that does go out.
+    let mut activity: Vec<ActivitySample> = Vec::new();
 
     'outer: loop {
         // ── Wait until next_fire, collecting frames along the way ──
@@ -308,6 +340,10 @@ pub(crate) async fn capture_loop_task(
             if rt.now_unix_ms() >= next_fire_ms {
                 break;
             }
+            // Pointer and focus at every frame wake, whether or not a
+            // frame is grabbed (JPEG mode with the preview hidden grabs
+            // none): one sample a minute says little and is easy to fake.
+            sample_activity(&recorder, session.as_ref(), &mut activity).await;
 
             let focused = recorder.host.wants_preview_frames();
             if !clips_mode && !focused {
@@ -379,6 +415,7 @@ pub(crate) async fn capture_loop_task(
         // and the JPEG fallback, all from one capture. Full-size JPEG:
         // this one may be uploaded.
         let grab_result = session.grab(GrabJpeg::Full, clips_mode).await;
+        sample_activity(&recorder, session.as_ref(), &mut activity).await;
 
         // The slot this capture belongs to, in corrected (server) time.
         // The seed tick is stamped with the recording's start — the
@@ -442,6 +479,7 @@ pub(crate) async fn capture_loop_task(
                     None
                 };
 
+                let interval_activity = take_activity(&mut activity);
                 // Hand the interval to the uploader. Clip first; ANY
                 // clip-upload failure retries it as the JPEG so the credit
                 // streak never skips a beat — and a JPEG that can't be
@@ -459,8 +497,10 @@ pub(crate) async fn capture_loop_task(
                             c.height,
                             jpeg_base64.clone(),
                         )
+                        .with_activity(interval_activity.clone())
                     }),
-                    jpeg: UploadPayload::jpeg(frame.jpeg, jpeg_base64, frame.width, frame.height),
+                    jpeg: UploadPayload::jpeg(frame.jpeg, jpeg_base64, frame.width, frame.height)
+                        .with_activity(interval_activity),
                     captured_at,
                     captured_ms: slot_ms,
                     done: None,
@@ -537,6 +577,7 @@ pub(crate) async fn capture_loop_task(
     if cancelled && have_frame {
         if let Some(config) = recorder.config() {
             let flush_started = rt.now_unix_ms();
+            sample_activity(&recorder, session.as_ref(), &mut activity).await;
             match session.flush_frame().await {
                 Ok(Some(frame)) => {
                     let slot_ms = recorder.corrected_now_ms();
@@ -556,7 +597,8 @@ pub(crate) async fn capture_loop_task(
                         token: config.token.clone(),
                         clip: None,
                         jpeg: UploadPayload::jpeg(frame.jpeg, jpeg_base64, frame.width, frame.height)
-                            .final_capture(),
+                            .final_capture()
+                            .with_activity(take_activity(&mut activity)),
                         captured_at,
                         captured_ms: slot_ms,
                         done: Some(done_tx),

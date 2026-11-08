@@ -207,7 +207,7 @@ pub(crate) fn should_exclude_window(app_name: &str, title: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn get_cf_dictionary_get_value(cf_dictionary: &CFDictionary, key: &str) -> Option<*const c_void> {
+pub(crate) fn get_cf_dictionary_get_value(cf_dictionary: &CFDictionary, key: &str) -> Option<*const c_void> {
     let cf_key = CFString::from_str(key);
     let cf_key_ref = cf_key.as_ref() as *const CFString;
     let value = unsafe { cf_dictionary.value(cf_key_ref.cast()) };
@@ -218,7 +218,7 @@ fn get_cf_dictionary_get_value(cf_dictionary: &CFDictionary, key: &str) -> Optio
 }
 
 #[cfg(target_os = "macos")]
-fn dict_i32(dict: &CFDictionary, key: &str) -> Option<i32> {
+pub(crate) fn dict_i32(dict: &CFDictionary, key: &str) -> Option<i32> {
     let cf_number = get_cf_dictionary_get_value(dict, key)? as *const CFNumber;
     let mut value: i32 = 0;
     let ok =
@@ -230,19 +230,19 @@ fn dict_i32(dict: &CFDictionary, key: &str) -> Option<i32> {
 }
 
 #[cfg(target_os = "macos")]
-fn dict_string(dict: &CFDictionary, key: &str) -> Option<String> {
+pub(crate) fn dict_string(dict: &CFDictionary, key: &str) -> Option<String> {
     let value_ref = get_cf_dictionary_get_value(dict, key)? as *const CFString;
     Some(unsafe { (*value_ref).to_string() })
 }
 
 #[cfg(target_os = "macos")]
-fn dict_bool(dict: &CFDictionary, key: &str) -> Option<bool> {
+pub(crate) fn dict_bool(dict: &CFDictionary, key: &str) -> Option<bool> {
     let value_ref = get_cf_dictionary_get_value(dict, key)? as *const CFBoolean;
     Some(unsafe { (*value_ref).value() })
 }
 
 #[cfg(target_os = "macos")]
-fn window_bounds(dict: &CFDictionary) -> Option<CGRect> {
+pub(crate) fn window_bounds(dict: &CFDictionary) -> Option<CGRect> {
     let value_ref = get_cf_dictionary_get_value(dict, "kCGWindowBounds")? as *const CFDictionary;
     let mut rect = CGRect::default();
     let ok = unsafe { CGRectMakeWithDictionaryRepresentation(Some(&*value_ref), &mut rect) };

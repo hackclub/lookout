@@ -3213,12 +3213,15 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation",
  "os_info",
+ "pipewire",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
  "windows",
  "xcap",
+ "xcb",
+ "zbus",
 ]
 
 [[package]]

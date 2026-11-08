@@ -4571,12 +4571,15 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "os_info",
+ "pipewire",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
  "windows 0.62.2",
  "xcap",
+ "xcb",
+ "zbus",
 ]
 
 [[package]]

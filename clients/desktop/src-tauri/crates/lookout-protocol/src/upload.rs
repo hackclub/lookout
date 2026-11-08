@@ -286,6 +286,9 @@ pub struct UploadPayload {
     /// credits the partial minute since the last credited mark (its
     /// creditFinalCapture) instead of the all-or-nothing streak rule.
     is_final: bool,
+    /// Interaction metadata for the interval (pointer and focus samples),
+    /// sent as the confirm's `activity`. Program-only on the server.
+    activity: Option<serde_json::Value>,
 }
 
 impl UploadPayload {
@@ -299,6 +302,7 @@ impl UploadPayload {
             height,
             preview_base64: base64,
             is_final: false,
+            activity: None,
         }
     }
 
@@ -323,6 +327,7 @@ impl UploadPayload {
             height,
             preview_base64,
             is_final: false,
+            activity: None,
         }
     }
 
@@ -334,6 +339,13 @@ impl UploadPayload {
 
     pub fn is_final(&self) -> bool {
         self.is_final
+    }
+
+    /// Attach the interval's interaction metadata (see `activity` on the
+    /// confirm). `None` sends nothing, exactly as before.
+    pub fn with_activity(mut self, activity: Option<serde_json::Value>) -> Self {
+        self.activity = activity;
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -466,6 +478,10 @@ pub async fn upload_and_confirm(
     });
     if let Some(fc) = payload.frame_count {
         confirm_body["frameCount"] = fc.into();
+    }
+    if let Some(activity) = &payload.activity {
+        // Servers that predate it drop the field (Fastify removeAdditional).
+        confirm_body["activity"] = activity.clone();
     }
     if payload.is_final {
         confirm_body["final"] = true.into();
@@ -935,5 +951,101 @@ mod compat_tests {
             let h = tokio::spawn(async { 42i32 });
             assert_eq!(h.await.unwrap(), 42);
         });
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use crate::transport::{Body, BoxFuture, Response, TransportError};
+    use std::time::Duration;
+
+    /// Answers the three pipeline steps and keeps every confirm body.
+    #[derive(Default)]
+    struct Recording {
+        confirms: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl Transport for Recording {
+        fn send(&self, req: Request) -> BoxFuture<'_, Result<Response, TransportError>> {
+            let body = match req.method {
+                Method::Get => serde_json::json!({
+                    "uploadUrl": "https://r2.test/put",
+                    "r2Key": "k",
+                    "screenshotId": "s",
+                    "minuteBucket": 0,
+                    "nextExpectedAt": "2026-01-01T00:01:00.000Z",
+                })
+                .to_string(),
+                Method::Put => String::new(),
+                _ => {
+                    if let Body::Json(v) = &req.body {
+                        self.confirms.lock().unwrap().push(v.clone());
+                    }
+                    serde_json::json!({
+                        "confirmed": true,
+                        "trackedSeconds": 0,
+                        "nextExpectedAt": "2026-01-01T00:01:00.000Z",
+                    })
+                    .to_string()
+                }
+            };
+            Box::pin(async move { Ok(Response { status: 200, reason: String::new(), body: body.into() }) })
+        }
+        fn sleep(&self, _: Duration) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    struct Host {
+        transport: Recording,
+        offset: Mutex<lookout_session::clock_offset::ClockOffset>,
+    }
+
+    impl UploadHost for Host {
+        fn transport(&self) -> &dyn Transport {
+            &self.transport
+        }
+        fn timing(&self) -> Timing {
+            Timing::default()
+        }
+        fn client_info(&self) -> &str {
+            "test"
+        }
+        fn clock_offset(&self) -> &Mutex<lookout_session::clock_offset::ClockOffset> {
+            &self.offset
+        }
+        fn progress(&self, _: String) {}
+    }
+
+    fn confirm_for(payload: UploadPayload) -> serde_json::Value {
+        let host = Host { transport: Recording::default(), offset: Mutex::new(lookout_session::clock_offset::ClockOffset::new()) };
+        let config = SessionConfig { token: "t".into(), api_base_url: "https://api.test".into() };
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(upload_and_confirm(&host, &payload, None, &config))
+            .map_err(|e| e.message)
+            .unwrap();
+        let confirms = host.transport.confirms.lock().unwrap();
+        confirms.last().cloned().unwrap()
+    }
+
+    fn jpeg() -> UploadPayload {
+        UploadPayload::jpeg(bytes::Bytes::from_static(b"jpeg"), String::new(), 10, 10)
+    }
+
+    #[test]
+    fn the_confirm_carries_the_intervals_activity() {
+        let activity = serde_json::json!({ "v": 1, "samples": [{ "at": 1, "method": "x11" }] });
+        let body = confirm_for(jpeg().with_activity(Some(activity.clone())));
+        assert_eq!(body["activity"], activity);
+    }
+
+    #[test]
+    fn no_activity_leaves_the_confirm_as_it_was() {
+        let body = confirm_for(jpeg());
+        assert!(body.get("activity").is_none());
+        assert_eq!(body.as_object().unwrap().len(), 4, "{body}");
     }
 }
