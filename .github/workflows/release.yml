@@ -10,6 +10,10 @@ on:
         description: "Also build Lookout Native (clients/native) artifacts"
         type: boolean
         default: false
+      native_only:
+        description: "Only build Lookout Native: skip the test suite and the Tauri build (unsigned artifacts, nothing published)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -20,10 +24,12 @@ jobs:
   # tests pass. Uses `workflow_call` from .github/workflows/tests.yml so
   # the same jobs run identically on push, PR, and release.
   tests:
+    if: ${{ !inputs.native_only }}
     uses: ./.github/workflows/tests.yml
 
   build:
     needs: tests
+    if: ${{ !inputs.native_only }}
     permissions:
       contents: write
     strategy:
@@ -522,10 +528,17 @@ jobs:
   # releases are untouched until then. The bundling itself lives in
   # clients/native/packaging/ so it runs the same way on a dev machine.
   # Untagged (manual) runs build unsigned artifacts for testing; only tags
-  # sign, notarize and stamp the tag's version.
+  # sign, notarize and stamp the tag's version. A manual run with
+  # `native_only` skips the tests and the Tauri build and only runs this job;
+  # download the lookout-native-* artifacts from the run page.
   native-build:
     needs: tests
-    if: vars.NATIVE_RELEASE == 'true' || inputs.native
+    # `native_only` skips the tests; a skipped need would skip this job too
+    # unless the condition says otherwise.
+    if: >-
+      ${{ !cancelled()
+      && (needs.tests.result == 'success' || (inputs.native_only && needs.tests.result == 'skipped'))
+      && (vars.NATIVE_RELEASE == 'true' || inputs.native || inputs.native_only) }}
     permissions:
       contents: read
     strategy:
