@@ -8,6 +8,7 @@ pub mod mac_menu;
 #[cfg(target_os = "macos")]
 pub mod macos_occlusion;
 pub mod permission_guide;
+pub mod system_icons;
 pub mod permissions;
 pub mod relaunch;
 pub mod reduce_motion;

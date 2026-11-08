@@ -1,6 +1,7 @@
 //! The macOS setup page: one row per privacy permission, each with its own
-//! "Allow" (after Codex Computer Use's). Screen Recording is required to get
-//! past it; Camera is optional. "Allow" opens System Settings with the
+//! "Allow" and macOS's own icon for it (after Codex Computer Use's). Screen
+//! Recording is required to get past it; Accessibility (the editor's file,
+//! line and column) and Camera are optional. "Allow" opens System Settings with the
 //! permission guide, whose card flies out of the row itself
 //! (`platform::permission_guide`), so each row reports where it is on screen.
 //! Everywhere else permission is assumed (the page never shows).
@@ -16,7 +17,7 @@ use gpui_kit::gpui::{
 
 use crate::platform::permission_guide::{self, Phase, Source};
 use crate::platform::permissions::{self, Kind};
-use crate::theme::{Theme, theme};
+use crate::theme::{Theme, black, fade, sh, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::spinner::{Spinner, SpinnerSize};
@@ -27,12 +28,24 @@ pub enum PermissionEvent {
     Done { cache: bool },
 }
 
-const KINDS: [Kind; 2] = [Kind::Screen, Kind::Camera];
+const KINDS: [Kind; 3] = [Kind::Screen, Kind::Accessibility, Kind::Camera];
+
+type Image = std::sync::Arc<gpui_kit::gpui::RenderImage>;
+
+/// Row icons are drawn at this size (points).
+const ROW_ICON: f32 = 48.0;
 
 thread_local! {
-    /// Decoded once (at 2× for HiDPI).
-    static APP_ICON: Option<std::sync::Arc<gpui_kit::gpui::RenderImage>> =
-        crate::images::decode_fit(crate::assets::APP_ICON_PNG, 144, 144).ok();
+    /// Decoded once (at 2× for HiDPI): a fresh `RenderImage` per frame would
+    /// leak an atlas tile each time.
+    static APP_ICON: Option<Image> = crate::images::decode_fit(crate::assets::APP_ICON_PNG, 176, 176).ok();
+    static SYSTEM_ICONS: Vec<Option<Image>> = KINDS
+        .iter()
+        .map(|k| {
+            let px = (ROW_ICON * 2.0) as u32;
+            crate::platform::system_icons::png(*k, px).and_then(|b| crate::images::decode_fit(&b, px, px).ok())
+        })
+        .collect();
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,9 +55,9 @@ struct RowState {
 }
 
 pub struct PermissionScreen {
-    rows: [RowState; 2],
+    rows: [RowState; 3],
     /// Each row's bounds as last painted (window coordinates).
-    bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 2],
+    bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
     _poll: Task<()>,
 }
 
@@ -97,10 +110,12 @@ fn read(kind: Kind) -> RowState {
     RowState { granted: permissions::check(kind), phase: permission_guide::phase(kind) }
 }
 
-fn copy(kind: Kind) -> (&'static str, &'static str, Icon) {
+/// Title, description, whether it's optional, fallback glyph.
+fn copy(kind: Kind) -> (&'static str, &'static str, bool, Icon) {
     match kind {
-        Kind::Screen => ("Screen Recording", "Lets Lookout take periodic screenshots of your work", Icon::LkMonitor),
-        Kind::Camera => ("Camera", "Optional: adds periodic photos of you to your timelapse", Icon::LkCamera),
+        Kind::Screen => ("Screen Recording", "Takes the screenshots your timelapse is made of", false, Icon::LkMonitor),
+        Kind::Accessibility => ("Accessibility", "Notes which file and line you're working on", true, Icon::LkPencil),
+        Kind::Camera => ("Camera", "Adds photos of you working to your timelapse", true, Icon::LkCamera),
     }
 }
 
@@ -129,8 +144,17 @@ impl Render for PermissionScreen {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .children(APP_ICON.with(|i| i.clone()).map(|i| img(i).size(px(72.0)).rounded(px(16.0)).mb(px(18.0))))
-                    .child(div().ts(22.0).w700().text_color(t.text_primary).mb(px(8.0)).child("Set up Lookout"))
+                    .children(APP_ICON.with(|i| i.clone()).map(|i| {
+                        // The icon art is a macOS squircle with its own margin.
+                        div()
+                            .size(px(88.0))
+                            .mb(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(img(i).size(px(88.0)))
+                    }))
+                    .child(div().ts(24.0).w700().text_color(t.text_primary).mb(px(8.0)).child("Set up Lookout"))
                     .child(
                         div()
                             .ts_lh(13.0, 1.55)
@@ -139,7 +163,7 @@ impl Render for PermissionScreen {
                             .mb(px(24.0))
                             .child("Lookout needs to see your screen to record your work. Everything is captured on your Mac, and only periodic snapshots are uploaded."),
                     )
-                    .child(div().w_full().flex().flex_col().gap(px(10.0)).children(rows))
+                    .child(div().w_full().flex().flex_col().gap(px(12.0)).children(rows))
                     .child(
                         div()
                             .w_full()
@@ -178,27 +202,46 @@ impl PermissionScreen {
     fn row(&self, i: usize, is_next: bool, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let kind = KINDS[i];
         let state = self.rows[i];
-        let (title, body, icon) = copy(kind);
+        let (title, body, optional, glyph) = copy(kind);
         // The card has left for System Settings: the row stays behind as
         // its outline (the flight covers the swap).
         let away = state.phase == Phase::InSettings && !state.granted;
         let probe = self.bounds[i].clone();
 
-        let trailing: AnyElement = if state.granted {
-            div()
+        let icon: AnyElement = match SYSTEM_ICONS.with(|v| v[i].clone()) {
+            Some(image) => img(image).size(px(ROW_ICON)).flex_none().into_any_element(),
+            None => div()
+                .size(px(ROW_ICON))
+                .flex_none()
+                .rounded(px(12.0))
+                .bg(t.bg_sunken)
                 .flex()
                 .items_center()
-                .gap(px(6.0))
-                .child(Icon::LkCheckLine.el(16.0, t.accent))
+                .justify_center()
+                .child(glyph.el(22.0, t.text_secondary))
+                .into_any_element(),
+        };
+
+        let trailing: AnyElement = if state.granted {
+            div()
+                .h(px(30.0))
+                .px(px(12.0))
+                .rounded_full()
+                .bg(fade(t.accent, 0.14))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(Icon::LkCheckLine.el(14.0, t.accent))
                 .child(div().ts(13.0).w600().text_color(t.accent).child("Allowed"))
                 .into_any_element()
         } else if state.phase == Phase::Opening {
-            div().w(px(64.0)).flex().justify_center().child(Spinner::new(SpinnerSize::Sm)).into_any_element()
+            div().w(px(72.0)).flex().justify_center().child(Spinner::new(SpinnerSize::Sm)).into_any_element()
         } else {
             let me = cx.entity();
             Button::new(("setup-allow", i), "Allow")
                 .variant(if is_next { Variant::Primary } else { Variant::Secondary })
-                .size(BtnSize::Sm)
+                .size(BtnSize::Md)
+                .radius(999.0)
                 .on_click(move |_, window, cx| me.update(cx, |s, cx| s.allow(i, window, cx)))
                 .into_any_element()
         };
@@ -207,39 +250,45 @@ impl PermissionScreen {
             .id(("setup-row", i))
             .relative()
             .w_full()
-            .rounded(px(14.0))
+            .rounded(px(20.0))
             .border_1()
-            .map(|d| if away { d.border_dashed().border_color(t.border_hover) } else { d.border_color(t.border_default).bg(t.bg_surface) })
-            .child(
-                canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().inset_0(),
-            )
+            .map(|d| {
+                if away {
+                    d.border_dashed().border_color(t.border_hover)
+                } else {
+                    d.border_color(t.border_default).bg(t.bg_surface).shadow(vec![
+                        sh(0.0, 1.0, 2.0, 0.0, black(0.10)),
+                        sh(0.0, 10.0, 24.0, -10.0, black(0.35)),
+                    ])
+                }
+            })
+            .child(canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(14.0))
-                    .p(px(14.0))
+                    .py(px(14.0))
+                    .pl(px(14.0))
+                    .pr(px(16.0))
                     .when(away, |d| d.opacity(0.0))
-                    .child(
-                        div()
-                            .size(px(40.0))
-                            .flex_none()
-                            .rounded(px(10.0))
-                            .bg(t.bg_sunken)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon.el(20.0, t.text_secondary)),
-                    )
+                    .child(icon)
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .flex()
                             .flex_col()
-                            .gap(px(2.0))
-                            .child(div().ts(14.0).w600().text_color(t.text_primary).child(title))
-                            .child(div().ts_lh(12.0, 1.4).text_color(t.text_secondary).child(body)),
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(div().ts(15.0).w600().text_color(t.text_primary).child(title))
+                                    .when(optional, |d| d.child(div().ts(11.0).w500().text_color(t.text_tertiary).child("Optional"))),
+                            )
+                            .child(div().ts_lh(12.5, 1.4).text_color(t.text_secondary).child(body)),
                     )
                     .child(div().flex_none().child(trailing)),
             )

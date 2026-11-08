@@ -530,6 +530,7 @@ mod imp {
         match kind {
             Kind::Screen => "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
             Kind::Camera => "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera",
+            Kind::Accessibility => "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
         }
     }
 
@@ -538,6 +539,9 @@ mod imp {
         match kind {
             Kind::Screen => "Screen & System Audio Recording",
             Kind::Camera => "Camera",
+            // Renamed in macOS 27.
+            Kind::Accessibility if os_major() >= 27 => "Device Control and Data Access",
+            Kind::Accessibility => "Accessibility",
         }
     }
 
@@ -965,10 +969,13 @@ mod imp {
         }
     }
 
+    fn os_major() -> isize {
+        objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion().majorVersion
+    }
+
     /// An SF Symbol (macOS 11+; the app still runs on 10.15).
     fn symbol(name: &NSString) -> Option<Retained<NSImage>> {
-        let v = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
-        if v.majorVersion < 11 {
+        if os_major() < 11 {
             return None;
         }
         NSImage::imageWithSystemSymbolName_accessibilityDescription(name, None)

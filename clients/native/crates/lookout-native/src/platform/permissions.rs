@@ -5,10 +5,12 @@
 
 use gpui_kit::gpui::App;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Screen,
     Camera,
+    /// Reading other apps' UI (the editor's file, line and column).
+    Accessibility,
 }
 
 #[cfg(target_os = "macos")]
@@ -17,6 +19,15 @@ mod mac {
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+
+    pub fn accessibility_granted() -> bool {
+        unsafe { AXIsProcessTrusted() }
     }
 
     pub fn screen_granted() -> bool {
@@ -68,6 +79,7 @@ pub fn check(kind: Kind) -> bool {
         match kind {
             Kind::Screen => mac::screen_granted(),
             Kind::Camera => mac::camera_granted(),
+            Kind::Accessibility => mac::accessibility_granted(),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -107,6 +119,7 @@ pub fn request(kind: Kind, source: Option<super::permission_guide::Source>, cx: 
                 cx.open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
             }
             Kind::Camera => cx.open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"),
+            Kind::Accessibility => cx.open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
         }
     }
     #[cfg(not(target_os = "macos"))]
