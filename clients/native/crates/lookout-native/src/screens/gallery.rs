@@ -198,7 +198,11 @@ impl Render for GalleryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let show_header = !crate::theme::header_bar_shown();
-        let show_bottom_fade = show_header;
+        // The Tauri app faded the bottom on macOS and Windows; on Linux the
+        // list ends against the window's own rounded edge (App.tsx). That
+        // used to coincide with showing the in-page header, which every
+        // platform now replaces with the header bar.
+        let show_bottom_fade = !crate::theme::is_linux();
 
         if !self.restored_scroll {
             self.restored_scroll = true;
