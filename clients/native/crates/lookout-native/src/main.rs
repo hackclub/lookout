@@ -3,6 +3,12 @@
 //! A GPUI rewrite of the Tauri app in `clients/desktop`, driving the same
 //! Rust recording engine (`lookout-core`) in-process.
 
+// Release builds are Windows GUI apps: without this, Windows opens a console
+// window beside Lookout, and every `lookout://` link (a second launch that
+// hands the link over and exits) flashes one too. Debug builds keep the
+// console for logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // The design-token modules and component builders mirror the web app's full
 // surface; not every token or option is used by a screen yet.
 #![allow(dead_code)]
