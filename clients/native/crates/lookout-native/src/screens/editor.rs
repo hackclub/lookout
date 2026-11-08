@@ -723,7 +723,6 @@ impl Render for TimelapseEditor {
             .border_color(t.well_border)
             .rounded(px(12.0))
             .overflow_hidden()
-            .cursor(CursorStyle::PointingHand)
             .children(video.map(|v| div().absolute().inset_0().child(v)))
             .on_click(cx.listener(|e, _, _, cx| e.toggle_play(cx)))
             .when(po > 0.001, |d| {

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, App, AppContext, Bounds, Context, CursorStyle, ElementId, Entity, EventEmitter, Hsla,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, Entity, EventEmitter, Hsla,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, RenderImage, ScrollHandle,
     SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
@@ -18,7 +18,7 @@ use crate::app::{self, store, store_mut};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::platform::camera::CameraDevice;
 use crate::previews;
-use crate::theme::{self, Theme, eid, is_linux, theme};
+use crate::theme::{self, Theme, eid, theme};
 use crate::ui::button::{BtnSize, Button, PressState, Variant, press_values};
 use crate::ui::feedback::error_page;
 use crate::ui::paint;
@@ -914,7 +914,6 @@ impl SourcePicker {
                     .when(!active, |d| d.w500())
                     .text_color(if active { t.text_primary } else { t.text_secondary })
                     .rounded(px(6.0))
-                    .when(!is_linux(), |d| d.cursor(CursorStyle::PointingHand))
                     .child(
                         canvas(move |b, _, cx| probe.update(cx, |p, _| { p.tab_bounds.insert(i, b); }), |_, _, _, _| {})
                             .absolute()
@@ -1142,7 +1141,6 @@ fn source_row(
         .p(px(12.0))
         .rounded(px(8.0))
         .w_full()
-        .when(!is_linux(), |d| d.cursor(CursorStyle::PointingHand))
         .child(
             canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_rounded_bg(bounds, 8.0, scale, fill, border, window))
                 .absolute()

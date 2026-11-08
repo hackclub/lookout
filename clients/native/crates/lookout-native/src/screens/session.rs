@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, AnyView, App, AppContext, Context, CursorStyle, Entity, EventEmitter, InteractiveElement,
+    AnyElement, AnyView, App, AppContext, Context, Entity, EventEmitter, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
     Styled, Subscription, Task, Window, div, px,
 };
@@ -13,7 +13,7 @@ use lookout_core::SessionConfig;
 
 use crate::app::{self, api_base};
 use crate::motion::{Anim, Curve, Ease, Spring};
-use crate::theme::{self, is_linux, theme};
+use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing};
 use crate::ui::icon::Icon;
@@ -610,7 +610,6 @@ impl Render for SessionPage {
                     .items_center()
                     .justify_center()
                     .opacity(pencil_o)
-                    .when(!is_linux(), |d| d.cursor(CursorStyle::PointingHand))
                     .tooltip(|w, cx| crate::ui::tooltip::Tooltip::new("Rename session").build(w, cx))
                     .child(Icon::LkPencil.scaled(12.0, t.text_tertiary, scale * press))
                     .on_mouse_down(MouseButton::Left, cx.listener(|p, _, _, cx| {

@@ -6,7 +6,7 @@
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Entity, EventEmitter, InteractiveElement,
+    AnyElement, App, Bounds, Context, Entity, EventEmitter, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, StyledImage, Window, canvas, div, img, px,
 };
@@ -15,7 +15,7 @@ use crate::app::{self, api_base, store, store_mut};
 use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::store::{CachedSummary, SessionSummary};
-use crate::theme::{self, Theme, is_linux, theme};
+use crate::theme::{self, Theme, theme};
 use crate::ui::button::{BtnSize, Button, PressState, Variant, paint_squircle_bg, press_values};
 use crate::ui::icon::Icon;
 use crate::ui::primitives::{AspectBox, BadgeSize, PressScale, Skeleton, badge, card, edge_fade};
@@ -403,7 +403,6 @@ fn session_card(
             .inset_0(),
         )
         .child(Icon::LkArchiveX.el(14.0, aicon))
-        .when(!is_linux(), |d| d.cursor(CursorStyle::PointingHand))
         .tooltip(|window, cx| crate::ui::tooltip::Tooltip::new("Archive").build(window, cx))
         .on_hover(move |hov, _, cx| {
             h1.update(cx, |h, cx| {

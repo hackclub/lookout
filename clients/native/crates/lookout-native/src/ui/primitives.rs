@@ -5,13 +5,13 @@
 use std::rc::Rc;
 
 use gpui_kit::gpui::{
-    AnyElement, App, Bounds, ClickEvent, CursorStyle, ElementId, Hsla, InteractiveElement, IntoElement,
+    AnyElement, App, Bounds, ClickEvent, ElementId, Hsla, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
     Window, canvas, div, fill, linear_color_stop, linear_gradient, point, px, size,
 };
 
 use crate::motion::{self, Curve, Spring};
-use crate::theme::{self, Theme, is_linux, theme};
+use crate::theme::{self, Theme, theme};
 use crate::ui::button::{PressState, press_values};
 use crate::ui::text::TextExt;
 
@@ -292,9 +292,6 @@ impl RenderOnce for PressScale {
             });
         if self.full {
             root = root.size_full();
-        }
-        if !is_linux() {
-            root = root.cursor(CursorStyle::PointingHand);
         }
         if let Some(f) = self.on_click {
             root = root.on_click(move |ev, window, cx| {

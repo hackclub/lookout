@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, App, Context, CursorStyle, ElementId, Entity, EventEmitter, Hsla, InteractiveElement,
+    AnyElement, App, Context, ElementId, Entity, EventEmitter, Hsla, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Window, canvas, div, img, px,
 };
@@ -18,7 +18,7 @@ use crate::app::{self, store, store_mut};
 use crate::images::{self, Remote};
 use crate::motion::{self, Anim, Curve, Ease, Spring};
 use crate::store::DEFAULT_API_BASE;
-use crate::theme::{self, Theme, eid, is_linux, is_mac, theme};
+use crate::theme::{self, Theme, eid, is_mac, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::header_bar::HeaderNav;
 use crate::ui::icon::Icon;
@@ -36,6 +36,7 @@ pub enum Sub {
 
 pub enum SettingsEvent {
     Back,
+    About,
     Confirm { title: String, message: String, ok: String, action: ConfirmAction },
     Reload,
 }
@@ -403,7 +404,13 @@ impl SettingsPage {
             });
         }
         let desc = div().ts_lh(12.0, 1.5).text_color(t.text_secondary).child("Configure Lookout.").into_any_element();
-        self.chrome("Settings", desc, t, cx).child(list).into_any_element()
+        let me = cx.entity();
+        let about = div().mt(px(12.0)).rounded(px(10.0)).border_1().border_color(t.border_default).bg(t.bg_surface).p(px(4.0)).child(
+            menu_row("menu-about", Icon::InfoFill, "About Lookout", format!("Version {}", crate::updater::installed_version()), t, move |_, cx| {
+                me.update(cx, |_, cx| cx.emit(SettingsEvent::About))
+            }),
+        );
+        self.chrome("Settings", desc, t, cx).child(list).child(about).into_any_element()
     }
 
     fn filtered_apps(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -759,7 +766,6 @@ fn pressable_row(id: ElementId, selected_fill: Hsla, window: &mut Window, cx: &m
         .items_center()
         .w_full()
         .rounded(px(8.0))
-        .when(!is_linux(), |d| d.cursor(CursorStyle::PointingHand))
         .child(
             canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_rounded_bg(bounds, 8.0, scale, fill, theme::transparent(), window))
                 .absolute()

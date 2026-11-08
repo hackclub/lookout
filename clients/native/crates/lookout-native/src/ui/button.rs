@@ -27,7 +27,7 @@ use gpui_kit::gpui::{
 };
 
 use crate::motion::{Anim, Curve, Spring};
-use crate::theme::{self, Theme, is_linux, theme};
+use crate::theme::{self, Theme, theme};
 use crate::ui::paint;
 use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
@@ -383,11 +383,9 @@ impl RenderOnce for Button {
         if self.flex_1 {
             root = root.flex_1().min_w(px(0.0));
         }
-        if !inert && !is_linux() {
-            root = root.cursor(CursorStyle::PointingHand);
-        } else {
-            root = root.cursor(CursorStyle::Arrow);
-        }
+        // Native feel: buttons keep the arrow (only text fields get a
+        // different cursor).
+        root = root.cursor(CursorStyle::Arrow);
         if let Some(tip) = self.tooltip.clone() {
             root = root.tooltip(move |window, cx| crate::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx));
         }

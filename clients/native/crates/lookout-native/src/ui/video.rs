@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use gpui_kit::gpui::{
-    App, Bounds, Context, CursorStyle, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    App, Bounds, Context, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, ParentElement, Pixels, Render, RenderImage, StatefulInteractiveElement, Styled, Task, Window,
     canvas, div, px,
 };
@@ -212,7 +212,6 @@ impl Render for VideoPlayer {
                                 .id("video-download")
                                 .text_color(theme::hex(0x6ea8ff))
                                 .underline()
-                                .cursor(CursorStyle::PointingHand)
                                 .child("download the file")
                                 .on_click(move |_, _, cx| cx.open_url(&url)),
                         )
@@ -328,7 +327,6 @@ impl Render for VideoPlayer {
                         .h(px(16.0))
                         .flex()
                         .items_center()
-                        .cursor(CursorStyle::PointingHand)
                         .child(
                             div()
                                 .relative()

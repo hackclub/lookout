@@ -48,6 +48,7 @@ pub enum Route {
     Gallery,
     Add,
     Settings,
+    Info,
     Record(String),
     Session(String),
     /// An editor window is open: the main window shows a placeholder.
@@ -60,6 +61,7 @@ impl Route {
             Route::Gallery => "gallery:".into(),
             Route::Add => "add:".into(),
             Route::Settings => "settings:".into(),
+            Route::Info => "info:".into(),
             Route::Record(t) => format!("record:{t}"),
             Route::Session(t) => format!("session:{t}"),
             Route::EditorOpen(t) => format!("editor-open:{t}"),
@@ -77,6 +79,8 @@ fn direction(from: &Route, to: &Route) -> f32 {
         (f, Route::Gallery) if !f.is_gallery() => -1.0,
         (Route::Record(_), Route::Session(_)) => 1.0,
         (Route::Session(_), Route::Record(_)) => -1.0,
+        (Route::Settings, Route::Info) => 1.0,
+        (Route::Info, Route::Settings) => -1.0,
         _ => 1.0,
     }
 }
@@ -92,6 +96,7 @@ pub enum PageView {
     Record(Entity<RecordPage>),
     Session(Entity<SessionPage>),
     Settings(Entity<SettingsPage>),
+    Info(Entity<crate::screens::info::InfoPage>),
     Add(Entity<AddSessionPage>),
     EditorPlaceholder(Entity<EditorPlaceholder>),
     Placeholder(Entity<Placeholder>),
@@ -104,6 +109,7 @@ impl PageView {
             PageView::Record(e) => e.clone().into(),
             PageView::Session(e) => e.clone().into(),
             PageView::Settings(e) => e.clone().into(),
+            PageView::Info(e) => e.clone().into(),
             PageView::Add(e) => e.clone().into(),
             PageView::EditorPlaceholder(e) => e.clone().into(),
             PageView::Placeholder(e) => e.clone().into(),
@@ -423,6 +429,7 @@ impl MainWindow {
                 self._subs.push(cx.subscribe(&p, |this, page, ev: &SettingsEvent, cx| this.on_settings_event(page, ev, cx)));
                 PageView::Settings(p)
             }
+            Route::Info => PageView::Info(cx.new(crate::screens::info::InfoPage::new)),
             Route::Add => {
                 let p = cx.new(AddSessionPage::new);
                 self._subs.push(cx.subscribe(&p, |this, page, ev: &AddEvent, cx| this.on_add_event(page, ev, cx)));
@@ -471,6 +478,7 @@ impl MainWindow {
     fn on_settings_event(&mut self, page: Entity<SettingsPage>, ev: &SettingsEvent, cx: &mut Context<Self>) {
         match ev {
             SettingsEvent::Back => self.go_gallery(cx),
+            SettingsEvent::About => self.navigate(Route::Info, cx),
             SettingsEvent::Reload => {
                 // `window.location.reload()`: start over on the new server.
                 self.slots.clear();
@@ -1045,6 +1053,16 @@ impl MainWindow {
         match &self.route {
             Route::Gallery => HeaderNav { title: "Lookout".into(), subtitle: None, on_back: None },
             Route::Settings => HeaderNav { title: "Settings".into(), subtitle: None, on_back: back(self) },
+            // Back returns to wherever it was opened from (Settings or the app menu).
+            Route::Info => HeaderNav {
+                title: "About Lookout".into(),
+                subtitle: None,
+                on_back: Some(Rc::new(|window: &mut Window, cx: &mut App| {
+                    if let Some(h) = window.root::<MainWindow>().flatten() {
+                        h.update(cx, |mw, cx| mw.back(cx));
+                    }
+                })),
+            },
             Route::Add => HeaderNav { title: "New Timelapse".into(), subtitle: None, on_back: back(self) },
             Route::Record(_) => HeaderNav { title: "Recording".into(), subtitle: None, on_back: back(self) },
             Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self) },
@@ -1059,7 +1077,10 @@ impl MainWindow {
     }
 
     fn header_actions(&self, _t: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !self.route.is_gallery() {
+        // A permission screen stands in for the whole app (the Tauri app
+        // rendered it instead of the gallery, header included): no Settings
+        // or + until it's resolved.
+        if !self.route.is_gallery() || self.gate.is_some() {
             return Vec::new();
         }
         let e1 = cx.entity();
