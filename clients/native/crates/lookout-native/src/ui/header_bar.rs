@@ -51,8 +51,6 @@ pub fn mac_traffic_light_inset() -> f32 {
     let span = if bits == 0 { MAC_TRAFFIC_SPAN_FALLBACK } else { f32::from_bits(bits) };
     MAC_TRAFFIC_LIGHT_POSITION.0 + span + MAC_TRAFFIC_LIGHT_GAP
 }
-/// Windows 11 caption buttons are 46px wide and fill the title bar's height.
-const WIN_CAPTION_W: f32 = 46.0;
 
 /// Which platform's window chrome the bar sits in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,14 +62,22 @@ pub enum HeaderChrome {
     /// macOS: the bar extends under the transparent titlebar and leaves its
     /// leading edge to the traffic lights.
     Mac,
-    /// Windows: the native title bar is hidden and the bar ends in
-    /// minimize/close caption buttons the OS hit-tests (snap, keyboard and
-    /// accessibility behaviour stay the system's).
+    /// Windows: the native title bar is hidden; minimize and close are the
+    /// bar's own round buttons after a divider, spaced like its actions. (The
+    /// window isn't resizable, so there's no maximize or Snap flyout to keep.)
     Windows,
 }
 
 impl HeaderChrome {
     pub fn current(lookout_draws_frame: bool) -> Self {
+        // Debug builds: `LOOKOUT_HEADER_CHROME=mac|windows` previews another
+        // platform's controls (layout only; the buttons act on this window).
+        #[cfg(debug_assertions)]
+        match std::env::var("LOOKOUT_HEADER_CHROME").as_deref() {
+            Ok("mac") => return Self::Mac,
+            Ok("windows") => return Self::Windows,
+            _ => {}
+        }
         if cfg!(target_os = "macos") {
             Self::Mac
         } else if cfg!(target_os = "windows") {
@@ -356,8 +362,7 @@ impl RenderOnce for HeaderBar {
                     _ if has_back => 8.0,
                     _ => 12.0,
                 };
-                let trail = if chrome == HeaderChrome::Windows { 0.0 } else { 8.0 };
-                d.pl(px(lead)).pr(px(trail))
+                d.pl(px(lead)).pr(px(8.0))
             })
             .opacity(self.backdrop);
         let bar = match chrome {
@@ -386,18 +391,27 @@ impl RenderOnce for HeaderBar {
                     .gap(px(4.0))
                     .flex_none()
                     .children(self.actions)
-                    .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d }),
+                    .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
+                    .when(chrome == HeaderChrome::Windows, |d| {
+                        let on_close = self.on_close.clone();
+                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default))
+                            .child(
+                                HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 12.0, |_, window, _| {
+                                    window.minimize_window()
+                                })
+                                .tooltip("Minimize"),
+                            )
+                            .child(
+                                HeaderBtn::icon("hb-win-close", HeaderBtnKind::Action, Icon::LkWinClose, 12.0, move |_, window, cx| {
+                                    match &on_close {
+                                        Some(f) => f(window, cx),
+                                        None => window.remove_window(),
+                                    }
+                                })
+                                .tooltip("Close"),
+                            )
+                    }),
             )
-            .when(chrome == HeaderChrome::Windows, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .self_stretch()
-                        .child(win_caption("hb-win-min", false, &t))
-                        .child(win_caption("hb-win-close", true, &t)),
-                )
-            })
     }
 }
 
@@ -443,24 +457,4 @@ impl HeaderBar {
     }
 }
 
-/// A Windows 11 caption button (minimize or close). The OS owns the click via
-/// its hit-test area, exactly like a native title bar; this only draws it:
-/// 46px wide, a faint fill on hover, and the system red with a white glyph for
-/// close.
-fn win_caption(id: &'static str, close: bool, t: &crate::theme::Theme) -> impl IntoElement {
-    let group: SharedString = format!("{id}-group").into();
-    let (icon, area) = if close { (Icon::LkWinClose, WindowControlArea::Close) } else { (Icon::LkWinMinimize, WindowControlArea::Min) };
-    let hover_bg = if close { theme::rgba8(0xc4, 0x2b, 0x1c, 1.0).into() } else { t.headerbar_control };
-    let glyph = |color: Hsla| div().absolute().inset_0().flex().items_center().justify_center().child(icon.el(10.0, color));
-    div()
-        .id(id)
-        .group(group.clone())
-        .relative()
-        .w(px(WIN_CAPTION_W))
-        .h_full()
-        .window_control_area(area)
-        .hover(move |s| s.bg(hover_bg))
-        .child(glyph(t.text_primary).group_hover(group.clone(), |s| if close { s.opacity(0.0) } else { s }))
-        .when(close, |d| d.child(glyph(theme::white(1.0)).opacity(0.0).group_hover(group, |s| s.opacity(1.0))))
-}
 
