@@ -41,6 +41,12 @@ pub enum Icon {
     LkEditorWindow,
     HackClubFlag,
     HeartFill,
+    VpPlay,
+    VpPause,
+    VpReplay,
+    VpLoop,
+    VpExpand,
+    VpShrink,
 }
 
 impl Icon {
@@ -80,6 +86,12 @@ impl Icon {
         Icon::LkEditorWindow,
         Icon::HackClubFlag,
         Icon::HeartFill,
+        Icon::VpPlay,
+        Icon::VpPause,
+        Icon::VpReplay,
+        Icon::VpLoop,
+        Icon::VpExpand,
+        Icon::VpShrink,
     ];
 
     pub fn path(self) -> &'static str {
@@ -119,6 +131,12 @@ impl Icon {
             Icon::LkEditorWindow => "icons/lk-editor-window.svg",
             Icon::HackClubFlag => "icons/hc-flag.svg",
             Icon::HeartFill => "icons/heart-fill.svg",
+            Icon::VpPlay => "icons/vp-play.svg",
+            Icon::VpPause => "icons/vp-pause.svg",
+            Icon::VpReplay => "icons/vp-replay.svg",
+            Icon::VpLoop => "icons/vp-loop.svg",
+            Icon::VpExpand => "icons/vp-expand.svg",
+            Icon::VpShrink => "icons/vp-shrink.svg",
         }
     }
 

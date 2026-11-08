@@ -60,7 +60,7 @@ ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 zbus = "5"
 # Compositor check on X11 (see platform::desktop_appearance::client_frames).
 x11rb = "0.13"
-gstreamer = "0.25"
+gstreamer = { version = "0.25", features = ["v1_18"] }
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 gstreamer-pbutils = "0.25"
@@ -68,15 +68,19 @@ gtk = { version = "0.18", optional = true }
 webkit2gtk = { version = "=2.0.2", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
 tray-icon = "0.21"
+# `#[implement]` for the Media Foundation engine callback.
+windows-core = "0.62"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSDictionary", "NSError", "NSValue"] }
 objc2-app-kit = "0.3"
-objc2-av-foundation = { version = "0.3", features = ["AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "AVUtilities", "objc2-core-media", "objc2-core-video", "AVCaptureDevice", "AVCaptureInput", "AVCaptureSession", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "dispatch2"] }
+objc2-av-foundation = { version = "0.3", features = ["AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVTime", "block2", "AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "AVUtilities", "objc2-core-media", "objc2-core-video", "AVCaptureDevice", "AVCaptureInput", "AVCaptureSession", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "dispatch2"] }
 objc2-core-media = { version = "0.3", features = ["CMTime", "CMTimeRange", "CMSampleBuffer", "CMBase", "objc2-core-video"] }
+objc2-core-foundation = "0.3"
+block2 = "0.6"
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVPixelFormatDescription", "CVBase"] }
 raw-window-handle = "0.6"
 dispatch2 = "0.3"

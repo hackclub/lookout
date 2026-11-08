@@ -1060,8 +1060,8 @@ impl MainWindow {
             }))
         };
         match &self.route {
-            Route::Gallery => HeaderNav { title: "Lookout".into(), subtitle: None, on_back: None },
-            Route::Settings => HeaderNav { title: "Settings".into(), subtitle: None, on_back: back(self) },
+            Route::Gallery => HeaderNav { title: "Lookout".into(), subtitle: None, on_back: None, app_icon: true },
+            Route::Settings => HeaderNav { title: "Settings".into(), subtitle: None, on_back: back(self), app_icon: false },
             // Back returns to wherever it was opened from (Settings or the app menu).
             Route::Info => HeaderNav {
                 title: "About Lookout".into(),
@@ -1071,8 +1071,9 @@ impl MainWindow {
                         h.update(cx, |mw, cx| mw.back(cx));
                     }
                 })),
+                app_icon: false,
             },
-            Route::Add => HeaderNav { title: "Start a recording".into(), subtitle: None, on_back: back(self) },
+            Route::Add => HeaderNav { title: "Start a recording".into(), subtitle: None, on_back: back(self), app_icon: false },
             Route::Record(_) => {
                 // The record page names its step: the source question, or
                 // "Recording" once capture runs.
@@ -1080,10 +1081,10 @@ impl MainWindow {
                     Some(PageView::Record(r)) => r.read(cx).header_title(),
                     _ => "Recording",
                 };
-                HeaderNav { title: title.into(), subtitle: None, on_back: back(self) }
+                HeaderNav { title: title.into(), subtitle: None, on_back: back(self), app_icon: false }
             }
-            Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self) },
-            Route::EditorOpen(_) => HeaderNav { title: "Lookout".into(), subtitle: Some("Editing in another window".into()), on_back: None },
+            Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self), app_icon: false },
+            Route::EditorOpen(_) => HeaderNav { title: "Lookout".into(), subtitle: Some("Editing in another window".into()), on_back: None, app_icon: true },
         }
     }
 

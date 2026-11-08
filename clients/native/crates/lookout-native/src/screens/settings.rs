@@ -193,6 +193,7 @@ impl SettingsPage {
             title: title.into(),
             subtitle: None,
             on_back: Some(Rc::new(move |_: &mut Window, cx: &mut App| me.update(cx, |s, cx| s.back(cx)))),
+            app_icon: false,
         }
     }
 

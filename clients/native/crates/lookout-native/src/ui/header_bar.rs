@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use gpui_kit::gpui::{
     AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, img, px,
 };
 
 use gpui_kit::gpui::prelude::FluentBuilder;
@@ -26,6 +26,13 @@ use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
+
+thread_local! {
+    /// Decoded once (at 2× for HiDPI): a fresh `RenderImage` per frame would
+    /// leak an atlas tile each time.
+    static APP_ICON: Option<std::sync::Arc<gpui_kit::gpui::RenderImage>> =
+        crate::images::decode_fit(crate::assets::APP_ICON_PNG, 40, 40).ok();
+}
 /// Windows caption cells: full height, touching each other and the window's
 /// top-right corner (so the red close reaches the edge, as on Windows), with
 /// each glyph centred in its cell. The width is Lookout's button pitch (a
@@ -192,8 +199,8 @@ impl HeaderBtn {
         b.label = Some(label.into());
         b
     }
-    /// Red label with a red-tinted hover, for actions that end or remove
-    /// something. Never a filled red button: the bar stays quiet.
+    /// Red label on a faint red pill, for actions that end or remove
+    /// something. Never a solid red button: the bar stays quiet.
     pub fn destructive(mut self) -> Self {
         self.destructive = true;
         self
@@ -262,11 +269,14 @@ impl RenderOnce for HeaderBtn {
             ),
         };
         let (fg_idle, fg_hover) = if self.caption { (t.text_primary, t.text_primary) } else { (fg_idle, fg_hover) };
-        let (hover, active, fg_idle, fg_hover) = if self.destructive {
+        // Destructive actions carry a faint red wash even at rest, so they
+        // read as buttons (and as different from Archive-style actions)
+        // without becoming a loud filled red in the bar.
+        let (idle, hover, active, fg_idle, fg_hover) = if self.destructive {
             let red = theme::status::danger();
-            (red.opacity(0.10), red.opacity(0.16), red, red)
+            (red.opacity(0.10), red.opacity(0.16), red.opacity(0.22), red, red)
         } else {
-            (hover, active, fg_idle, fg_hover)
+            (idle, hover, active, fg_idle, fg_hover)
         };
         let (hover, active, fg_hover) = if self.danger {
             let red: Hsla = theme::rgba8(0xf9, 0x27, 0x1e, 1.0).into();
@@ -355,6 +365,8 @@ pub struct HeaderNav {
     pub title: SharedString,
     pub subtitle: Option<SharedString>,
     pub on_back: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// Lead with the app icon (the gallery's "Lookout" title).
+    pub app_icon: bool,
 }
 
 #[derive(IntoElement)]
@@ -482,8 +494,10 @@ impl RenderOnce for HeaderBar {
             }),
             HeaderChrome::Gnome | HeaderChrome::GnomeFramed => self.gnome_drag(bar, maximizable, d1, d2, d3),
         };
+        let app_icon = (self.nav.app_icon && !has_back).then(|| APP_ICON.with(|i| i.clone())).flatten();
         bar.map(|d| if gnome_close && !controls_on_right { d.child(make_close("hb-close-left")) } else { d })
             .children(back)
+            .children(app_icon.map(|i| img(i).size(px(20.0)).rounded(px(5.0)).flex_none()))
             .child(title_block)
             .child(div().flex_1().self_stretch())
             .child({

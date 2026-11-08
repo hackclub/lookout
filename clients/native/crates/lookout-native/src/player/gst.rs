@@ -83,7 +83,7 @@ fn to_frame(sample: &gst::Sample, source: SurfaceSourceId, generation: u64) -> O
     let colorimetry = info.colorimetry();
     let color = YuvColor {
         bt709: !matches!(colorimetry.matrix(), gst_video::VideoColorMatrix::Bt601),
-        full_range: matches!(colorimetry.range(), gst_video::VideoColorRange::Range0255),
+        full_range: matches!(colorimetry.range(), gst_video::VideoColorRange::Range0_255),
     };
     let (width, height) = (info.width(), info.height());
     let map = buffer.into_mapped_buffer_readable().ok()?;
@@ -332,10 +332,10 @@ impl Backend {
         if !self.playbin.query(&mut q) {
             return None;
         }
-        let (_, _, stop, _) = q.range();
+        let (_, stop, _) = q.range();
         let gst::GenericFormattedValue::Percent(Some(p)) = stop else { return None };
         let duration = self.shared.lock().duration;
-        Some(duration * (*p as f64 / gst::format::Percent::MAX.into_inner() as f64))
+        Some(duration * (*p as f64 / *gst::format::Percent::MAX as f64))
     }
 }
 

@@ -2931,8 +2931,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e97cd068d8134b4e073321b946491760aa1e4511e486084a92e73b9174bff78a"
 dependencies = [
  "anyhow",
  "async-task",
@@ -4597,6 +4595,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "block2 0.6.2",
  "chrono",
  "dirs 6.0.0",
  "dispatch2",
@@ -4618,6 +4617,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-av-foundation",
+ "objc2-core-foundation",
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
@@ -4640,6 +4640,7 @@ dependencies = [
  "url",
  "webkit2gtk",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "wry",
  "x11rb",
  "zbus",

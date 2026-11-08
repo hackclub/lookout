@@ -64,7 +64,8 @@ pub fn start_tour(cx: &mut App) {
                     let _ = h.update(cx, |mw, window, cx| mw.smoke_step(step, window, cx));
                 }
             });
-            pause(2500).await;
+            // The program panel's page needs time to load in its webview.
+            pause(if *step == "panel" { 6000 } else { 2500 }).await;
             let _ = std::fs::write(dir.join(format!("{i}.ready")), step);
             for _ in 0..100 {
                 if dir.join(format!("{i}.done")).exists() {

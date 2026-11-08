@@ -304,6 +304,7 @@ impl Render for EditorWindow {
                         title: self.name.clone().unwrap_or_else(|| "Edit timelapse".into()).into(),
                         subtitle: self.name.is_some().then(|| "Editing timelapse".into()),
                         on_back: None,
+                        app_icon: false,
                     },
                     crate::platform::desktop_appearance::desktop_appearance().controls_on_right,
                     0.55 + 0.45 * self.active.get(),

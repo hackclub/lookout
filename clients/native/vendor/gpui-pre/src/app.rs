@@ -1338,6 +1338,12 @@ impl App {
         self.cursor_hide_mode
     }
 
+    /// Hide the pointer until the mouse next moves (Lookout patch: idle
+    /// cursor over a fullscreen video).
+    pub fn hide_cursor_until_mouse_moves(&self) {
+        self.platform.hide_cursor_until_mouse_moves();
+    }
+
     /// Sets the policy controlling when GPUI hides the cursor in response
     /// to keyboard input.
     pub fn set_cursor_hide_mode(&mut self, mode: CursorHideMode) {

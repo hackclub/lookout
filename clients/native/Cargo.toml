@@ -33,3 +33,4 @@ debug = "line-tables-only"
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

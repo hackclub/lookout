@@ -5190,6 +5190,37 @@ impl Window {
         });
     }
 
+    /// [`Self::paint_surface`] with rounded corners (Lookout patch; the
+    /// patched Metal surface shader applies them).
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn paint_surface_rounded(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        image_buffer: CFRetained<CVPixelBuffer>,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+        if bounds.size.width <= Pixels::ZERO || bounds.size.height <= Pixels::ZERO {
+            return;
+        }
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(bounds.size)
+            .scale(self.scale_factor());
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            corner_radii,
+            image_buffer,
+        });
+    }
+
     /// Paint a CPU-side video frame (Lookout patch). The renderer keeps one
     /// texture per [`SurfaceFrame::source`] and re-uploads only when the
     /// frame's generation changes, so painting the same frame repeatedly is

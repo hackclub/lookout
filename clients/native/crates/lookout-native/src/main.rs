@@ -27,6 +27,7 @@ mod programs;
 mod images;
 mod motion;
 mod platform;
+mod player;
 mod screens;
 mod services;
 mod smoke;

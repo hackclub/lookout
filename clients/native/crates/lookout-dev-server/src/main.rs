@@ -184,150 +184,160 @@ fn main() {
     }
     let state = Arc::new(Mutex::new(sessions));
     let server = Server::http(format!("127.0.0.1:{port}")).expect("bind");
-    for mut req in server.incoming_requests() {
-        let url = req.url().to_string();
-        let path = url.split('?').next().unwrap_or("").to_string();
-        let method = req.method().clone();
-        let mut body = String::new();
-        let _ = req.as_reader().read_to_string(&mut body);
-        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-        let json_resp = |v: Value, code: u16| {
-            Response::from_string(v.to_string())
-                .with_status_code(code)
-                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                .with_header(Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap())
-        };
-        let mut st = state.lock().unwrap();
-        // Compiling sessions finish after 20s.
-        for s in st.values_mut() {
-            if s.status == "compiling" || s.status == "stopped" {
-                if let Some(at) = s.stopped_at {
-                    if now_ms() - at > 20_000 {
-                        s.status = "complete".into();
-                    } else if now_ms() - at > 3_000 {
-                        s.status = "compiling".into();
+    // One thread per request: a slow or stalled request (a client holding a
+    // keep-alive connection, a big video) mustn't hold up the rest. Seen on
+    // the macOS CI runner, where parallel thumbnail fetches queued behind
+    // each other until they timed out.
+    for req in server.incoming_requests() {
+        let state = state.clone();
+        let port = port.clone();
+        let base = base.clone();
+        std::thread::spawn(move || {
+            let mut req = req;
+            let url = req.url().to_string();
+            let path = url.split('?').next().unwrap_or("").to_string();
+            let method = req.method().clone();
+            let mut body = String::new();
+            let _ = req.as_reader().read_to_string(&mut body);
+            let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+            let json_resp = |v: Value, code: u16| {
+                Response::from_string(v.to_string())
+                    .with_status_code(code)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap())
+            };
+            let mut st = state.lock().unwrap();
+            // Compiling sessions finish after 20s.
+            for s in st.values_mut() {
+                if s.status == "compiling" || s.status == "stopped" {
+                    if let Some(at) = s.stopped_at {
+                        if now_ms() - at > 20_000 {
+                            s.status = "complete".into();
+                        } else if now_ms() - at > 3_000 {
+                            s.status = "compiling".into();
+                        }
                     }
                 }
             }
-        }
-        let summary = |s: &Session| {
-            json!({
-                "token": s.token, "name": s.name, "status": s.status, "trackedSeconds": s.tracked,
-                "screenshotCount": s.shots, "startedAt": s.created_at, "createdAt": s.created_at,
-                "totalActiveSeconds": s.tracked,
-                "thumbnailUrl": if s.shots > 0 { Value::String(format!("{base}/media/thumb/{}.jpg", s.token)) } else { Value::Null },
-                "videoUrl": Value::Null, "metadata": {}
-            })
-        };
-        let resp = match (method.clone(), parts.as_slice()) {
-            (Method::Get, ["media", "thumb", file]) => {
-                let tok = file.trim_end_matches(".jpg");
-                let hue = st.get(tok).map(|s| s.hue).unwrap_or(100);
-                let _ = req.respond(Response::from_data(thumb(hue, 640, 360)).with_header(Header::from_bytes("Content-Type", "image/jpeg").unwrap()));
-                continue;
-            }
-            // Fake update releases (`lookout-update-tool fake-release`).
-            (Method::Get, ["updates", rest @ ..]) => {
-                let range = req.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str().to_string());
-                let _ = req.respond(serve_update(rest, range.as_deref()));
-                continue;
-            }
-            (Method::Put, ["r2", ..]) => json_resp(json!({}), 200),
-            (Method::Get, ["panel", _]) => {
-                let _ = req.respond(Response::from_string(PANEL_HTML).with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap()));
-                continue;
-            }
-            (Method::Get, ["media", "video", _]) => {
-                let path = std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into());
-                match std::fs::read(&path) {
-                    Ok(bytes) => {
-                        let ct = if path.ends_with(".webm") { "video/webm" } else { "video/mp4" };
-                        let _ = req.respond(Response::from_data(bytes).with_header(Header::from_bytes("Content-Type", ct).unwrap()));
-                    }
-                    Err(_) => { let _ = req.respond(json_resp(json!({ "error": "no video file" }), 404)); }
+            let summary = |s: &Session| {
+                json!({
+                    "token": s.token, "name": s.name, "status": s.status, "trackedSeconds": s.tracked,
+                    "screenshotCount": s.shots, "startedAt": s.created_at, "createdAt": s.created_at,
+                    "totalActiveSeconds": s.tracked,
+                    "thumbnailUrl": if s.shots > 0 { Value::String(format!("{base}/media/thumb/{}.jpg", s.token)) } else { Value::Null },
+                    "videoUrl": Value::Null, "metadata": {}
+                })
+            };
+            let resp = match (method.clone(), parts.as_slice()) {
+                (Method::Get, ["media", "thumb", file]) => {
+                    let tok = file.trim_end_matches(".jpg");
+                    let hue = st.get(tok).map(|s| s.hue).unwrap_or(100);
+                    let _ = req.respond(Response::from_data(thumb(hue, 640, 360)).with_header(Header::from_bytes("Content-Type", "image/jpeg").unwrap()));
+                    return;
                 }
-                continue;
-            }
-            (Method::Post, ["api", "sessions", "batch"]) => {
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let toks: Vec<String> = v["tokens"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
-                let out: Vec<Value> = toks.iter().filter_map(|t| st.get(t)).map(summary).collect();
-                json_resp(json!({ "sessions": out }), 200)
-            }
-            (Method::Get, ["api", "programs"]) => json_resp(json!({ "programs": [
-                { "name": "fallout", "displayName": "Fallout", "newSessionUrl": "https://fallout.hackclub.com/new", "iconUrl": format!("{base}/media/thumb/icon.jpg") },
-                { "name": "summer", "displayName": "Summer of Making", "newSessionUrl": "https://summer.hackclub.com/new" }
-            ]}), 200),
-            (Method::Get, ["api", "announcement"]) => json_resp(if std::env::var("DEV_ANNOUNCE").is_ok() { json!({ "announcement": { "level": "info", "message": "Lookout servers will be down for maintenance Saturday 2am–4am UTC.", "url": "https://hackclub.com" } }) } else { json!({ "announcement": null }) }, 200),
-            (Method::Get, ["api", "tip"]) => json_resp(if std::env::var("DEV_TIP").is_ok() { json!({ "tip": { "id": "tip-1", "badge": "NEW!", "title": "Sample tip title that runs about this long", "body": "Sample body copy, roughly the length a real tip runs to, so the sheet is the height it will actually be in front of a user.", "imageUrl": format!("{base}/media/thumb/tip.jpg"), "program": null, "trigger": "any", "requireUnlinked": false } }) } else { json!({ "tip": null }) }, 200),
-            (_, ["api", "sessions", tok, rest @ ..]) => {
-                let tok = tok.to_string();
-                let Some(s) = st.get_mut(&tok) else {
-                    let _ = req.respond(json_resp(json!({ "error": "Session not found" }), 404));
-                    continue;
-                };
-                match (method, rest) {
-                    (Method::Get, []) => {
-                        let mut v = summary(s);
-                        v["clipsEnabled"] = json!(false);
-                        v["program"] = json!("fallout");
-                        v["cuts"] = json!([]);
-                        json_resp(v, 200)
+                // Fake update releases (`lookout-update-tool fake-release`).
+                (Method::Get, ["updates", rest @ ..]) => {
+                    let range = req.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str().to_string());
+                    let _ = req.respond(serve_update(rest, range.as_deref()));
+                    return;
+                }
+                (Method::Put, ["r2", ..]) => json_resp(json!({}), 200),
+                (Method::Get, ["panel", _]) => {
+                    let _ = req.respond(Response::from_string(PANEL_HTML).with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap()));
+                    return;
+                }
+                (Method::Get, ["media", "video", _]) => {
+                    let path = std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into());
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let ct = if path.ends_with(".webm") { "video/webm" } else { "video/mp4" };
+                            let _ = req.respond(Response::from_data(bytes).with_header(Header::from_bytes("Content-Type", ct).unwrap()));
+                        }
+                        Err(_) => { let _ = req.respond(json_resp(json!({ "error": "no video file" }), 404)); }
                     }
-                    (Method::Get, ["status"]) => {
-                        let held = s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() && !s.status.eq("published");
-                        if held {
-                            json_resp(json!({ "status": "stopped", "trackedSeconds": s.tracked, "editable": true, "editHoldUntil": iso(now_ms() + 3_600_000) }), 200)
-                        } else {
-                            let mut v = json!({ "status": if s.status == "published" { "complete" } else { s.status.as_str() }, "trackedSeconds": s.tracked });
-                            // DEV_PANEL=1: finished sessions ask for details in a ProgramPanel.
-                            // Served on `localhost`, not 127.0.0.1, so it isn't "our own host".
-                            if std::env::var("DEV_PANEL").is_ok() && matches!(s.status.as_str(), "complete" | "stopped" | "compiling") {
-                                // DEV_PANEL=dead points at a closed port, for the fallback.
-                                let p = if std::env::var("DEV_PANEL").as_deref() == Ok("dead") { "1" } else { port.as_str() };
-                                v["panelUrl"] = json!(format!("http://localhost:{p}/panel/{}", s.token));
-                            }
+                    return;
+                }
+                (Method::Post, ["api", "sessions", "batch"]) => {
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let toks: Vec<String> = v["tokens"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+                    let out: Vec<Value> = toks.iter().filter_map(|t| st.get(t)).map(summary).collect();
+                    json_resp(json!({ "sessions": out }), 200)
+                }
+                (Method::Get, ["api", "programs"]) => json_resp(json!({ "programs": [
+                    { "name": "fallout", "displayName": "Fallout", "newSessionUrl": "https://fallout.hackclub.com/new", "iconUrl": format!("{base}/media/thumb/icon.jpg") },
+                    { "name": "summer", "displayName": "Summer of Making", "newSessionUrl": "https://summer.hackclub.com/new" }
+                ]}), 200),
+                (Method::Get, ["api", "announcement"]) => json_resp(if std::env::var("DEV_ANNOUNCE").is_ok() { json!({ "announcement": { "level": "info", "message": "Lookout servers will be down for maintenance Saturday 2am–4am UTC.", "url": "https://hackclub.com" } }) } else { json!({ "announcement": null }) }, 200),
+                (Method::Get, ["api", "tip"]) => json_resp(if std::env::var("DEV_TIP").is_ok() { json!({ "tip": { "id": "tip-1", "badge": "NEW!", "title": "Sample tip title that runs about this long", "body": "Sample body copy, roughly the length a real tip runs to, so the sheet is the height it will actually be in front of a user.", "imageUrl": format!("{base}/media/thumb/tip.jpg"), "program": null, "trigger": "any", "requireUnlinked": false } }) } else { json!({ "tip": null }) }, 200),
+                (_, ["api", "sessions", tok, rest @ ..]) => {
+                    let tok = tok.to_string();
+                    let Some(s) = st.get_mut(&tok) else {
+                        let _ = req.respond(json_resp(json!({ "error": "Session not found" }), 404));
+                        return;
+                    };
+                    match (method, rest) {
+                        (Method::Get, []) => {
+                            let mut v = summary(s);
+                            v["clipsEnabled"] = json!(false);
+                            v["program"] = json!("fallout");
+                            v["cuts"] = json!([]);
                             json_resp(v, 200)
                         }
-                    }
-                    (Method::Post, ["pause"]) => { s.status = "paused".into(); json_resp(json!({ "status": "paused", "trackedSeconds": s.tracked, "totalActiveSeconds": s.tracked }), 200) }
-                    (Method::Post, ["resume"]) => { s.status = "active".into(); json_resp(json!({ "status": "active" }), 200) }
-                    (Method::Post, ["stop"]) => { s.status = "stopped".into(); s.stopped_at = Some(now_ms()); json_resp(json!({ "status": "stopped", "trackedSeconds": s.tracked, "totalActiveSeconds": s.tracked }), 200) }
-                    (Method::Post, ["name"]) | (Method::Patch, ["name"]) | (Method::Put, ["name"]) => {
-                        let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                        if let Some(n) = v["name"].as_str() { s.name = n.to_string(); }
-                        json_resp(json!({ "name": s.name }), 200)
-                    }
-                    (Method::Get, ["upload-url"]) => {
-                        if s.status == "pending" || s.status == "paused" { s.status = "active".into(); }
-                        json_resp(json!({ "uploadUrl": format!("{base}/r2/{}", now_ms()), "r2Key": "k", "screenshotId": format!("{}", now_ms()), "minuteBucket": s.shots, "nextExpectedAt": iso(now_ms() + 60_000), "serverTime": iso(now_ms()), "trackingMode": "credit" }), 200)
-                    }
-                    (Method::Post, ["screenshots"]) => {
-                        s.shots += 1; s.tracked += 60; s.status = "active".into();
-                        json_resp(json!({ "confirmed": true, "trackedSeconds": s.tracked, "nextExpectedAt": iso(now_ms() + 60_000), "serverTime": iso(now_ms()) }), 200)
-                    }
-                    (Method::Get, ["video"]) => json_resp(json!({ "videoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())) }), 200),
-                    (Method::Get, ["units"]) => {
-                        if s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() {
-                            let base_ms = now_ms() - 47 * 60_000;
-                            let units: Vec<Value> = (0..9).map(|i| {
-                                let gap = if i >= 6 { 20 * 60_000 } else { 0 };
-                                json!({ "capturedAt": iso(base_ms + i * 60_000 + gap), "screenshotId": format!("s{i}") })
-                            }).collect();
-                            json_resp(json!({ "units": units, "cuts": [], "editable": true, "originalVideoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())), "recompilesRemaining": 5, "expectedUnits": 9 }), 200)
-                        } else {
-                            json_resp(json!({ "units": [], "cuts": [], "editable": false, "editableReason": "published", "originalVideoUrl": null, "recompilesRemaining": 0 }), 200)
+                        (Method::Get, ["status"]) => {
+                            let held = s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() && !s.status.eq("published");
+                            if held {
+                                json_resp(json!({ "status": "stopped", "trackedSeconds": s.tracked, "editable": true, "editHoldUntil": iso(now_ms() + 3_600_000) }), 200)
+                            } else {
+                                let mut v = json!({ "status": if s.status == "published" { "complete" } else { s.status.as_str() }, "trackedSeconds": s.tracked });
+                                // DEV_PANEL=1: finished sessions ask for details in a ProgramPanel.
+                                // Served on `localhost`, not 127.0.0.1, so it isn't "our own host".
+                                if std::env::var("DEV_PANEL").is_ok() && matches!(s.status.as_str(), "complete" | "stopped" | "compiling") {
+                                    // DEV_PANEL=dead points at a closed port, for the fallback.
+                                    let p = if std::env::var("DEV_PANEL").as_deref() == Ok("dead") { "1" } else { port.as_str() };
+                                    v["panelUrl"] = json!(format!("http://localhost:{p}/panel/{}", s.token));
+                                }
+                                json_resp(v, 200)
+                            }
                         }
+                        (Method::Post, ["pause"]) => { s.status = "paused".into(); json_resp(json!({ "status": "paused", "trackedSeconds": s.tracked, "totalActiveSeconds": s.tracked }), 200) }
+                        (Method::Post, ["resume"]) => { s.status = "active".into(); json_resp(json!({ "status": "active" }), 200) }
+                        (Method::Post, ["stop"]) => { s.status = "stopped".into(); s.stopped_at = Some(now_ms()); json_resp(json!({ "status": "stopped", "trackedSeconds": s.tracked, "totalActiveSeconds": s.tracked }), 200) }
+                        (Method::Post, ["name"]) | (Method::Patch, ["name"]) | (Method::Put, ["name"]) => {
+                            let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                            if let Some(n) = v["name"].as_str() { s.name = n.to_string(); }
+                            json_resp(json!({ "name": s.name }), 200)
+                        }
+                        (Method::Get, ["upload-url"]) => {
+                            if s.status == "pending" || s.status == "paused" { s.status = "active".into(); }
+                            json_resp(json!({ "uploadUrl": format!("{base}/r2/{}", now_ms()), "r2Key": "k", "screenshotId": format!("{}", now_ms()), "minuteBucket": s.shots, "nextExpectedAt": iso(now_ms() + 60_000), "serverTime": iso(now_ms()), "trackingMode": "credit" }), 200)
+                        }
+                        (Method::Post, ["screenshots"]) => {
+                            s.shots += 1; s.tracked += 60; s.status = "active".into();
+                            json_resp(json!({ "confirmed": true, "trackedSeconds": s.tracked, "nextExpectedAt": iso(now_ms() + 60_000), "serverTime": iso(now_ms()) }), 200)
+                        }
+                        (Method::Get, ["video"]) => json_resp(json!({ "videoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())) }), 200),
+                        (Method::Get, ["units"]) => {
+                            if s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() {
+                                let base_ms = now_ms() - 47 * 60_000;
+                                let units: Vec<Value> = (0..9).map(|i| {
+                                    let gap = if i >= 6 { 20 * 60_000 } else { 0 };
+                                    json!({ "capturedAt": iso(base_ms + i * 60_000 + gap), "screenshotId": format!("s{i}") })
+                                }).collect();
+                                json_resp(json!({ "units": units, "cuts": [], "editable": true, "originalVideoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())), "recompilesRemaining": 5, "expectedUnits": 9 }), 200)
+                            } else {
+                                json_resp(json!({ "units": [], "cuts": [], "editable": false, "editableReason": "published", "originalVideoUrl": null, "recompilesRemaining": 0 }), 200)
+                            }
+                        }
+                        (Method::Post, ["editing"]) => json_resp(json!({ "held": s.name.starts_with("Portfolio") }), 200),
+                        (Method::Post, ["cuts"]) | (Method::Put, ["cuts"]) => json_resp(json!({ "cuts": [], "unitsTotal": 9, "unitsCut": 0, "trackedSeconds": s.tracked, "uncutTrackedSeconds": s.tracked }), 200),
+                        (Method::Post, ["compile"]) => { s.status = "published".into(); json_resp(json!({ "status": "complete", "instant": true, "recompilesRemaining": 4, "redirectUrl": null }), 200) }
+                        _ => json_resp(json!({ "error": "not implemented in dev server" }), 404),
                     }
-                    (Method::Post, ["editing"]) => json_resp(json!({ "held": s.name.starts_with("Portfolio") }), 200),
-                    (Method::Post, ["cuts"]) | (Method::Put, ["cuts"]) => json_resp(json!({ "cuts": [], "unitsTotal": 9, "unitsCut": 0, "trackedSeconds": s.tracked, "uncutTrackedSeconds": s.tracked }), 200),
-                    (Method::Post, ["compile"]) => { s.status = "published".into(); json_resp(json!({ "status": "complete", "instant": true, "recompilesRemaining": 4, "redirectUrl": null }), 200) }
-                    _ => json_resp(json!({ "error": "not implemented in dev server" }), 404),
                 }
-            }
-            _ => json_resp(json!({ "error": "not found" }), 404),
-        };
-        drop(st);
-        let _ = req.respond(resp);
+                _ => json_resp(json!({ "error": "not found" }), 404),
+            };
+            drop(st);
+            let _ = req.respond(resp);
+        });
     }
 }
