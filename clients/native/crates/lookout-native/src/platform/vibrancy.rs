@@ -40,6 +40,7 @@ mod imp {
         // SAFETY: GPUI's AppKit handle points at its live NSView (GPUIView).
         let gpui_view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
         let Some(ns_window) = gpui_view.window() else { return false };
+        measure_traffic_lights(&ns_window);
         let Some(content) = ns_window.contentView() else { return false };
 
         let effect = NSVisualEffectView::initWithFrame(mtm.alloc(), content.bounds());
@@ -61,6 +62,18 @@ mod imp {
         content.addSubview_positioned_relativeTo(&effect, NSWindowOrderingMode::Below, None);
         let _: Retained<NSVisualEffectView> = effect;
         true
+    }
+
+    /// Hand the header bar the real width of the traffic-light cluster.
+    fn measure_traffic_lights(ns_window: &objc2_app_kit::NSWindow) {
+        use objc2_app_kit::NSWindowButton;
+        let close = ns_window.standardWindowButton(NSWindowButton::CloseButton);
+        let zoom = ns_window.standardWindowButton(NSWindowButton::ZoomButton);
+        if let (Some(close), Some(zoom)) = (close, zoom) {
+            let (c, z) = (close.frame(), zoom.frame());
+            let span = (z.origin.x + z.size.width) - c.origin.x;
+            crate::ui::header_bar::set_mac_traffic_light_span(span as f32);
+        }
     }
 
     fn macos_major() -> isize {

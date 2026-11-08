@@ -27,11 +27,30 @@ use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
 
-/// Leading space reserved for the macOS traffic lights: they sit 16px in,
-/// three 12px buttons 8px apart (68px), plus the bar's 12px item gap.
-pub const MAC_TRAFFIC_LIGHT_INSET: f32 = 80.0;
 /// Where the traffic lights go, centred on the bar (`TitlebarOptions`).
 pub const MAC_TRAFFIC_LIGHT_POSITION: (f32, f32) = (16.0, 16.0);
+/// Space between the zoom button and the bar's first item.
+const MAC_TRAFFIC_LIGHT_GAP: f32 = 12.0;
+
+/// Width of the traffic-light cluster (close button's left edge to the zoom
+/// button's right edge), measured from the window's real buttons at startup
+/// (`platform::vibrancy`): macOS 26 spaces them wider than earlier releases,
+/// so a fixed number collides on one or the other. The fallback fits macOS 26.
+static MAC_TRAFFIC_SPAN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const MAC_TRAFFIC_SPAN_FALLBACK: f32 = 60.0;
+
+pub fn set_mac_traffic_light_span(span: f32) {
+    if span.is_finite() && span > 20.0 && span < 200.0 {
+        MAC_TRAFFIC_SPAN.store(span.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The bar's leading inset on macOS: where its first item starts.
+pub fn mac_traffic_light_inset() -> f32 {
+    let bits = MAC_TRAFFIC_SPAN.load(std::sync::atomic::Ordering::Relaxed);
+    let span = if bits == 0 { MAC_TRAFFIC_SPAN_FALLBACK } else { f32::from_bits(bits) };
+    MAC_TRAFFIC_LIGHT_POSITION.0 + span + MAC_TRAFFIC_LIGHT_GAP
+}
 /// Windows 11 caption buttons are 46px wide and fill the title bar's height.
 const WIN_CAPTION_W: f32 = 46.0;
 
@@ -333,7 +352,7 @@ impl RenderOnce for HeaderBar {
             .gap(px(8.0))
             .map(|d| {
                 let lead = match chrome {
-                    HeaderChrome::Mac => MAC_TRAFFIC_LIGHT_INSET - 8.0,
+                    HeaderChrome::Mac => mac_traffic_light_inset(),
                     _ if has_back => 8.0,
                     _ => 12.0,
                 };
