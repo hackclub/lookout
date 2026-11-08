@@ -29,15 +29,35 @@ mod mac {
         }
     }
 
-    pub fn camera_granted() -> bool {
-        use objc2::runtime::AnyClass;
+    /// `AVAuthorizationStatus`: 0 not determined, 1 restricted, 2 denied,
+    /// 3 authorized (`None` without AVFoundation).
+    fn camera_status() -> Option<isize> {
         use objc2::msg_send;
+        use objc2::runtime::AnyClass;
         use objc2_foundation::NSString;
-        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else { return true };
+        let cls = AnyClass::get(c"AVCaptureDevice")?;
         let media = NSString::from_str("vide");
-        // AVAuthorizationStatusAuthorized == 3
-        let status: isize = unsafe { msg_send![cls, authorizationStatusForMediaType: &*media] };
-        status == 3
+        Some(unsafe { msg_send![cls, authorizationStatusForMediaType: &*media] })
+    }
+
+    pub fn camera_granted() -> bool {
+        camera_status().is_none_or(|s| s == 3)
+    }
+
+    /// Never asked: the system's own prompt is all it takes.
+    pub fn camera_undetermined() -> bool {
+        camera_status() == Some(0)
+    }
+
+    pub fn request_camera() {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, Bool};
+        use objc2_foundation::NSString;
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else { return };
+        let media = NSString::from_str("vide");
+        // The answer shows up in `check` (the setup page polls it).
+        let done = block2::RcBlock::new(|_granted: Bool| {});
+        let _: () = unsafe { msg_send![cls, requestAccessForMediaType: &*media, completionHandler: &*done] };
     }
 }
 
@@ -66,14 +86,19 @@ pub fn opened_privacy_pane() -> bool {
 }
 
 /// Ask for it: the system prompt where there is one, else System Settings.
-pub fn request(kind: Kind, cx: &mut App) {
-    OPENED_PRIVACY_PANE.store(true, std::sync::atomic::Ordering::Relaxed);
+/// `source` is the row that asked (the guide's card flies out of it).
+pub fn request(kind: Kind, source: Option<super::permission_guide::Source>, cx: &mut App) {
     #[cfg(target_os = "macos")]
     {
+        if kind == Kind::Camera && mac::camera_undetermined() {
+            mac::request_camera();
+            return;
+        }
+        OPENED_PRIVACY_PANE.store(true, std::sync::atomic::Ordering::Relaxed);
         // A bundled app gets the guide (the pane plus a drag-in tile docked to
         // System Settings); a dev binary has nothing to drag, so it gets
         // the system prompt and the pane alone.
-        if super::permission_guide::show(kind) {
+        if super::permission_guide::show(kind, source) {
             return;
         }
         match kind {
@@ -86,6 +111,6 @@ pub fn request(kind: Kind, cx: &mut App) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (kind, cx);
+        let _ = (kind, source, cx);
     }
 }

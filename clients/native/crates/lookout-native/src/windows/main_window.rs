@@ -462,41 +462,29 @@ impl MainWindow {
         }
     }
 
-    /// macOS: screen then camera permission gates, each skipped when cached.
+    /// macOS: the setup page (permissions), until it has been completed.
     fn next_gate(&mut self, cx: &mut Context<Self>) {
-        use crate::platform::permissions::Kind;
-        if !is_mac() {
+        if !is_mac() || (store(cx).perm_screen && store(cx).perm_camera) {
             self.gate = None;
             return;
         }
-        let kind = if !store(cx).perm_screen {
-            Some(Kind::Screen)
-        } else if !store(cx).perm_camera {
-            Some(Kind::Camera)
-        } else {
-            None
-        };
-        if self.gate.as_ref().map(|g| Some(g.read(cx).kind) == kind).unwrap_or(false) {
+        if self.gate.is_some() {
             return;
         }
-        self.gate = kind.map(|k| {
-            let g = cx.new(|cx| PermissionScreen::new(k, cx));
-            self._subs.push(cx.subscribe(&g, move |this, _, ev: &PermissionEvent, cx| {
-                let PermissionEvent::Granted { cache } = ev;
+        let g = cx.new(PermissionScreen::new);
+        self._subs.push(cx.subscribe(&g, move |this, _, ev: &PermissionEvent, cx| {
+            let PermissionEvent::Done { cache } = ev;
+            // "Skip for now" passes without saving, so the page returns next launch.
+            if *cache {
                 let st = store_mut(cx);
-                // "Skip" passes without caching, so the gate returns next launch.
-                match k {
-                    Kind::Screen => st.perm_screen = true,
-                    Kind::Camera => st.perm_camera = true,
-                }
-                if *cache {
-                    st.save();
-                }
-                this.next_gate(cx);
-                cx.notify();
-            }));
-            g
-        });
+                st.perm_screen = true;
+                st.perm_camera = true;
+                st.save();
+            }
+            this.gate = None;
+            cx.notify();
+        }));
+        self.gate = Some(g);
     }
 
     fn on_settings_event(&mut self, page: Entity<SettingsPage>, ev: &SettingsEvent, cx: &mut Context<Self>) {

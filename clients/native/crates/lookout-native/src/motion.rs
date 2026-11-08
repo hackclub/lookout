@@ -33,7 +33,7 @@ pub fn set_slowmo(factor: f32) {
     SLOWMO_BITS.store(factor.max(0.01).to_bits(), Ordering::Relaxed);
 }
 
-fn slowmo() -> f32 {
+pub fn slowmo() -> f32 {
     f32::from_bits(SLOWMO_BITS.load(Ordering::Relaxed))
 }
 
