@@ -111,17 +111,40 @@ jobs:
         working-directory: clients/native
         run: cargo test --workspace --locked
 
-      - name: Smoke (macOS / Windows)
+      - name: Smoke + screenshot (macOS / Windows)
         if: runner.os != 'Linux'
         working-directory: clients/native
         shell: bash
         env:
-          LOOKOUT_SMOKE_SECS: "8"
-          # Keep the run self-contained: no real server, no update checks.
-          LOOKOUT_API_BASE: http://127.0.0.1:9
+          LOOKOUT_SMOKE_SECS: "12"
         run: |
+          # The in-memory dev server with its seed sessions, so the gallery
+          # renders real cards (thumbnails, badges) instead of an empty state.
+          ./target/debug/lookout-dev-server > devserver.log 2>&1 &
+          for _ in $(seq 1 30); do grep -q 'token=' devserver.log && break; sleep 1; done
+          LOOKOUT_SEED_TOKENS=$(grep -o 'token=[0-9a-f]*' devserver.log | cut -d= -f2 | paste -sd, -)
+          export LOOKOUT_SEED_TOKENS
+          export LOOKOUT_API_BASE=http://127.0.0.1:8787
           # No GNU `timeout` on macOS runners; perl's alarm works on both.
-          perl -e 'alarm shift; exec @ARGV' 120 ./target/debug/lookout 2>&1 | tee smoke.log | grep -E 'LOOKOUT_SMOKE|panicked' || true
+          perl -e 'alarm shift; exec @ARGV' 120 ./target/debug/lookout > smoke.log 2>&1 &
+          app=$!
+          sleep 8
+          # A real screenshot from the runner's desktop: the OS draws the
+          # window chrome and material, which nothing on Linux can show.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            screencapture -x screenshot.png || echo "screencapture failed"
+          else
+            powershell -NoProfile -Command '
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $img = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($img)
+              $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $img.Save("screenshot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            ' || echo "screenshot failed"
+          fi
+          wait "$app" || true
+          grep -E 'LOOKOUT_SMOKE|panicked' smoke.log || true
           grep -q 'LOOKOUT_SMOKE .*result=pass' smoke.log
 
       - name: Smoke (Linux, Xvfb + lavapipe)
@@ -140,6 +163,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: smoke-${{ matrix.runner }}
-          path: clients/native/smoke.log
+          path: |
+            clients/native/smoke.log
+            clients/native/screenshot.png
+            clients/native/devserver.log
           if-no-files-found: ignore
           retention-days: 7
