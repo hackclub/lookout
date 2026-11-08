@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 256 256">
+  <!-- Stand-in for the Windows UAC shield where the OS one isn't available
+       (the Linux/macOS demo). On Windows the real one comes from
+       SHGetStockIconInfo(SIID_SHIELD). -->
+  <defs>
+    <clipPath id="s">
+      <path d="M128 18C100 18 82 36 36 40Q22 42 22 56V128C22 190 78 224 128 242C178 224 234 190 234 128V56Q234 42 220 40C174 36 156 18 128 18Z"/>
+    </clipPath>
+    <linearGradient id="b" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2ea7ea"/>
+      <stop offset="1" stop-color="#0f7ad1"/>
+    </linearGradient>
+    <linearGradient id="y" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd60a"/>
+      <stop offset="1" stop-color="#ffb400"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#s)">
+    <rect x="0" y="0" width="128" height="130" fill="url(#b)"/>
+    <rect x="128" y="0" width="128" height="130" fill="url(#y)"/>
+    <rect x="0" y="130" width="128" height="126" fill="url(#y)"/>
+    <rect x="128" y="130" width="128" height="126" fill="url(#b)"/>
+  </g>
+  <path d="M128 18C100 18 82 36 36 40Q22 42 22 56V128C22 190 78 224 128 242C178 224 234 190 234 128V56Q234 42 220 40C174 36 156 18 128 18Z" fill="none" stroke="#000" stroke-opacity=".14" stroke-width="6"/>
+</svg>

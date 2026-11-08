@@ -124,6 +124,8 @@ struct InstallerView {
     flow: Flow,
     ops: Ops,
     dir: PathBuf,
+    /// Writing to `dir` takes admin rights: shield on the button, UAC on click.
+    admin: bool,
     phase: Phase,
     /// The finish page's "Open Lookout" box.
     open_after: bool,
@@ -138,15 +140,16 @@ struct InstallerView {
 
 impl InstallerView {
     fn new(flow: Flow, ops: Ops, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // An existing install is updated where it is.
-        let dir = ops.existing().map(|e| e.dir).unwrap_or_else(|| ops.default_dir());
+        // An existing install is updated where it is, if this user can write there.
+        let dir = ops.preferred_dir();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut content = Anim::new(0.0);
         content.set_css(1.0, 320.0, STRONG);
         let mut badge = Anim::new(0.0);
         badge.set_delayed(1.0, crate::motion::Curve::tween(520.0, STRONG), 80.0);
-        Self { flow, ops, dir, phase: Phase::Ready, open_after: true, focus, bar: Anim::new(0.0), content, badge }
+        let admin = ops.needs_admin(&dir);
+        Self { flow, ops, dir, admin, phase: Phase::Ready, open_after: true, focus, bar: Anim::new(0.0), content, badge }
     }
 
     fn set_phase(&mut self, phase: Phase, cx: &mut Context<Self>) {
@@ -231,6 +234,7 @@ impl InstallerView {
                     // NSIS appends the product folder unless it's already there.
                     let dir = if p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("lookout")) { p } else { p.join("Lookout") };
                     let _ = this.update(cx, |v, cx| {
+                        v.admin = v.ops.needs_admin(&dir);
                         v.dir = dir;
                         cx.notify();
                     });
@@ -286,7 +290,11 @@ impl InstallerView {
 /// Tactile accent primary: Lookout blue, white label, a ring in a darker
 /// blue and the crisp drop.
 fn primary_btn(id: &'static str, label: impl Into<SharedString>) -> Button {
-    Button::new(id, label)
+    style_primary(Button::new(id, label))
+}
+
+fn style_primary(b: Button) -> Button {
+    b
         .bg(blue())
         .hover_bg(blue_hover())
         .border(theme::oklab_mix_black(blue(), 0.82))
@@ -324,8 +332,21 @@ fn ghost_btn(id: &'static str, label: impl Into<SharedString>) -> Button {
         .radius(8.0)
 }
 
+/// `label` with the UAC shield in front when the action needs admin rights
+/// (Windows' convention for a button that will raise a UAC prompt).
+fn shielded(id: &'static str, label: &'static str, shield: bool, style: fn(Button) -> Button) -> Button {
+    if !shield {
+        return style(Button::new(id, label));
+    }
+    style(Button::empty(id)).gap(6.0).child(super::shield::shield_img()).child(label)
+}
+
 fn danger_btn(id: &'static str, label: impl Into<SharedString>) -> Button {
-    Button::new(id, label)
+    style_danger(Button::new(id, label))
+}
+
+fn style_danger(b: Button) -> Button {
+    b
         .bg(red9())
         .hover_bg(red10())
         .border(theme::oklab_mix_black(red9(), 0.85))
@@ -510,10 +531,10 @@ impl Render for InstallerView {
         actions = match (&self.phase, self.flow) {
             (Phase::Ready, Flow::Install) => actions
                 .child(ghost_btn("cancel", "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                .child(primary_btn("primary", "Install").on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
+                .child(shielded("primary", "Install", self.admin, style_primary).on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
             (Phase::Ready, Flow::Uninstall) => actions
                 .child(ghost_btn("cancel", "Cancel").on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                .child(danger_btn("primary", "Uninstall").on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
+                .child(shielded("primary", "Uninstall", self.admin, style_danger).on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
             (Phase::Working { .. }, _) => actions,
             (Phase::Done { .. }, Flow::Install) => {
                 actions.child(primary_btn("primary", "Finish").on_click(cx.listener(|v, _, _, cx| v.finish(cx))))
@@ -523,7 +544,7 @@ impl Render for InstallerView {
             }
             (Phase::Failed(_), _) => actions
                 .child(ghost_btn("close", "Close").on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                .child(primary_btn("primary", "Retry").on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
+                .child(shielded("primary", "Retry", self.admin, style_primary).on_click(cx.listener(|v, _, _, cx| v.primary(cx)))),
         };
 
         // ── frame ──

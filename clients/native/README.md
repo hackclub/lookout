@@ -176,7 +176,11 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   NSIS flags `/S`, `/UPDATE`, `/R`, `/D=` (what the updater runs) plus
   `--uninstall [/S]`. Debug builds on any OS: `LOOKOUT_INSTALLER=demo` (or
   `demo-uninstall`) shows the window with simulated steps;
-  `LOOKOUT_INSTALLER_DEMO_FAIL=1` shows the "Installation Aborted" page.
+  `LOOKOUT_INSTALLER_DEMO_FAIL=1` shows the "Installation Aborted" page and
+  `LOOKOUT_INSTALLER_DEMO_ADMIN=1` the UAC shield. A folder the user can't
+  write to (an older install under Program Files, or one picked with Browse)
+  gets the shield on Install; the work then runs in an elevated copy of the
+  exe that reports progress back, and Lookout itself is started unelevated.
 - **Linux AppImage** (build on Ubuntu 24.04, so glibc ≥ 2.39): bundles GTK 3,
   WebKitGTK 4.1 and its helper processes, libsoup 3, glib-networking, and
   GStreamer with the plugins the app uses (x264, libav, VP9, mp4/webm, v4l2,

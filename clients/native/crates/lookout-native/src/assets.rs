@@ -78,6 +78,7 @@ static INSTALLER: &[(&str, &[u8])] = &[
     ("installer/app-icon.png", include_bytes!("../../../assets/installer/app-icon.png")),
     ("installer/download-badge.svg", include_bytes!("../../../assets/installer/download-badge.svg")),
     ("installer/hack-club-flag.svg", include_bytes!("../../../assets/installer/hack-club-flag.svg")),
+    ("installer/uac-shield.svg", include_bytes!("../../../assets/installer/uac-shield.svg")),
 ];
 
 pub struct Assets;

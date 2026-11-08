@@ -8,7 +8,16 @@
 //! window can be designed and tested on any desktop.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Set when this process is the elevated copy an installer started (it never
+/// asks for elevation again, whatever it finds).
+static ELEVATED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_elevated() {
+    ELEVATED.store(true, Ordering::Relaxed);
+}
 
 pub const EXE: &str = "lookout.exe";
 pub const PRODUCT: &str = "Lookout";
@@ -44,6 +53,22 @@ impl Ops {
         dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(PRODUCT)
     }
 
+    /// Where to install: an existing install's folder (updated in place,
+    /// with admin rights if it's somewhere like Program Files), else
+    /// `%LOCALAPPDATA%\Lookout`.
+    pub fn preferred_dir(self) -> PathBuf {
+        self.existing().map(|e| e.dir).unwrap_or_else(|| self.default_dir())
+    }
+
+    /// Whether writing to `dir` takes administrator rights (the UAC shield
+    /// goes on the button and the work runs in an elevated copy).
+    pub fn needs_admin(self, dir: &Path) -> bool {
+        match self {
+            Ops::Demo => std::env::var("LOOKOUT_INSTALLER_DEMO_ADMIN").is_ok(),
+            Ops::Real => cfg!(windows) && !ELEVATED.load(Ordering::Relaxed) && !writable(dir),
+        }
+    }
+
     pub fn existing(self) -> Option<Existing> {
         match self {
             Ops::Real => existing_real(),
@@ -57,6 +82,13 @@ impl Ops {
     /// Installs (or updates) into `dir`; returns the installed exe.
     pub fn install(self, dir: &Path, progress: &dyn Fn(Progress)) -> Result<PathBuf, String> {
         match self {
+            Ops::Real if self.needs_admin(dir) => {
+                let mut args = vec!["/S".to_string()];
+                // /D= is last: NSIS-style, it takes the rest of the line.
+                args.push(format!("/D={}", dir.display()));
+                run_elevated(args, progress)?;
+                Ok(dir.join(EXE))
+            }
             Ops::Real => install_real(dir, progress),
             Ops::Demo => {
                 demo_steps(progress, &["Extract: lookout.exe...", "Create shortcut: Lookout.lnk", "Writing registry"])?;
@@ -67,6 +99,9 @@ impl Ops {
 
     pub fn uninstall(self, progress: &dyn Fn(Progress)) -> Result<(), String> {
         match self {
+            Ops::Real if existing_real().is_some_and(|e| self.needs_admin(&e.dir)) => {
+                run_elevated(vec!["--uninstall".into(), "/S".into()], progress)
+            }
             Ops::Real => uninstall_real(progress),
             Ops::Demo => demo_steps(progress, &["Delete file: lookout.exe", "Delete file: Lookout.lnk", "Remove folder: Lookout"]),
         }
@@ -146,6 +181,27 @@ pub fn fmt_size(bytes: u64) -> String {
         format!("{:.1} MB", b / 1024f64.powi(2))
     } else {
         format!("{:.1} KB", b / 1024.0)
+    }
+}
+
+/// Whether this user can create files in `dir`, or in its nearest existing
+/// parent when it doesn't exist yet. Tried, not read from ACLs (inherited
+/// rights make those misleading).
+fn writable(dir: &Path) -> bool {
+    let mut dir = dir.to_path_buf();
+    while !dir.exists() {
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => return false,
+        }
+    }
+    let probe = dir.join(format!(".lookout-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -439,9 +495,132 @@ fn delete_after_exit(file: &Path) {
     }
 }
 
+// ── Elevation ───────────────────────────────────────────────────────────
+//
+// The window never runs elevated: when the folder needs admin rights it
+// starts this exe again through UAC ("runas") with the silent flags plus
+// `/ELEVATED --report=<file>`, and follows the copy's progress through that
+// file: `P\t<fraction>\t<detail>` lines, then `OK` or `ERR\t<message>`.
+// The app is never started from the elevated copy (that would run Lookout
+// as admin); whoever asked for the install starts it afterwards.
+
+/// Appends one line to a report file (the elevated side).
+pub fn report_line(report: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(report) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// The report line for a progress update.
+pub fn report_progress(p: &Progress) -> String {
+    format!("P\t{}\t{}", p.fraction, p.step.replace(['\n', '\t'], " "))
+}
+
+/// Reads a report: the last progress, and the outcome once there is one.
+fn read_report(report: &Path) -> (Option<Progress>, Option<Result<(), String>>) {
+    let text = std::fs::read_to_string(report).unwrap_or_default();
+    let (mut last, mut done) = (None, None);
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        match parts.next() {
+            Some("P") => {
+                let fraction = parts.next().and_then(|f| f.parse().ok()).unwrap_or(0.0);
+                last = Some(Progress { fraction, step: parts.next().unwrap_or("").to_string() });
+            }
+            Some("OK") => done = Some(Ok(())),
+            Some("ERR") => done = Some(Err(parts.collect::<Vec<_>>().join("\t"))),
+            _ => {}
+        }
+    }
+    (last, done)
+}
+
+#[cfg(windows)]
+fn run_elevated(mut args: Vec<String>, progress: &dyn Fn(Progress)) -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::core::{HSTRING, PCWSTR, w};
+
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let report = std::env::temp_dir().join(format!("lookout-install-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&report);
+    // Before the /D= that has to stay last.
+    let at = args.iter().position(|a| a.starts_with("/D=")).unwrap_or(args.len());
+    args.insert(at, "/ELEVATED".into());
+    args.insert(at + 1, format!("--report={}", report.display()));
+    let params = args
+        .iter()
+        .map(|a| if a.contains(' ') && !a.starts_with("/D=") { format!("\"{a}\"") } else { a.clone() })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let file = HSTRING::from(me.as_os_str());
+    let params = HSTRING::from(params);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
+        return Err(if e.code() == ERROR_CANCELLED.to_hresult() {
+            "Administrator permission is needed to install to this folder. Choose another folder, or click Retry and allow it.".into()
+        } else {
+            format!("Couldn't get administrator permission: {}", e.message())
+        });
+    }
+    let process = info.hProcess;
+    loop {
+        let waited = unsafe { WaitForSingleObject(process, 120) };
+        if let (Some(p), _) = read_report(&report) {
+            progress(p);
+        }
+        if waited == WAIT_OBJECT_0 {
+            break;
+        }
+    }
+    let mut code = 1u32;
+    unsafe {
+        let _ = GetExitCodeProcess(process, &mut code);
+        let _ = CloseHandle(process);
+    }
+    let (_, outcome) = read_report(&report);
+    let _ = std::fs::remove_file(&report);
+    match outcome {
+        Some(r) => r,
+        None if code == 0 => Ok(()),
+        None => Err(format!("The elevated installer stopped unexpectedly (exit code {code}).")),
+    }
+}
+
+#[cfg(not(windows))]
+fn run_elevated(_: Vec<String>, _: &dyn Fn(Progress)) -> Result<(), String> {
+    let _ = read_report;
+    Err("Administrator rights are only requested on Windows.".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_round_trip() {
+        let f = std::env::temp_dir().join(format!("lookout-report-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&f);
+        report_line(&f, &report_progress(&Progress { fraction: 0.5, step: "Extract: lookout.exe... 50%".into() }));
+        let (p, done) = read_report(&f);
+        assert_eq!(p.map(|p| (p.fraction, p.step)), Some((0.5, "Extract: lookout.exe... 50%".to_string())));
+        assert!(done.is_none());
+        report_line(&f, "ERR\tCouldn't replace it");
+        assert_eq!(read_report(&f).1, Some(Err("Couldn't replace it".to_string())));
+        let _ = std::fs::remove_file(&f);
+    }
 
     #[test]
     fn same_dir_ignores_trailing_separators() {
