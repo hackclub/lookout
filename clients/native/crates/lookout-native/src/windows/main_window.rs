@@ -157,6 +157,16 @@ pub struct MainWindow {
     menu: Option<(Entity<MenuPopup>, MenuPurpose)>,
     pending_menu: Option<(Vec<MenuItem>, Bounds<Pixels>, bool, MenuPurpose)>,
     pending_native_menu: Option<(Vec<crate::platform::mac_menu::Entry>, Bounds<Pixels>)>,
+    /// The macOS add menu (a SwiftUI panel) is open. It takes key status from
+    /// the main window, which would otherwise dim the header bar as if the
+    /// window had gone to the background; the window is still the main one.
+    native_menu_open: bool,
+    /// Bumped per native menu, so a replaced menu's ending doesn't clear
+    /// `native_menu_open` while its successor is up.
+    native_menu_gen: u64,
+    /// The OS's own answer to "is this window active", kept so the dim can
+    /// settle correctly when the native menu closes.
+    os_active: bool,
     header_add_anchor: Bounds<Pixels>,
     frame_offset: f32,
     tip: Option<Tip>,
@@ -271,7 +281,8 @@ impl MainWindow {
             cx.notify();
         }));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
-            let active = window.is_window_active();
+            this.os_active = window.is_window_active();
+            let active = this.os_active || this.native_menu_open;
             app::state(cx).frontend.wants_preview.store(active, std::sync::atomic::Ordering::Relaxed);
             this.active.set_css(if active { 1.0 } else { 0.0 }, 160.0, Ease::EASE_OUT);
             if active {
@@ -317,6 +328,9 @@ impl MainWindow {
             menu: None,
             pending_menu: None,
             pending_native_menu: None,
+            native_menu_open: false,
+            native_menu_gen: 0,
+            os_active: window.is_window_active(),
             header_add_anchor: Bounds::default(),
             frame_offset: 0.0,
             tip: None,
@@ -1122,10 +1136,25 @@ impl Render for MainWindow {
         if let Some((entries, anchor)) = self.pending_native_menu.take() {
             match crate::platform::mac_menu::show(window, &entries, anchor) {
                 Some(rx) => {
+                    self.native_menu_open = true;
+                    self.native_menu_gen += 1;
+                    let menu_gen = self.native_menu_gen;
                     cx.spawn(async move |this, cx| {
-                        if let Ok(choice) = rx.recv_async().await {
-                            this.update(cx, |mw, cx| mw.on_menu_choice(MenuPurpose::Add, choice, cx)).ok();
-                        }
+                        let choice = rx.recv_async().await;
+                        this.update(cx, |mw, cx| {
+                            if mw.native_menu_gen != menu_gen {
+                                return; // replaced by a newer menu
+                            }
+                            mw.native_menu_open = false;
+                            // Settle on the window's real state (it may have
+                            // lost focus to another app while the menu was up).
+                            mw.active.set_css(if mw.os_active { 1.0 } else { 0.0 }, 160.0, Ease::EASE_OUT);
+                            cx.notify();
+                            if let Ok(choice) = choice {
+                                mw.on_menu_choice(MenuPurpose::Add, choice, cx);
+                            }
+                        })
+                        .ok();
                     })
                     .detach();
                 }
