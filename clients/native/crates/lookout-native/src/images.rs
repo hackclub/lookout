@@ -86,9 +86,11 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
             // blip) get two more tries; an HTTP error or a bad image doesn't.
             let mut attempt = 0;
             let res = loop {
-                match http.get(&url_owned).timeout(std::time::Duration::from_secs(30)).send().await {
+                // A stalled connection is retried on a fresh one rather than
+                // waited out: 10s per try, timeouts included.
+                match http.get(&url_owned).timeout(std::time::Duration::from_secs(10)).send().await {
                     Ok(res) => break res,
-                    Err(e) if attempt < 2 && !e.is_timeout() => {
+                    Err(e) if attempt < 2 => {
                         attempt += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(400 * 3u64.pow(attempt - 1))).await;
                     }
