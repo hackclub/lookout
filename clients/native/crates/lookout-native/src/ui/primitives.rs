@@ -324,6 +324,77 @@ pub fn card(t: &Theme) -> gpui_kit::gpui::Div {
 /// The Tauri lists faded their scrolled-away edges with a `mask-image`
 /// gradient. GPUI has no masks; over an opaque window body the same look
 /// comes from a gradient of the body colour on top of the edge.
+/// A scroll viewport whose content fades out at the top and bottom edges,
+/// like the Tauri app's CSS `mask-image` (the gallery's 20px, the source
+/// list's 12px). The content itself goes transparent, so window vibrancy or
+/// Mica shows through. Uses the vendored GPUI's `Window::with_edge_fade`.
+/// Pass 0 for an edge that shouldn't fade (nothing scrolled past it).
+pub fn edge_faded(child: impl IntoElement, top: f32, bottom: f32) -> EdgeFaded {
+    EdgeFaded { child: child.into_any_element(), top, bottom }
+}
+
+pub struct EdgeFaded {
+    child: AnyElement,
+    top: f32,
+    bottom: f32,
+}
+
+impl IntoElement for EdgeFaded {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui_kit::gpui::Element for EdgeFaded {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui_kit::gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui_kit::gpui::LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui_kit::gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui_kit::gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let child = &mut self.child;
+        window.with_edge_fade(bounds, px(self.top), px(self.bottom), |window| child.paint(window, cx));
+    }
+}
+
 pub fn edge_fade(top: bool, height: f32, bg: Hsla) -> impl IntoElement {
     let (a, b) = (bg, theme::fade(bg, 0.0));
     let grad = if top {

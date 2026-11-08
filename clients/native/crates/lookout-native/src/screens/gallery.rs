@@ -4,7 +4,6 @@
 //! summary cache and refreshed from `POST /api/sessions/batch` (100 tokens
 //! per request) on open and whenever the window regains focus.
 
-use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
@@ -18,7 +17,7 @@ use crate::store::{CachedSummary, SessionSummary};
 use crate::theme::{self, Theme, theme};
 use crate::ui::button::{BtnSize, Button, PressState, Variant, paint_squircle_bg, press_values};
 use crate::ui::icon::Icon;
-use crate::ui::primitives::{AspectBox, BadgeSize, PressScale, Skeleton, badge, card, edge_fade};
+use crate::ui::primitives::{AspectBox, BadgeSize, PressScale, Skeleton, badge, card, edge_faded};
 use crate::ui::text::TextExt;
 
 pub enum GalleryEvent {
@@ -285,7 +284,8 @@ impl Render for GalleryPage {
                 .flex_1()
                 .relative()
                 .min_h(px(0.0))
-                .child(
+                // CSS mask-image-style edge fades (fadeMask, 20px).
+                .child(edge_faded(
                     div()
                         .id("gallery-scroll")
                         .size_full()
@@ -301,9 +301,9 @@ impl Render for GalleryPage {
                         .child(div().flex_none().flex().flex_col().gap(px(12.0)).children(cards))
                         .child(div().flex_1().min_h(px(40.0)))
                         .child(crate::screens::info::hack_club_footer("gallery-hackclub", &t)),
-                )
-                .when(show_top && !theme::vibrant(), |d| d.child(edge_fade(true, 20.0, t.bg_body)))
-                .when(show_bottom && !theme::vibrant(), |d| d.child(edge_fade(false, 20.0, t.bg_body))),
+                    if show_top { 20.0 } else { 0.0 },
+                    if show_bottom { 20.0 } else { 0.0 },
+                )),
         )
         .into_any_element()
     }

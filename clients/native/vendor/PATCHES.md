@@ -54,3 +54,17 @@ from `gpui-pre` (5 MB, not needed), and so were its `[[example]]` entries in
 Re-copy the new release into each directory, then re-apply the hunks above
 (`grep -rn "Lookout patch" vendor/`). If upstream implements surfaces itself,
 drop the patch and switch `ui/video.rs` to its API.
+
+## Edge fades (scroll masks)
+
+- `gpui-pre/src/scene.rs`: `EdgeFade` and `Scene::push_edge_fade` /
+  `pop_edge_fade`. While a fade is active, `insert_primitive` emits any
+  primitive that overlaps a fade zone as one-device-pixel strips, each clipped
+  to its band with the ordinary rectangular content mask and its opacity scaled
+  (`Primitive::scale_opacity`), plus the unfaded remainder. `replay` inserts
+  recorded primitives unfaded (they were split when first painted). Surfaces
+  (video) are never faded. No GPU struct or shader changes.
+- `gpui-pre/src/window.rs`: `Window::with_edge_fade(bounds, top, bottom, f)`.
+- Used by `crates/lookout-native/src/ui/primitives.rs` (`edge_faded`) for the
+  gallery and source-list fades, the Tauri app's CSS `mask-image`: content goes
+  transparent, so vibrancy and Mica show through.

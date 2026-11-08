@@ -90,7 +90,7 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
                 // waited out: 10s per try, timeouts included.
                 match http.get(&url_owned).timeout(std::time::Duration::from_secs(10)).send().await {
                     Ok(res) => break res,
-                    Err(e) if attempt < 2 => {
+                    Err(_) if attempt < 2 => {
                         attempt += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(400 * 3u64.pow(attempt - 1))).await;
                     }

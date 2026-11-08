@@ -4195,6 +4195,32 @@ impl Window {
         }
     }
 
+    /// Lookout patch: paint `f` with a CSS `mask-image`-style fade at the top
+    /// and bottom of `bounds` (a scroll viewport): content ramps from
+    /// transparent at the edge to opaque `top` / `bottom` in. Zero disables an
+    /// edge. Paint phase only. See `scene::EdgeFade`.
+    pub fn with_edge_fade<R>(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        top: Pixels,
+        bottom: Pixels,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        if top <= px(0.) && bottom <= px(0.) {
+            return f(self);
+        }
+        let scale = self.scale_factor();
+        self.next_frame.scene.push_edge_fade(crate::scene::EdgeFade {
+            bounds: bounds.scale(scale),
+            top: top.scale(scale),
+            bottom: bottom.scale(scale),
+        });
+        let result = f(self);
+        self.next_frame.scene.pop_edge_fade();
+        result
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(

@@ -22,7 +22,7 @@ use crate::theme::{self, Theme, eid, theme};
 use crate::ui::button::{BtnSize, Button, PressState, Variant, press_values};
 use crate::ui::feedback::error_page;
 use crate::ui::paint;
-use crate::ui::primitives::edge_fade;
+use crate::ui::primitives::edge_faded;
 use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
 
@@ -652,7 +652,8 @@ impl Render for SourcePicker {
                     .min_h(px(0.0))
                     .flex()
                     .flex_col()
-                    .child(
+                    // CSS mask-image-style edge fades (12px), as SourcePicker.tsx.
+                    .child(edge_faded(
                         div()
                             .id("source-list")
                             .flex()
@@ -665,9 +666,9 @@ impl Render for SourcePicker {
                             .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                             .pb(px(4.0))
                             .children(list),
-                    )
-                    .when(show_top && !theme::vibrant(), |d| d.child(edge_fade(true, 12.0, t.bg_body)))
-                    .when(show_bottom && !theme::vibrant(), |d| d.child(edge_fade(false, 12.0, t.bg_body)))
+                        if show_top { 12.0 } else { 0.0 },
+                        if show_bottom { 12.0 } else { 0.0 },
+                    ))
                     .children(hint),
             )
             .child(div().flex_none().when(!self.selected.is_empty(), |d| {

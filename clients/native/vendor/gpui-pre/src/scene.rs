@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point, size,
 };
 use std::{
     fmt::Debug,
@@ -50,6 +50,25 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Lookout patch: active edge fades (innermost last), see [`EdgeFade`].
+    pub(crate) edge_fades: Vec<EdgeFade>,
+}
+
+/// Lookout patch: a CSS `mask-image`-style fade at the top and bottom of a
+/// region (a scroll viewport): content painted inside it ramps from fully
+/// transparent at the region's edge to opaque `top` / `bottom` device pixels
+/// in. GPUI only clips to rectangles, so a primitive that overlaps a fade zone
+/// is emitted as one-device-pixel horizontal strips (each clipped to its band
+/// with the ordinary rectangular content mask, its opacity scaled for that
+/// band) plus the unfaded remainder. No shader or GPU layout changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EdgeFade {
+    /// The faded region (a scroll viewport), in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Fade depth at the top edge; zero for none.
+    pub top: ScaledPixels,
+    /// Fade depth at the bottom edge; zero for none.
+    pub bottom: ScaledPixels,
 }
 
 #[expect(missing_docs)]
@@ -66,6 +85,18 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.edge_fades.clear();
+    }
+
+    /// Lookout patch: begin an [`EdgeFade`] for the primitives inserted until
+    /// the matching [`Scene::pop_edge_fade`].
+    pub fn push_edge_fade(&mut self, fade: EdgeFade) {
+        self.edge_fades.push(fade);
+    }
+
+    /// Lookout patch: end the innermost [`EdgeFade`].
+    pub fn pop_edge_fade(&mut self) {
+        self.edge_fades.pop();
     }
 
     pub fn len(&self) -> usize {
@@ -85,7 +116,74 @@ impl Scene {
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        let mut primitive = primitive.into();
+        let primitive = primitive.into();
+        // Lookout patch: edge fades.
+        match self.edge_fades.last().copied() {
+            Some(fade) if !matches!(primitive, Primitive::Surface(_)) => self.insert_faded(primitive, fade),
+            _ => self.insert_unfaded(primitive),
+        }
+    }
+
+    /// Lookout patch: split `primitive` across `fade`'s zones (see [`EdgeFade`]).
+    fn insert_faded(&mut self, primitive: Primitive, fade: EdgeFade) {
+        let mask = primitive.content_mask().bounds;
+        let clipped = primitive.bounds().intersect(&mask);
+        if clipped.is_empty() {
+            return;
+        }
+        let (fx, fw) = (fade.bounds.origin.x, fade.bounds.size.width);
+        let f_top = fade.bounds.origin.y.0;
+        let f_bottom = f_top + fade.bounds.size.height.0;
+        let top_end = f_top + fade.top.0.max(0.0);
+        let bottom_start = f_bottom - fade.bottom.0.max(0.0);
+        let (c_top, c_bottom) = (clipped.origin.y.0, clipped.origin.y.0 + clipped.size.height.0);
+        let touches_top = fade.top.0 > 0.0 && c_top < top_end && c_bottom > f_top;
+        let touches_bottom = fade.bottom.0 > 0.0 && c_bottom > bottom_start && c_top < f_bottom;
+        if !touches_top && !touches_bottom {
+            self.insert_unfaded(primitive);
+            return;
+        }
+        let band = |y0: f32, y1: f32| Bounds {
+            origin: point(fx, ScaledPixels(y0)),
+            size: size(fw, ScaledPixels((y1 - y0).max(0.0))),
+        };
+        // The unfaded middle.
+        let mut middle = primitive.clone();
+        middle.set_content_mask_bounds(mask.intersect(&band(top_end.max(f_top), bottom_start.min(f_bottom))));
+        if !middle.bounds().intersect(&middle.content_mask().bounds).is_empty() {
+            self.insert_unfaded(middle);
+        }
+        // One-device-pixel strips through each zone.
+        let mut strips = |from: f32, to: f32, alpha_at: &dyn Fn(f32) -> f32| {
+            let mut y = from.floor();
+            while y < to {
+                let (y0, y1) = (y.max(from), (y + 1.0).min(to));
+                y += 1.0;
+                if y1 <= c_top || y0 >= c_bottom {
+                    continue;
+                }
+                let alpha = alpha_at((y0 + y1) / 2.0).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let mut strip = primitive.clone();
+                strip.set_content_mask_bounds(mask.intersect(&band(y0, y1)));
+                strip.scale_opacity(alpha);
+                self.insert_unfaded(strip);
+            }
+        };
+        if touches_top {
+            let h = fade.top.0;
+            strips(f_top, top_end.min(f_bottom), &|y| (y - f_top) / h);
+        }
+        if touches_bottom {
+            let h = fade.bottom.0;
+            strips(bottom_start.max(f_top), f_bottom, &|y| (f_bottom - y) / h);
+        }
+    }
+
+    fn insert_unfaded(&mut self, primitive: Primitive) {
+        let mut primitive = primitive;
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
@@ -141,7 +239,8 @@ impl Scene {
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                // Lookout patch: already split by any edge fade when first painted.
+                PaintOperation::Primitive(primitive) => self.insert_unfaded(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
             }
@@ -242,6 +341,38 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+        }
+    }
+
+    /// Lookout patch: narrow this primitive's content mask (edge fades).
+    pub(crate) fn set_content_mask_bounds(&mut self, bounds: Bounds<ScaledPixels>) {
+        match self {
+            Primitive::Shadow(p) => p.content_mask.bounds = bounds,
+            Primitive::Quad(p) => p.content_mask.bounds = bounds,
+            Primitive::Path(p) => p.content_mask.bounds = bounds,
+            Primitive::Underline(p) => p.content_mask.bounds = bounds,
+            Primitive::MonochromeSprite(p) => p.content_mask.bounds = bounds,
+            Primitive::SubpixelSprite(p) => p.content_mask.bounds = bounds,
+            Primitive::PolychromeSprite(p) => p.content_mask.bounds = bounds,
+            Primitive::Surface(p) => p.content_mask.bounds = bounds,
+        }
+    }
+
+    /// Lookout patch: scale this primitive's opacity (edge fades). Surfaces
+    /// (video frames) have no opacity and are left as they are.
+    pub(crate) fn scale_opacity(&mut self, factor: f32) {
+        match self {
+            Primitive::Shadow(p) => p.color = p.color.opacity(factor),
+            Primitive::Quad(p) => {
+                p.background = p.background.opacity(factor);
+                p.border_color = p.border_color.opacity(factor);
+            }
+            Primitive::Path(p) => p.color = p.color.opacity(factor),
+            Primitive::Underline(p) => p.color = p.color.opacity(factor),
+            Primitive::MonochromeSprite(p) => p.color = p.color.opacity(factor),
+            Primitive::SubpixelSprite(p) => p.color = p.color.opacity(factor),
+            Primitive::PolychromeSprite(p) => p.opacity *= factor,
+            Primitive::Surface(_) => {}
         }
     }
 
