@@ -718,22 +718,21 @@ jobs:
       # addresses; Sentry symbolicates them with these, matched by debug id.
       # Skipped when the token isn't available (forks, Dependabot).
       #
-      # Its own token: `lookout-native` lives in the `hack-club` Sentry org,
-      # while SENTRY_AUTH_TOKEN is an org token for `hack-club-hcb` (the Tauri
-      # uploads' org). An org token always overrides SENTRY_ORG, so that one
-      # can never reach this project. Never fails the release: a missing
-      # symbol upload only means unsymbolicated crash reports.
+      # SENTRY_AUTH_TOKEN must be an org token for the `hack-club` Sentry org,
+      # where `lookout-native` (and `lookout-desktop`) live: an org token
+      # always overrides SENTRY_ORG. Never fails the release: a missing symbol
+      # upload only means unsymbolicated crash reports.
       - name: Upload debug symbols to Sentry
         continue-on-error: true
         shell: bash
         env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_NATIVE_AUTH_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: hack-club
           SENTRY_PROJECT: lookout-native
         run: |
           set -euo pipefail
           if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
-            echo "::warning::SENTRY_NATIVE_AUTH_TOKEN is not set; native crash reports from this build won't be symbolicated."
+            echo "::warning::SENTRY_AUTH_TOKEN is not set; native crash reports from this build won't be symbolicated."
             exit 0
           fi
           case "$RUNNER_OS" in
