@@ -265,6 +265,11 @@ impl VideoPlayer {
         self.frame.as_ref().map(|f| f.aspect())
     }
 
+    /// The frame on screen (what the editor's mask preview samples).
+    pub fn frame(&self) -> Option<&Frame> {
+        self.frame.as_ref()
+    }
+
     fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
         self.rate = rate;
         if let Some(b) = &self.backend {

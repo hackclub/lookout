@@ -1267,6 +1267,70 @@ fn paint_mosaic(b: Bounds<Pixels>, window: &mut Window) {
     }
 }
 
+/// Paint what the published video will show under a mask: the frame on
+/// screen pixelated exactly like the worker's ffmpeg filter (same even-pixel
+/// box, same block grid, same sampled pixels, chroma from its own coarser
+/// 4:2:0 grid). `video` is the picture's on-screen rect. False when the
+/// frame's pixels can't be read.
+fn paint_pixelated(
+    m: &Mask,
+    frame: &crate::player::Frame,
+    video: Bounds<Pixels>,
+    window: &mut Window,
+) -> bool {
+    let Some(p) = em::Pixelation::new(m, frame.width, frame.height) else {
+        return false;
+    };
+    let scale = window.scale_factor();
+    let sx = f32::from(video.size.width) / frame.width as f32;
+    let sy = f32::from(video.size.height) / frame.height as f32;
+    // Block edges snapped to device pixels, so neighbours share an edge
+    // exactly (no hairline seams) and the grid stays put while playing.
+    let snap = |v: f32| (v * scale).round() / scale;
+    let xs: Vec<f32> = (0..=p.down_w)
+        .map(|i| {
+            snap(
+                f32::from(video.origin.x)
+                    + (p.x + em::Pixelation::edge(i, p.down_w, p.w)) as f32 * sx,
+            )
+        })
+        .collect();
+    let ys: Vec<f32> = (0..=p.down_h)
+        .map(|j| {
+            snap(
+                f32::from(video.origin.y)
+                    + (p.y + em::Pixelation::edge(j, p.down_h, p.h)) as f32 * sy,
+            )
+        })
+        .collect();
+    let mut quads = Vec::with_capacity((p.down_w * p.down_h) as usize);
+    let read = frame.with_pixels(|px| {
+        let (cw, ch) = (p.down_w / 2, p.down_h / 2);
+        for j in 0..p.down_h {
+            let ly = p.y + em::Pixelation::sample(j, p.down_h, p.h);
+            let cy = p.y / 2 + em::Pixelation::sample(j / 2, ch, p.h / 2);
+            for i in 0..p.down_w {
+                let lx = p.x + em::Pixelation::sample(i, p.down_w, p.w);
+                let cx = p.x / 2 + em::Pixelation::sample(i / 2, cw, p.w / 2);
+                quads.push((i, j, px.yuv420_rgb((lx, ly), (cx, cy))));
+            }
+        }
+    });
+    if read.is_none() {
+        return false;
+    }
+    for (i, j, [r, g, b]) in quads {
+        let (i, j) = (i as usize, j as usize);
+        let cb = Bounds::from_corners(
+            point(px(xs[i]), px(ys[j])),
+            point(px(xs[i + 1]), px(ys[j + 1])),
+        );
+        let c: Hsla = gpui_kit::gpui::Rgba { r, g, b, a: 1.0 }.into();
+        window.paint_quad(gpui_kit::gpui::fill(cb, c));
+    }
+    true
+}
+
 /// 45° hatch: 5px stripe, 5px gap, clipped to `clip`.
 fn paint_hatch(b: Bounds<Pixels>, clip: Bounds<Pixels>, stripe: Hsla, window: &mut Window) {
     window.with_content_mask(Some(gpui_kit::gpui::ContentMask { bounds: clip }), |window| {
@@ -2060,6 +2124,8 @@ impl TimelapseEditor {
         let selected = self.sel_mask.as_deref() == Some(m.id.as_str());
         let (x, y, w, h) = (m.x * vw, m.y * vh, (m.w * vw).max(1.0), (m.h * vh).max(1.0));
         let id = m.id.clone();
+        let video = self.video.clone();
+        let mask = m.clone();
         let mut el = div()
             .id(SharedString::from(format!("mask-box-{}", m.id)))
             .absolute()
@@ -2069,10 +2135,40 @@ impl TimelapseEditor {
             .h(px(h))
             .cursor(CursorStyle::OpenHand)
             .child(
-                canvas(|_, _, _| (), move |b, _, window, _| {
-                    window.with_content_mask(Some(gpui_kit::gpui::ContentMask { bounds: b }), |window| paint_mosaic(b, window));
-                    window.paint_quad(gpui_kit::gpui::quad(b, px(3.0), gpui_kit::gpui::transparent_black(), px(if selected { 2.0 } else { 1.5 }), color, Default::default()));
-                })
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, cx| {
+                        // The picture's rect, from where this box sits on it.
+                        let video_r = Bounds {
+                            origin: point(
+                                b.origin.x - px(mask.x * vw),
+                                b.origin.y - px(mask.y * vh),
+                            ),
+                            size: gpui_kit::gpui::size(px(vw), px(vh)),
+                        };
+                        let frame = video.as_ref().and_then(|v| v.read(cx).frame().cloned());
+                        let painted = frame.is_some_and(|f| {
+                            window.with_content_mask(
+                                Some(gpui_kit::gpui::ContentMask { bounds: video_r }),
+                                |window| paint_pixelated(&mask, &f, video_r, window),
+                            )
+                        });
+                        if !painted {
+                            window.with_content_mask(
+                                Some(gpui_kit::gpui::ContentMask { bounds: b }),
+                                |window| paint_mosaic(b, window),
+                            );
+                        }
+                        window.paint_quad(gpui_kit::gpui::quad(
+                            b,
+                            px(3.0),
+                            gpui_kit::gpui::transparent_black(),
+                            px(if selected { 2.0 } else { 1.5 }),
+                            color,
+                            Default::default(),
+                        ));
+                    },
+                )
                 .absolute()
                 .inset_0(),
             )

@@ -249,6 +249,61 @@ impl Mask {
     }
 }
 
+/// How the worker pixelates a mask (`packages/worker/src/segments.ts`):
+/// crop an even-aligned box, scale it to `down_w × down_h` with
+/// nearest-neighbour, then back up the same way. All in frame pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pixelation {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub down_w: u32,
+    pub down_h: u32,
+}
+
+impl Pixelation {
+    /// The worker's rounding, applied to the coordinates as they're saved.
+    pub fn new(m: &Mask, frame_w: u32, frame_h: u32) -> Option<Pixelation> {
+        if frame_w < 2 || frame_h < 2 {
+            return None;
+        }
+        let (fw, fh) = (frame_w as i64, frame_h as i64);
+        let px = |v: f32, len: i64| (round4(v as f64) * len as f64).round() as i64;
+        let (raw_x, raw_y, raw_w, raw_h) = (px(m.x, fw), px(m.y, fh), px(m.w, fw), px(m.h, fh));
+        let x = (raw_x & !1).min((fw - 2) & !1).max(0);
+        let y = (raw_y & !1).min((fh - 2) & !1).max(0);
+        let w = (raw_w & !1).min((fw - x) & !1).max(2);
+        let h = (raw_h & !1).min((fh - y) & !1).max(2);
+        let down = |len: i64| ((len / 16 / 2) * 2).max(2);
+        Some(Pixelation {
+            x: x as u32,
+            y: y as u32,
+            w: w as u32,
+            h: h as u32,
+            down_w: down(w) as u32,
+            down_h: down(h) as u32,
+        })
+    }
+
+    /// Source offset (within the box) that block `i` of `down` shows:
+    /// swscale's point sampling picks `floor((i + 0.5) · len / down)`.
+    pub fn sample(i: u32, down: u32, len: u32) -> u32 {
+        (((2 * i + 1) as u64 * len as u64) / (2 * down as u64)) as u32
+    }
+
+    /// First output offset (within the box) belonging to block `j`: the
+    /// upscale maps pixel `p` to block `floor((p + 0.5) · down / len)`.
+    pub fn edge(j: u32, down: u32, len: u32) -> u32 {
+        if j == 0 {
+            return 0;
+        }
+        let num = 2 * j as i64 * len as i64 - down as i64;
+        let den = 2 * down as i64;
+        ((num + den - 1) / den).clamp(0, len as i64) as u32
+    }
+}
+
 fn round4(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
 }
@@ -407,6 +462,105 @@ mod tests {
         v2[0].as_object_mut().unwrap().remove("startSec");
         let back = masks_from_json(&v2, &u);
         assert_eq!((back[0].start, back[0].end), (2.0, 5.0));
+    }
+
+    /// Block runs `(first, end, source)` as ffmpeg 8 produces them for
+    /// `scale=down:…:flags=neighbor,scale=len:…:flags=neighbor`.
+    #[test]
+    fn pixelation_matches_ffmpeg() {
+        let cases: [(u32, &[(u32, u32, u32)]); 4] = [
+            (36, &[(0, 18, 9), (18, 36, 27)]),
+            (
+                100,
+                &[
+                    (0, 17, 8),
+                    (17, 33, 25),
+                    (33, 50, 41),
+                    (50, 67, 58),
+                    (67, 83, 75),
+                    (83, 100, 91),
+                ],
+            ),
+            (
+                250,
+                &[
+                    (0, 18, 8),
+                    (18, 36, 26),
+                    (36, 54, 44),
+                    (54, 71, 62),
+                    (71, 89, 80),
+                    (89, 107, 98),
+                    (107, 125, 116),
+                    (125, 143, 133),
+                    (143, 161, 151),
+                    (161, 179, 169),
+                    (179, 196, 187),
+                    (196, 214, 205),
+                    (214, 232, 223),
+                    (232, 250, 241),
+                ],
+            ),
+            (
+                254,
+                &[
+                    (0, 18, 9),
+                    (18, 36, 27),
+                    (36, 54, 45),
+                    (54, 73, 63),
+                    (73, 91, 81),
+                    (91, 109, 99),
+                    (109, 127, 117),
+                    (127, 145, 136),
+                    (145, 163, 154),
+                    (163, 181, 172),
+                    (181, 200, 190),
+                    (200, 218, 208),
+                    (218, 236, 226),
+                    (236, 254, 244),
+                ],
+            ),
+        ];
+        for (len, runs) in cases {
+            let down = runs.len() as u32;
+            let m = Mask {
+                id: "m".into(),
+                start: 0.0,
+                end: 1.0,
+                x: 0.0,
+                y: 0.0,
+                w: len as f32 / 1000.0,
+                h: 0.5,
+            };
+            assert_eq!(
+                Pixelation::new(&m, 1000, 100).unwrap().down_w,
+                down,
+                "len {len}"
+            );
+            for (j, &(a, b, s)) in runs.iter().enumerate() {
+                let j = j as u32;
+                assert_eq!(
+                    (
+                        Pixelation::edge(j, down, len),
+                        Pixelation::edge(j + 1, down, len),
+                        Pixelation::sample(j, down, len)
+                    ),
+                    (a, b, s),
+                    "len {len} block {j}"
+                );
+            }
+        }
+        // Even-aligned and kept inside the frame.
+        let m = Mask {
+            id: "m".into(),
+            start: 0.0,
+            end: 1.0,
+            x: 0.9,
+            y: 0.0013,
+            w: 0.5,
+            h: 0.0001,
+        };
+        let p = Pixelation::new(&m, 1920, 1080).unwrap();
+        assert_eq!((p.x, p.y, p.w, p.h, p.down_h), (1728, 0, 192, 2, 2));
     }
 
     #[test]

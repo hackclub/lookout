@@ -358,8 +358,9 @@ fn main() {
                                 }).collect();
                                 let mut v = json!({ "units": units, "cuts": [], "editable": true, "originalVideoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())), "recompilesRemaining": 5, "expectedUnits": n });
                                 // DEV_MASKS: act like a server with the masking API (PR #198).
-                                if std::env::var("DEV_MASKS").is_ok() {
-                                    v["masks"] = json!([]);
+                                // A JSON list seeds saved masks.
+                                if let Ok(m) = std::env::var("DEV_MASKS") {
+                                    v["masks"] = serde_json::from_str::<serde_json::Value>(&m).ok().filter(|m| m.is_array()).unwrap_or_else(|| json!([]));
                                 }
                                 json_resp(v, 200)
                             } else {
