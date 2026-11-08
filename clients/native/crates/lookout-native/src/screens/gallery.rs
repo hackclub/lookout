@@ -198,7 +198,7 @@ impl GalleryPage {
 impl Render for GalleryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let show_header = !crate::windows::main_window::uses_header_bar(window);
+        let show_header = !crate::theme::header_bar_shown();
         let show_bottom_fade = show_header;
 
         if !self.restored_scroll {

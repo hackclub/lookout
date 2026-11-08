@@ -34,6 +34,8 @@ static ICONS: &[(&str, &[u8])] = embed!(
     "lk-chevron-left",
     "lk-header-back",
     "lk-header-close",
+    "lk-win-minimize",
+    "lk-win-close",
     "lk-monitor",
     "lk-camera",
     "lk-error-circle",

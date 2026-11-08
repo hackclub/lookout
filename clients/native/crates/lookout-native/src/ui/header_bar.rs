@@ -1,6 +1,10 @@
-//! `HeaderBar` (Linux only, `clients/desktop/src/components/HeaderBar.tsx`):
-//! the 47px Adwaita-style title bar the undecorated Linux window draws for
-//! itself. Back button (30×30 round action), title/subtitle, a flexible drag
+//! `HeaderBar` (`clients/desktop/src/components/HeaderBar.tsx`): the 47px
+//! Adwaita-style title bar. The Tauri app drew it only on Linux; Lookout
+//! Native uses the same bar on every platform (a deliberate improvement over
+//! the old in-page "‹ Back" buttons), changing only the window controls:
+//! GNOME's round close, the macOS traffic lights, or Windows caption buttons.
+//! See [`HeaderChrome`].
+//! Back button (30×30 round action), title/subtitle, a flexible drag
 //! spacer, page actions and the 24×24 round close control on whichever
 //! edge GNOME's `button-layout` puts it.
 //!
@@ -11,7 +15,7 @@ use std::rc::Rc;
 
 use gpui_kit::gpui::{
     AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
 
 use gpui_kit::gpui::prelude::FluentBuilder;
@@ -22,6 +26,44 @@ use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
+
+/// Leading space reserved for the macOS traffic lights: they sit 16px in,
+/// three 12px buttons 8px apart (68px), plus the bar's 12px item gap.
+pub const MAC_TRAFFIC_LIGHT_INSET: f32 = 80.0;
+/// Where the traffic lights go, centred on the bar (`TitlebarOptions`).
+pub const MAC_TRAFFIC_LIGHT_POSITION: (f32, f32) = (16.0, 16.0);
+/// Windows 11 caption buttons are 46px wide and fill the title bar's height.
+const WIN_CAPTION_W: f32 = 46.0;
+
+/// Which platform's window chrome the bar sits in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeaderChrome {
+    /// Linux, Lookout drawing its own frame: GNOME's round close control.
+    Gnome,
+    /// Linux under the window manager's frame, which has its own close.
+    GnomeFramed,
+    /// macOS: the bar extends under the transparent titlebar and leaves its
+    /// leading edge to the traffic lights.
+    Mac,
+    /// Windows: the native title bar is hidden and the bar ends in
+    /// minimize/close caption buttons the OS hit-tests (snap, keyboard and
+    /// accessibility behaviour stay the system's).
+    Windows,
+}
+
+impl HeaderChrome {
+    pub fn current(lookout_draws_frame: bool) -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else if lookout_draws_frame {
+            Self::Gnome
+        } else {
+            Self::GnomeFramed
+        }
+    }
+}
 
 /// The round header-bar buttons. `Control` is the filled close button,
 /// `Action` the transparent back/gear/+ buttons.
@@ -187,11 +229,16 @@ pub struct HeaderBar {
     backdrop: f32,
     maximizable: bool,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    chrome: HeaderChrome,
 }
 
 impl HeaderBar {
     pub fn new(nav: HeaderNav, controls_on_right: bool, backdrop: f32) -> Self {
-        Self { nav, actions: Vec::new(), controls_on_right, backdrop, maximizable: false, on_close: None }
+        Self { nav, actions: Vec::new(), controls_on_right, backdrop, maximizable: false, on_close: None, chrome: HeaderChrome::Gnome }
+    }
+    pub fn chrome(mut self, c: HeaderChrome) -> Self {
+        self.chrome = c;
+        self
     }
     pub fn actions(mut self, a: Vec<AnyElement>) -> Self {
         self.actions = a;
@@ -262,8 +309,11 @@ impl RenderOnce for HeaderBar {
                     .child(s)
             }));
         let maximizable = self.maximizable;
+        let chrome = self.chrome;
+        let gnome_close = chrome == HeaderChrome::Gnome;
+        let controls_on_right = self.controls_on_right;
         let (d1, d2, d3) = (drag.clone(), drag.clone(), drag.clone());
-        div()
+        let bar = div()
             .id("lookout-headerbar")
             .relative()
             .flex_none()
@@ -271,10 +321,69 @@ impl RenderOnce for HeaderBar {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .map(|d| if has_back { d.px(px(8.0)) } else { d.pl(px(12.0)).pr(px(8.0)) })
-            .opacity(self.backdrop)
-            // Drag: start only once the pointer moves, so buttons keep their clicks.
-            .on_mouse_down(MouseButton::Left, move |ev, window, cx| {
+            .map(|d| {
+                let lead = match chrome {
+                    HeaderChrome::Mac => MAC_TRAFFIC_LIGHT_INSET - 8.0,
+                    _ if has_back => 8.0,
+                    _ => 12.0,
+                };
+                let trail = if chrome == HeaderChrome::Windows { 0.0 } else { 8.0 };
+                d.pl(px(lead)).pr(px(trail))
+            })
+            .opacity(self.backdrop);
+        let bar = match chrome {
+            // The OS hit-tests the bar as caption: native drag and Aero Snap.
+            HeaderChrome::Windows => bar.window_control_area(WindowControlArea::Drag),
+            HeaderChrome::Mac => bar.window_control_area(WindowControlArea::Drag).on_mouse_down(MouseButton::Left, |ev, window, _| {
+                if window.default_prevented() {
+                    return;
+                }
+                if ev.click_count == 2 {
+                    window.titlebar_double_click();
+                } else {
+                    window.start_window_move();
+                }
+            }),
+            HeaderChrome::Gnome | HeaderChrome::GnomeFramed => self.gnome_drag(bar, maximizable, d1, d2, d3),
+        };
+        bar.map(|d| if gnome_close && !controls_on_right { d.child(make_close("hb-close-left")) } else { d })
+            .children(back)
+            .child(title_block)
+            .child(div().flex_1().self_stretch())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .flex_none()
+                    .children(self.actions)
+                    .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d }),
+            )
+            .when(chrome == HeaderChrome::Windows, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .self_stretch()
+                        .child(win_caption("hb-win-min", false, &t))
+                        .child(win_caption("hb-win-close", true, &t)),
+                )
+            })
+    }
+}
+
+impl HeaderBar {
+    /// GNOME drag: arm on press, move once the pointer moves with the button
+    /// held, so the bar's buttons keep their clicks.
+    fn gnome_drag(
+        &self,
+        bar: gpui_kit::gpui::Stateful<gpui_kit::gpui::Div>,
+        maximizable: bool,
+        d1: gpui_kit::gpui::Entity<DragState>,
+        d2: gpui_kit::gpui::Entity<DragState>,
+        d3: gpui_kit::gpui::Entity<DragState>,
+    ) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+        bar.on_mouse_down(MouseButton::Left, move |ev, window, cx| {
                 if window.default_prevented() {
                     return;
                 }
@@ -302,19 +411,27 @@ impl RenderOnce for HeaderBar {
                 }
             })
             .on_mouse_down(MouseButton::Right, |ev, window, _| window.show_window_menu(ev.position))
-            .map(|d| if !self.controls_on_right { d.child(make_close("hb-close-left")) } else { d })
-            .children(back)
-            .child(title_block)
-            .child(div().flex_1().self_stretch())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .flex_none()
-                    .children(self.actions)
-                    .map(|d| if self.controls_on_right { d.child(make_close("hb-close")) } else { d }),
-            )
     }
+}
+
+/// A Windows 11 caption button (minimize or close). The OS owns the click via
+/// its hit-test area, exactly like a native title bar; this only draws it:
+/// 46px wide, a faint fill on hover, and the system red with a white glyph for
+/// close.
+fn win_caption(id: &'static str, close: bool, t: &crate::theme::Theme) -> impl IntoElement {
+    let group: SharedString = format!("{id}-group").into();
+    let (icon, area) = if close { (Icon::LkWinClose, WindowControlArea::Close) } else { (Icon::LkWinMinimize, WindowControlArea::Min) };
+    let hover_bg = if close { theme::rgba8(0xc4, 0x2b, 0x1c, 1.0).into() } else { t.headerbar_control };
+    let glyph = |color: Hsla| div().absolute().inset_0().flex().items_center().justify_center().child(icon.el(10.0, color));
+    div()
+        .id(id)
+        .group(group.clone())
+        .relative()
+        .w(px(WIN_CAPTION_W))
+        .h_full()
+        .window_control_area(area)
+        .hover(move |s| s.bg(hover_bg))
+        .child(glyph(t.text_primary).group_hover(group.clone(), |s| if close { s.opacity(0.0) } else { s }))
+        .when(close, |d| d.child(glyph(theme::white(1.0)).opacity(0.0).group_hover(group, |s| s.opacity(1.0))))
 }
 

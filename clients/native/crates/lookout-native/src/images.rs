@@ -75,7 +75,19 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
             let b64 = rest.split_once(',').map(|(_, b)| b).unwrap_or("");
             lookout_core::base64_decode(b64).map_err(|e| anyhow::anyhow!(e))?
         } else {
-            let res = http.get(&url_owned).timeout(std::time::Duration::from_secs(30)).send().await?;
+            // Network-level failures (a dropped keep-alive connection, a
+            // blip) get two more tries; an HTTP error or a bad image doesn't.
+            let mut attempt = 0;
+            let res = loop {
+                match http.get(&url_owned).timeout(std::time::Duration::from_secs(30)).send().await {
+                    Ok(res) => break res,
+                    Err(e) if attempt < 2 && !e.is_timeout() => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(400 * 3u64.pow(attempt - 1))).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
             if !res.status().is_success() {
                 anyhow::bail!("HTTP {}", res.status());
             }

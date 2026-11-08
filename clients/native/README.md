@@ -201,6 +201,16 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
 
 ## Deliberate improvements
 
+- **One header bar on every platform.** The Tauri app drew the 47px
+  Adwaita-style header bar only on Linux; macOS and Windows got a 72px
+  "Your Timelapses" row and boxed "‹ Back" buttons in the page. Native uses the
+  Linux bar everywhere (title, round Back, page actions, backdrop dim), with
+  each OS's window controls: the traffic lights on macOS, Windows 11 caption
+  buttons (hit-tested by the OS, so Snap and accessibility stay native), and
+  GNOME's close on Linux. Under a window manager's own frame (X11 without a
+  compositor) Linux keeps the bar without its close button.
+- Thumbnails that fail on a network error are retried twice with backoff
+  instead of staying blank until restart.
 - Modals (Overlay, NamingModal, confirms) **fade out over 120ms** instead of
   vanishing. The Tauri app animated them in but unmounted them instantly.
 - Skeletons **always shimmer**. In the Tauri app the `shimmer` keyframes only

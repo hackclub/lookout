@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use gpui_kit::gpui::{
     AnyElement, AnyView, App, AppContext, Bounds, Context, Decorations, Entity, FocusHandle,
-    Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels,
     Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowKind, WindowOptions,
     div, point, px, size,
@@ -32,7 +32,7 @@ use crate::ui::sheet::{Sheet, SheetEvent, SheetStyle};
 use crate::screens::program_panel::{PanelEvent, ProgramPanel};
 use crate::services::{self, LinuxUpdate, Tip, TipBody, TipHero, UpdateBody};
 use crate::theme::{self, Theme, is_linux, is_mac, is_windows, theme};
-use crate::ui::header_bar::{HeaderBar, HeaderBtn, HeaderBtnKind, HeaderNav};
+use crate::ui::header_bar::{HeaderBar, HeaderBtn, HeaderBtnKind, HeaderChrome, HeaderNav, MAC_TRAFFIC_LIGHT_POSITION};
 use crate::ui::icon::Icon;
 use crate::ui::text::{TextExt, family};
 
@@ -217,10 +217,11 @@ pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
             Some(TitlebarOptions {
                 title: Some(format!("Lookout v{}", app::VERSION).into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(12.0), px(12.0))),
+                traffic_light_position: Some(point(px(MAC_TRAFFIC_LIGHT_POSITION.0), px(MAC_TRAFFIC_LIGHT_POSITION.1))),
             })
         } else if is_windows() {
-            Some(TitlebarOptions { title: Some(format!("Lookout v{}", app::VERSION).into()), ..Default::default() })
+            // The header bar replaces the native title bar (caption buttons included).
+            Some(TitlebarOptions { title: Some(format!("Lookout v{}", app::VERSION).into()), appears_transparent: true, ..Default::default() })
         } else {
             Some(TitlebarOptions { title: Some("Lookout".into()), ..Default::default() })
         },
@@ -1077,7 +1078,7 @@ impl Render for MainWindow {
         }
         let t = theme(cx).clone();
         let csd = uses_header_bar(window);
-        crate::theme::set_header_bar_shown(csd);
+        crate::theme::set_header_bar_shown(true);
         self.frame_offset = if csd { WINDOW_MARGIN } else { 0.0 };
         self.mount_pending(window, cx);
         if std::mem::take(&mut self.focus_requested) {
@@ -1284,42 +1285,21 @@ impl Render for MainWindow {
             .font_family(family())
             .text_color(t.text_primary);
 
-        if csd {
+        {
+            // One header bar on every platform (Linux's design): page title,
+            // Back and the page actions, with each OS's own window controls.
             let nav = self.header_nav(cx);
             let mut actions = self.header_actions(&t, cx);
-            // The pill rides ahead of the gallery actions (Linux never
-            // downloads, so in practice it stays hidden here).
             if on_main && self.update_pill.read(cx).visible(cx) {
                 actions.insert(0, self.update_pill.clone().into_any_element());
             }
             body = body.child(
                 HeaderBar::new(nav, self.controls_on_right, 0.55 + 0.45 * active)
+                    .chrome(HeaderChrome::current(csd))
                     .actions(actions)
                     .on_close(|window, cx| {
                         if main_should_close(cx) {
                             window.remove_window();
-                        }
-                    }),
-            );
-        } else if is_mac() {
-            // 32px transparent drag strip that clears the traffic lights.
-            body = body.child(
-                div()
-                    .id("mac-titlebar")
-                    .h(px(32.0))
-                    .flex_none()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr(px(6.0))
-                    .children(on_main.then(|| self.update_pill.clone()))
-                    .window_control_area(gpui_kit::gpui::WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                        if ev.click_count == 2 {
-                            window.titlebar_double_click();
-                        } else {
-                            window.start_window_move();
                         }
                     }),
             );
@@ -1371,10 +1351,6 @@ impl Render for MainWindow {
             body = body.child(m.clone());
         }
         body = body.children(render_modals(&self.modals, &t, win_w));
-        if is_windows() && on_main {
-            // No overlay titlebar on Windows: float it bottom-left, above everything.
-            body = body.child(div().absolute().bottom(px(8.0)).left(px(8.0)).child(self.update_pill.clone()));
-        }
 
         if csd {
             linux_frame(body.into_any_element(), &t, active, window)
