@@ -48,7 +48,7 @@ pub fn open(token: String, cx: &mut App) {
             return;
         }
     }
-    let pad = if is_linux() { 2.0 * WINDOW_MARGIN } else { 0.0 };
+    let pad = if is_linux() && crate::platform::desktop_appearance::client_frames() { 2.0 * WINDOW_MARGIN } else { 0.0 };
     let bounds = Bounds::centered(None, size(px(940.0 + pad), px(660.0 + pad)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -57,9 +57,11 @@ pub fn open(token: String, cx: &mut App) {
             appears_transparent: is_mac(),
             traffic_light_position: is_mac().then(|| point(px(12.0), px(9.0))),
         }),
-        window_decorations: is_linux().then_some(WindowDecorations::Client),
-        window_background: if is_linux() {
+        window_decorations: is_linux().then(|| if crate::platform::desktop_appearance::client_frames() { WindowDecorations::Client } else { WindowDecorations::Server }),
+        window_background: if is_linux() && crate::platform::desktop_appearance::client_frames() {
             WindowBackgroundAppearance::Transparent
+        } else if is_linux() {
+            WindowBackgroundAppearance::Opaque
         } else if is_mac() {
             WindowBackgroundAppearance::Blurred
         } else {

@@ -208,7 +208,8 @@ pub fn uses_header_bar(window: &Window) -> bool {
 }
 
 pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
-    let (w, h) = if is_linux() { (WIN_W + 2.0 * WINDOW_MARGIN, WIN_H + 2.0 * WINDOW_MARGIN) } else { (WIN_W, WIN_H) };
+    let csd = is_linux() && crate::platform::desktop_appearance::client_frames();
+    let (w, h) = if csd { (WIN_W + 2.0 * WINDOW_MARGIN, WIN_H + 2.0 * WINDOW_MARGIN) } else { (WIN_W, WIN_H) };
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -223,9 +224,15 @@ pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
         } else {
             Some(TitlebarOptions { title: Some("Lookout".into()), ..Default::default() })
         },
-        window_decorations: if is_linux() { Some(WindowDecorations::Client) } else { None },
-        window_background: if is_linux() {
+        window_decorations: if is_linux() {
+            Some(if crate::platform::desktop_appearance::client_frames() { WindowDecorations::Client } else { WindowDecorations::Server })
+        } else {
+            None
+        },
+        window_background: if is_linux() && crate::platform::desktop_appearance::client_frames() {
             WindowBackgroundAppearance::Transparent
+        } else if is_linux() {
+            WindowBackgroundAppearance::Opaque
         } else if is_mac() {
             WindowBackgroundAppearance::Blurred
         } else {

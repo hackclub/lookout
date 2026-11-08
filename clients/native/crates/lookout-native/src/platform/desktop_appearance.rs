@@ -679,3 +679,50 @@ mod tests {
         assert_eq!(accent_hex("mauve"), None);
     }
 }
+
+/// Whether Lookout should draw its own frame (header bar, rounded corners,
+/// shadow) on Linux, rather than take the window manager's.
+///
+/// Our frame needs a transparent window for the shadow margin and the
+/// corners, which only a compositor can show; without one the margin renders
+/// black and the WM's move outline shows the whole margin. GPUI's own check
+/// counts any EWMH window manager as a compositor (`_NET_SUPPORTING_WM_CHECK`),
+/// so on X11 we ask the real question: does anything own the
+/// `_NET_WM_CM_S<screen>` selection (the compositing-manager handshake)?
+/// Wayland is always composited.
+pub fn client_frames() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if !cfg!(target_os = "linux") {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // GPUI picks Wayland whenever a Wayland display is advertised.
+            if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+                return true;
+            }
+            match x11_compositing() {
+                Some(on) => {
+                    if !on {
+                        log::info!("[chrome] no X11 compositor: using the window manager's frame");
+                    }
+                    on
+                }
+                None => true,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        false
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn x11_compositing() -> Option<bool> {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let name = format!("_NET_WM_CM_S{screen}");
+    let atom = conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok()?.atom;
+    let owner = conn.get_selection_owner(atom).ok()?.reply().ok()?.owner;
+    Some(owner != x11rb::NONE)
+}

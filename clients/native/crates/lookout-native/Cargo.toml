@@ -51,6 +51,8 @@ swift-rs = { version = "1.0.7", features = ["build"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 zbus = "5"
+# Compositor check on X11 (see platform::desktop_appearance::client_frames).
+x11rb = "0.13"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"

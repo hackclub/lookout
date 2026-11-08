@@ -286,9 +286,17 @@ impl RenderOnce for HeaderBar {
                 }
                 d1.update(cx, |s, _| s.should_move = true);
             })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| d2.update(cx, |s, _| s.should_move = false))
-            .on_mouse_move(move |_, window, cx| {
-                let go = d3.update(cx, |s, _| std::mem::replace(&mut s.should_move, false));
+            .on_mouse_up(MouseButton::Left, {
+                let d2 = d2.clone();
+                move |_, _, cx| d2.update(cx, |s, _| s.should_move = false)
+            })
+            // A release outside the bar must disarm it too: otherwise the
+            // next pointer motion anywhere would start a window move that
+            // follows the cursor with no button held.
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| d2.update(cx, |s, _| s.should_move = false))
+            .on_mouse_move(move |ev, window, cx| {
+                let held = ev.pressed_button == Some(MouseButton::Left);
+                let go = d3.update(cx, |s, _| std::mem::replace(&mut s.should_move, false)) && held;
                 if go {
                     window.start_window_move();
                 }
