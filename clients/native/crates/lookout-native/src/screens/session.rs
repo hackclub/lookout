@@ -466,21 +466,36 @@ impl SessionPage {
                 )
                 .into_any_element();
         }
+        // Same 16:9 box as the video, so the page doesn't jump when it loads.
         div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(12.0))
-            .py(px(32.0))
-            .child(Spinner::new(SpinnerSize::Lg))
+            .bg(t.bg_sunken)
+            .rounded(px(10.0))
             .child(
-                div()
-                    .ts(14.0)
-                    .w600()
-                    .text_color(t.text_primary)
-                    .child(if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }),
+                AspectBox::new(16.0 / 9.0).child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(12.0))
+                        .child(Spinner::new(SpinnerSize::Lg))
+                        .child(
+                            div()
+                                .ts(14.0)
+                                .w600()
+                                .text_color(t.text_primary)
+                                .child(if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }),
+                        )
+                        .child(
+                            div()
+                                .ts(13.0)
+                                .text_color(t.text_secondary)
+                                .child(format!("Tracked time: {}", crate::fmt::format_tracked(s.tracked))),
+                        ),
+                ),
             )
-            .child(div().ts(13.0).text_color(t.text_secondary).child(format!("Tracked time: {}", crate::fmt::format_tracked(s.tracked))))
             .into_any_element()
     }
 }
