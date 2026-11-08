@@ -166,7 +166,11 @@ enum StartFailure {
 
 fn start_via_link(p: Program, main: Entity<MainWindow>, cx: &mut App) -> gpui_kit::gpui::Task<OpenOutcome> {
     let label = p.label();
-    main.update(cx, |mw, cx| mw.set_starting(Some(label), cx));
+    // Deferred: callers (the + menu's choice, the Add page's program button)
+    // run inside a MainWindow update, and updating it again from there is a
+    // re-entrant update that panics, crashing the app on a linked program.
+    let m = main.clone();
+    cx.defer(move |cx| m.update(cx, |mw, cx| mw.set_starting(Some(label), cx)));
     let link = store(cx).program_links.get(&p.name).cloned();
     let http = app::state(cx).http.clone();
     let base = api_base(cx);

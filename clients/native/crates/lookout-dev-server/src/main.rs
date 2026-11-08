@@ -264,9 +264,16 @@ fn main() {
                     json_resp(json!({ "sessions": out }), 200)
                 }
                 (Method::Get, ["api", "programs"]) => json_resp(json!({ "programs": [
-                    { "name": "fallout", "displayName": "Fallout", "newSessionUrl": "https://fallout.hackclub.com/new", "iconUrl": format!("{base}/media/thumb/icon.jpg") },
+                    { "name": "fallout", "displayName": "Fallout", "newSessionUrl": "https://fallout.hackclub.com/new", "iconUrl": format!("{base}/media/thumb/icon.jpg"),
+                      // Linkable, so a linked Fallout starts sessions instantly (see /dev-program/start).
+                      "pairUrl": format!("http://localhost:{port}/dev-program/pair"), "startUrl": format!("http://localhost:{port}/dev-program/start") },
                     { "name": "summer", "displayName": "Summer of Making", "newSessionUrl": "https://summer.hackclub.com/new" }
                 ]}), 200),
+                // Instant start for a linked program: hands back the pending seed session.
+                (Method::Post, ["dev-program", "start"]) => match st.values().find(|s| s.status == "pending") {
+                    Some(s) => json_resp(json!({ "sessionToken": s.token }), 200),
+                    None => json_resp(json!({ "error": "no pending session" }), 409),
+                },
                 (Method::Get, ["api", "announcement"]) => json_resp(if std::env::var("DEV_ANNOUNCE").is_ok() { json!({ "announcement": { "level": "info", "message": "Lookout servers will be down for maintenance Saturday 2am–4am UTC.", "url": "https://hackclub.com" } }) } else { json!({ "announcement": null }) }, 200),
                 (Method::Get, ["api", "tip"]) => json_resp(if std::env::var("DEV_TIP").is_ok() { json!({ "tip": { "id": "tip-1", "badge": "NEW!", "title": "Sample tip title that runs about this long", "body": "Sample body copy, roughly the length a real tip runs to, so the sheet is the height it will actually be in front of a user.", "imageUrl": format!("{base}/media/thumb/tip.jpg"), "program": null, "trigger": "any", "requireUnlinked": false } }) } else { json!({ "tip": null }) }, 200),
                 (_, ["api", "sessions", tok, rest @ ..]) => {
