@@ -7,7 +7,9 @@ pub mod decoder;
 pub mod mac_menu;
 #[cfg(target_os = "macos")]
 pub mod macos_occlusion;
+pub mod permission_guide;
 pub mod permissions;
+pub mod relaunch;
 pub mod reduce_motion;
 pub mod single_instance;
 pub mod tray;

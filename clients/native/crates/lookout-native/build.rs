@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=AVFoundation");
     println!("cargo:rustc-link-lib=framework=CoreMedia");
     println!("cargo:rustc-link-lib=framework=CoreVideo");
+    println!("cargo:rustc-link-lib=framework=QuartzCore");
     if std::env::var("LOOKOUT_SKIP_SWIFT").is_ok() {
         return;
     }

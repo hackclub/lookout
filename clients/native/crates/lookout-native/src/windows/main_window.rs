@@ -67,6 +67,21 @@ impl Route {
             Route::EditorOpen(t) => format!("editor-open:{t}"),
         }
     }
+    /// Inverse of [`Route::key`].
+    pub fn from_key(key: &str) -> Option<Route> {
+        let (kind, token) = key.split_once(':')?;
+        let token = token.to_string();
+        Some(match kind {
+            "gallery" => Route::Gallery,
+            "add" => Route::Add,
+            "settings" => Route::Settings,
+            "info" => Route::Info,
+            "record" if !token.is_empty() => Route::Record(token),
+            "session" if !token.is_empty() => Route::Session(token),
+            "editor-open" if !token.is_empty() => Route::EditorOpen(token),
+            _ => return None,
+        })
+    }
     fn is_gallery(&self) -> bool {
         matches!(self, Route::Gallery)
     }
@@ -990,6 +1005,33 @@ impl MainWindow {
             return;
         }
         self.history.push(self.route.clone());
+        self.go(route, cx);
+    }
+
+    /// Where the user is, for `platform::relaunch`. The editor placeholder
+    /// isn't saved as a route: reopening the editor window brings it back.
+    pub fn relaunch_snapshot(&self, cx: &App) -> crate::platform::relaunch::Snapshot {
+        let keep = |r: &&Route| !matches!(r, Route::EditorOpen(_));
+        let mut history: Vec<String> = self.history.iter().filter(keep).map(Route::key).collect();
+        let route = match &self.route {
+            Route::EditorOpen(_) => history.pop().unwrap_or_else(|| Route::Gallery.key()),
+            r => r.key(),
+        };
+        let editors = cx
+            .try_global::<crate::windows::editor::EditorWindows>()
+            .map(|w| w.0.keys().cloned().collect())
+            .unwrap_or_default();
+        crate::platform::relaunch::Snapshot { history, route, editors, ..Default::default() }
+    }
+
+    /// Put back a [`Self::relaunch_snapshot`]; editor windows reopen after.
+    pub fn restore_snapshot(&mut self, snap: &crate::platform::relaunch::Snapshot, cx: &mut Context<Self>) {
+        let usable = |r: &Route| !matches!(r, Route::EditorOpen(_));
+        let Some(route) = Route::from_key(&snap.route).filter(usable) else { return };
+        if route == self.route {
+            return;
+        }
+        self.history = snap.history.iter().filter_map(|k| Route::from_key(k)).filter(usable).collect();
         self.go(route, cx);
     }
 

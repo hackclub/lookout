@@ -80,6 +80,8 @@ objc2-app-kit = "0.3"
 objc2-av-foundation = { version = "0.3", features = ["AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVTime", "block2", "AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "AVUtilities", "objc2-core-media", "objc2-core-video", "AVCaptureDevice", "AVCaptureInput", "AVCaptureSession", "AVCaptureOutputBase", "AVCaptureVideoDataOutput", "dispatch2"] }
 objc2-core-media = { version = "0.3", features = ["CMTime", "CMTimeRange", "CMSampleBuffer", "CMBase", "objc2-core-video"] }
 objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-quartz-core = "0.3"
 block2 = "0.6"
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVPixelFormatDescription", "CVBase"] }
 raw-window-handle = "0.6"

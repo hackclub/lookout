@@ -19,6 +19,64 @@ pub fn focus_main(cx: &mut App) {
     }
 }
 
+/// System Settings' "Quit & Reopen" after a privacy permission is turned on:
+/// remember where the user was on the way out and put it back on the
+/// relaunch (see `platform::relaunch`). `deep_link_launch` skips the restore
+/// (the link decides where to go).
+pub fn wire_relaunch_restore(deep_link_launch: bool, cx: &mut App) {
+    use crate::platform::relaunch;
+
+    let snap = relaunch::take();
+    if let (Some(snap), false) = (snap, deep_link_launch) {
+        log::info!("[relaunch] reopened by {:?}: restoring {}", snap.sender, snap.route);
+        if let Some(h) = cx.try_global::<MainHandle>().map(|h| h.0) {
+            h.update(cx, |mw, _, cx| mw.restore_snapshot(&snap, cx)).ok();
+        }
+        for token in snap.editors {
+            editor::open(token, cx);
+        }
+    }
+
+    cx.on_app_quit(|cx| {
+        // Runs synchronously inside `applicationWillTerminate:`, while the
+        // quit Apple Event is still the current one.
+        save_for_relaunch(cx);
+        async {}
+    })
+    .detach();
+}
+
+fn save_for_relaunch(cx: &mut App) {
+    use crate::platform::{permissions, relaunch};
+
+    let sender = relaunch::current_quit_sender();
+    if let Some(s) = &sender {
+        log::info!("[relaunch] quit requested by pid {} ({:?})", s.pid, s.bundle_id);
+    }
+    if !sender.as_ref().is_some_and(|s| s.is_permission_relaunch(permissions::opened_privacy_pane())) {
+        relaunch::clear();
+        return;
+    }
+    let Some(h) = cx.try_global::<MainHandle>().map(|h| h.0) else { return };
+    if let Ok(mut snap) = h.read_with(cx, |mw, cx| mw.relaunch_snapshot(cx)) {
+        snap.sender = sender.and_then(|s| s.bundle_id);
+        relaunch::save(snap);
+    }
+    // This quit skips `main_should_close`, so pause a running capture here
+    // (as Cmd-Q would) before the process goes away.
+    let st = app::state(cx);
+    if st.recorder.read(cx).state.as_ref().is_some_and(|s| s.capturing) {
+        log::info!("[relaunch] pausing the capture before the reopen");
+        let core = st.core.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        st.rt.spawn(async move {
+            let _ = core.recorder_pause().await;
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
+}
+
 /// Keep the tray in step with the recorder and act on its clicks
 /// (`tray_action` semantics from the Tauri shell).
 pub fn wire_tray(rt: tokio::runtime::Handle, cx: &mut App) {

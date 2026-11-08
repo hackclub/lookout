@@ -57,10 +57,25 @@ pub fn check(kind: Kind) -> bool {
     }
 }
 
+static OPENED_PRIVACY_PANE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this run sent the user to a System Settings privacy pane (so a
+/// "Quit & Reopen" from there is expected; see `platform::relaunch`).
+pub fn opened_privacy_pane() -> bool {
+    OPENED_PRIVACY_PANE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Ask for it: the system prompt where there is one, else System Settings.
 pub fn request(kind: Kind, cx: &mut App) {
+    OPENED_PRIVACY_PANE.store(true, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     {
+        // A bundled app gets the guide (the pane plus a drag-in tile docked to
+        // System Settings); a dev binary has nothing to drag, so it gets
+        // the system prompt and the pane alone.
+        if super::permission_guide::show(kind) {
+            return;
+        }
         match kind {
             Kind::Screen => {
                 mac::request_screen();

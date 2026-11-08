@@ -118,6 +118,7 @@ fn main() {
         smoke::start_tour(cx);
         cx.set_global(windows::MainHandle(main));
         windows::wire_tray(rt.clone(), cx);
+        windows::wire_relaunch_restore(!initial_urls.is_empty(), cx);
         if !initial_urls.is_empty() {
             let urls = initial_urls.clone();
             main.update(cx, |mw, _, cx| mw.handle_deep_links(urls, cx)).ok();
