@@ -26,10 +26,12 @@ use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
-/// Windows caption cells: the title bar's full height and Windows' square
-/// hover, but on Lookout's spacing: as wide as a round header button, with
-/// the same 4px gap and edge padding as the gear and +.
-const WIN_CAPTION_W: f32 = 30.0;
+/// Windows caption cells: full height, touching each other and the window's
+/// top-right corner (so the red close reaches the edge, as on Windows), with
+/// each glyph centred in its cell. The width is Lookout's button pitch (a
+/// 30px round button plus the 4px gap), so minimize→close is the same
+/// distance as gear→+.
+const WIN_CAPTION_W: f32 = 34.0;
 
 /// Where the traffic lights go, centred on the bar (`TitlebarOptions`).
 pub const MAC_TRAFFIC_LIGHT_POSITION: (f32, f32) = (16.0, 16.0);
@@ -400,7 +402,8 @@ impl RenderOnce for HeaderBar {
                     _ if has_back => 8.0,
                     _ => 12.0,
                 };
-                d.pl(px(lead)).pr(px(8.0))
+                // Windows' caption cells meet the window's right edge.
+                d.pl(px(lead)).pr(px(if chrome == HeaderChrome::Windows { 0.0 } else { 8.0 }))
             })
             .opacity(self.backdrop);
         let bar = match chrome {
@@ -433,8 +436,9 @@ impl RenderOnce for HeaderBar {
                     .children(self.actions)
                     .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
                     .when(win, |d| {
-                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default))
-                            .child(
+                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default)).child(
+                            // The two cells touch: no gap between them.
+                            div().flex().flex_none().child(
                                 HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 10.0, |_, window, _| {
                                     window.minimize_window()
                                 })
@@ -451,7 +455,8 @@ impl RenderOnce for HeaderBar {
                                 .tooltip("Close")
                                 .caption()
                                 .danger(),
-                            )
+                            ),
+                        )
                     })
             })
     }
