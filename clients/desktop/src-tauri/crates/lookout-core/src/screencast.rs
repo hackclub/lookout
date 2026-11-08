@@ -14,12 +14,7 @@ pub struct StreamInfo {
 /// under us — the user hitting "Stop sharing" in the system indicator. From
 /// that moment every capture returns nothing, so the UI must stop claiming to
 /// record rather than tick away over a dead stream.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScreencastRevoked {
-    /// The PipeWire nodes that went away with the session.
-    pub node_ids: Vec<u32>,
-}
+pub use lookout_recorder::ScreencastRevoked;
 
 /// A live XDG screencast session.
 ///
@@ -73,9 +68,11 @@ async fn portal_session_task(
     result_tx: tokio::sync::oneshot::Sender<Result<(Vec<StreamInfo>, std::os::fd::RawFd), String>>,
     close_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
-    use ashpd::desktop::PersistMode;
-    use ashpd::WindowIdentifier;
+    use ashpd::desktop::screencast::{
+        CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
+        StartCastOptions,
+    };
+    use ashpd::desktop::{CreateSessionOptions, PersistMode};
     use futures_util::StreamExt;
     use std::os::fd::IntoRawFd;
 
@@ -92,7 +89,7 @@ async fn portal_session_task(
     };
 
     // Create a new session
-    let session = match proxy.create_session().await {
+    let session = match proxy.create_session(CreateSessionOptions::default()).await {
         Ok(s) => s,
         Err(e) => {
             let _ = result_tx.send(Err(format!("Failed to create screencast session: {}", e)));
@@ -107,18 +104,18 @@ async fn portal_session_task(
         proxy
             .select_sources(
                 &session,
-                CursorMode::Hidden,
-                SourceType::Monitor | SourceType::Window,
-                true,
-                None,
-                PersistMode::DoNot,
+                SelectSourcesOptions::default()
+                    .set_cursor_mode(CursorMode::Hidden)
+                    .set_sources(SourceType::Monitor | SourceType::Window)
+                    .set_multiple(true)
+                    .set_persist_mode(PersistMode::DoNot),
             )
             .await
             .map_err(|e| format!("Failed to select sources: {}", e))?;
 
         // Start the screencast session and get the response containing streams
         let response = proxy
-            .start(&session, &WindowIdentifier::default())
+            .start(&session, None, StartCastOptions::default())
             .await
             .map_err(|e| format!("Failed to start screencast: {}", e))?
             .response()
@@ -126,7 +123,7 @@ async fn portal_session_task(
 
         // Get the pipewire file descriptor
         let fd = proxy
-            .open_pipe_wire_remote(&session)
+            .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
             .await
             .map_err(|e| format!("Failed to open pipewire remote: {}", e))?;
 

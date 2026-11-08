@@ -1,481 +1,135 @@
-//! The Lookout server API, as the core sees it.
+//! The Lookout server API, as the core sees it: thin wrappers over
+//! `lookout-protocol`'s calls with this core's transport, so shells call
+//! `core.session_pause(..)` and never speak HTTP themselves. The calls a
+//! recording waits on (load, status, pause, resume, stop, rename) use the
+//! core's `Timing::api_timeout`; the rest use [`API_TIMEOUT`].
 //!
-//! Everything a native client says to the server that is not a capture
-//! upload goes through here: reading and driving a session (status, pause,
-//! resume, stop, rename, video, cut editing), the program registry, the
-//! announcement banner, and the gallery's batch lookup. Shells call these
-//! instead of speaking HTTP themselves, so every native frontend gets the
-//! same URLs, bodies, timeouts and error shaping.
-//!
-//! Responses are returned as the server's JSON, verbatim (`serde_json::Value`).
-//! The shapes are documented in `packages/server/API.md` and typed in
-//! `packages/shared/src/types.ts`; passing them through untouched means a
-//! field the server adds tomorrow reaches the UI without a core release.
-//!
-//! Error shaping mirrors the shared TypeScript client
-//! (`clients/react/src/api/client.ts`, `fetchJson`) so UI code that
-//! branches on an HTTP status — the 409 "already paused/stopped" cases —
-//! behaves the same whichever client produced the error.
+//! Responses are the server's JSON, verbatim (`serde_json::Value`) — see
+//! `packages/server/API.md`. Error shaping mirrors the shared TypeScript
+//! client (`clients/react/src/api/client.ts`).
 
-use serde::Serialize;
 use serde_json::Value;
 
-use crate::upload::{describe_reqwest_error, http_client};
+pub use lookout_protocol::api::API_TIMEOUT;
+pub use lookout_protocol::{ApiError, ApiResult};
+
+use lookout_protocol::api;
+
 use crate::{Core, SessionConfig};
 
-/// Per-request deadline. Mirrors `UPLOAD_STEP_TIMEOUT_MS` in @lookout/shared,
-/// which the TypeScript client applies to every API call.
-pub const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Why an API call failed.
-///
-/// `status` is set when the server answered with a non-2xx code, and is
-/// `None` for anything that never produced a response (DNS, connection,
-/// timeout, unparseable body). Serializes as `{ status, message }` so a
-/// shell can rebuild its own error type on the other side of an IPC bridge.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApiError {
-    pub status: Option<u16>,
-    pub message: String,
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}
-
-pub type ApiResult<T> = Result<T, ApiError>;
-
-fn session_url(s: &SessionConfig, path: &str) -> String {
-    format!("{}/api/sessions/{}{}", s.api_base_url, s.token, path)
-}
-
-/// Pull the human-readable detail out of an error body the way the
-/// TypeScript client does: `error` or `message` from a JSON object, else
-/// the raw text, capped at 500 chars.
-fn error_detail(text: &str) -> String {
-    let detail = match serde_json::from_str::<Value>(text) {
-        Ok(json) => json
-            .get("error")
-            .or_else(|| json.get("message"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| text.to_string()),
-        Err(_) => text.to_string(),
-    };
-    detail.chars().take(500).collect()
-}
-
 impl Core {
-    /// One JSON round trip with the shared client's error shaping. A JSON
-    /// body sets `Content-Type: application/json`; no body sets nothing —
-    /// the same requests the TypeScript client sends, byte for byte.
-    async fn api_json(
-        &self,
-        method: reqwest::Method,
-        url: String,
-        body: Option<Value>,
-        timeout: std::time::Duration,
-    ) -> ApiResult<Value> {
-        let mut req = http_client().request(method, &url).timeout(timeout);
-        if let Some(body) = body {
-            req = req.json(&body);
-        }
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) if e.is_timeout() => {
-                return Err(ApiError {
-                    status: None,
-                    message: format!(
-                        "Timed out after {}s fetching {url}",
-                        timeout.as_secs()
-                    ),
-                })
-            }
-            Err(e) => {
-                return Err(ApiError {
-                    status: None,
-                    message: format!(
-                        "Network error fetching {url}: {}",
-                        describe_reqwest_error(&e)
-                    ),
-                })
-            }
-        };
-        let status = res.status();
-        if !status.is_success() {
-            let text = res.text().await.unwrap_or_default();
-            let detail = error_detail(&text);
-            let reason = status.canonical_reason().unwrap_or("");
-            let mut message = format!("HTTP {} {reason} from {url}", status.as_u16());
-            if !detail.is_empty() {
-                message.push('\n');
-                message.push_str(&detail);
-            }
-            return Err(ApiError {
-                status: Some(status.as_u16()),
-                message,
-            });
-        }
-        res.json::<Value>().await.map_err(|e| ApiError {
-            status: None,
-            message: format!("Invalid JSON from {url}: {}", describe_reqwest_error(&e)),
-        })
-    }
-
-    async fn api_get(&self, url: String) -> ApiResult<Value> {
-        self.api_json(reqwest::Method::GET, url, None, API_TIMEOUT).await
-    }
-
-    async fn api_post(&self, url: String, body: Option<Value>) -> ApiResult<Value> {
-        self.api_json(reqwest::Method::POST, url, body, API_TIMEOUT).await
-    }
-
-    // ── Session ──────────────────────────────────────────────────────
-
     /// `GET /api/sessions/:token` — the session record.
     pub async fn session_get(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_get(session_url(s, "")).await
+        api::session_get(self.transport(), s, self.timing().api_timeout()).await
     }
 
     /// `GET /api/sessions/:token/status`.
     pub async fn session_status(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_get(session_url(s, "/status")).await
+        api::session_status(self.transport(), s, self.timing().api_timeout()).await
     }
 
     /// `POST /api/sessions/:token/pause`.
     pub async fn session_pause(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_post(session_url(s, "/pause"), None).await
+        api::session_pause(self.transport(), s, self.timing().api_timeout()).await
     }
 
     /// `POST /api/sessions/:token/resume`.
     pub async fn session_resume(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_post(session_url(s, "/resume"), None).await
+        api::session_resume(self.transport(), s, self.timing().api_timeout()).await
     }
 
-    /// `POST /api/sessions/:token/stop`. With `edit`, the session is held
-    /// unpublished after compiling so the user can cut it first; the body
-    /// is omitted entirely otherwise, so a plain stop stays identical to
-    /// what old servers expect.
+    /// `POST /api/sessions/:token/stop`; with `edit`, hold for cutting.
     pub async fn session_stop(&self, s: &SessionConfig, edit: bool) -> ApiResult<Value> {
-        let body = if edit {
-            Some(serde_json::json!({ "edit": true }))
-        } else {
-            None
-        };
-        self.api_post(session_url(s, "/stop"), body).await
+        api::session_stop(self.transport(), s, edit, self.timing().api_timeout()).await
     }
 
     /// `PATCH /api/sessions/:token/name`.
     pub async fn session_rename(&self, s: &SessionConfig, name: &str) -> ApiResult<Value> {
-        self.api_json(
-            reqwest::Method::PATCH,
-            session_url(s, "/name"),
-            Some(serde_json::json!({ "name": name })),
-            API_TIMEOUT,
-        )
-        .await
+        api::session_rename(self.transport(), s, name, self.timing().api_timeout()).await
     }
 
     /// `GET /api/sessions/:token/video` — the published video URL.
     pub async fn session_video(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_get(session_url(s, "/video")).await
+        api::session_video(self.transport(), s).await
     }
 
-    /// `GET /api/sessions/:token/units` — editor metadata: unit map, current
-    /// cuts, and a presigned URL for the uncut original.
+    /// `GET /api/sessions/:token/units` — editor metadata.
     pub async fn session_units(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_get(session_url(s, "/units")).await
+        api::session_units(self.transport(), s).await
     }
 
     /// `PUT /api/sessions/:token/cuts` — replace the cut and mask lists. `cuts` is the
     /// JSON array of `CutInterval`s; `masks` is the JSON array of `MaskRegion`s.
-    pub async fn session_set_cuts(
-        &self,
-        s: &SessionConfig,
-        cuts: Value,
-        masks: Option<Value>,
-    ) -> ApiResult<Value> {
-        self.api_json(
-            reqwest::Method::PUT,
-            session_url(s, "/cuts"),
-            Some(serde_json::json!({
-                "cuts": cuts,
-                "masks": masks.unwrap_or_else(|| serde_json::json!([])),
-            })),
-            API_TIMEOUT,
-        )
-        .await
+    pub async fn session_set_cuts(&self, s: &SessionConfig, cuts: Value, masks: Option<Value>) -> ApiResult<Value> {
+        api::session_set_cuts(self.transport(), s, cuts, masks).await
     }
 
-    /// `POST /api/sessions/:token/compile` — publish with the current cuts
-    /// applied (a cut-compile; also how an edit hold is released).
+    /// `POST /api/sessions/:token/compile` — publish with the cuts applied.
     pub async fn session_apply_cuts(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_post(session_url(s, "/compile"), None).await
+        api::session_apply_cuts(self.transport(), s).await
     }
 
     /// `POST /api/sessions/:token/editing` — renew the edit lease.
     pub async fn session_heartbeat_editing(&self, s: &SessionConfig) -> ApiResult<Value> {
-        self.api_post(session_url(s, "/editing"), None).await
+        api::session_heartbeat_editing(self.transport(), s).await
     }
 
-    /// `GET /api/sessions/:token/upload-url`. Always carries this core's
-    /// [`Core::client_info`]; `captured_at` opts the session into credit-mode
-    /// tracking, `format` requests a clip grant (`"mp4"`/`"webm"`). The
-    /// response's `format` is what was GRANTED — upload exactly that.
+    /// `GET /api/sessions/:token/upload-url`, carrying this core's
+    /// [`Core::client_info`].
     pub async fn session_upload_url(
         &self,
         s: &SessionConfig,
         captured_at: Option<&str>,
         format: Option<&str>,
     ) -> ApiResult<Value> {
-        let mut query: Vec<(&str, &str)> = Vec::new();
-        if let Some(c) = captured_at {
-            query.push(("capturedAt", c));
-        }
-        if let Some(f) = format {
-            query.push(("format", f));
-        }
-        query.push(("clientInfo", self.client_info()));
-        let url = reqwest::Url::parse_with_params(&session_url(s, "/upload-url"), &query)
-            .map_err(|e| ApiError {
-                status: None,
-                message: format!("Invalid upload-url URL: {e}"),
-            })?;
-        self.api_get(url.to_string()).await
+        api::session_upload_url(self.transport(), s, self.client_info(), captured_at, format).await
     }
 
-    /// `POST /api/sessions/:token/screenshots` — confirm an upload. `body`
-    /// is the `ConfirmScreenshotRequest` JSON.
-    pub async fn session_confirm_screenshot(
-        &self,
-        s: &SessionConfig,
-        body: Value,
-    ) -> ApiResult<Value> {
-        self.api_post(session_url(s, "/screenshots"), Some(body)).await
+    /// `POST /api/sessions/:token/screenshots` — confirm an upload.
+    pub async fn session_confirm_screenshot(&self, s: &SessionConfig, body: Value) -> ApiResult<Value> {
+        api::session_confirm_screenshot(self.transport(), s, body).await
     }
 
-    /// PUT a payload to a presigned R2 URL. `content_type` must match what
-    /// the URL was signed with. Failures name the S3 error code and what it
-    /// usually means, the way the TypeScript client does.
-    pub async fn upload_to_r2(
-        &self,
-        upload_url: &str,
-        bytes: Vec<u8>,
-        content_type: &str,
-    ) -> ApiResult<()> {
-        if !upload_url.starts_with("https://") && !upload_url.starts_with('/') {
-            return Err(ApiError {
-                status: None,
-                message: "Invalid upload URL: must be HTTPS or a relative path.".into(),
-            });
-        }
-        let size = bytes.len();
-        let res = match http_client()
-            .put(upload_url)
-            .header("Content-Type", content_type)
-            .body(bytes)
-            .timeout(API_TIMEOUT)
-            .send()
-            .await
-        {
-            Ok(res) => res,
-            Err(e) if e.is_timeout() => {
-                return Err(ApiError {
-                    status: None,
-                    message: format!(
-                        "R2 upload timed out after {}s ({size} bytes) — the connection stalled mid-transfer.",
-                        API_TIMEOUT.as_secs()
-                    ),
-                })
-            }
-            Err(e) => {
-                return Err(ApiError {
-                    status: None,
-                    message: format!("Upload failed: {}", describe_reqwest_error(&e)),
-                })
-            }
-        };
-        let status = res.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let text = res.text().await.unwrap_or_default();
-        // R2 answers with S3-style XML. A bare "403" is unactionable and
-        // every cause has a different fix, so name the cause.
-        let code = xml_tag(&text, "Code").unwrap_or_default();
-        let detail = xml_tag(&text, "Message").unwrap_or_default();
-        let hint = if code == "SignatureDoesNotMatch" {
-            " The request didn't match the presigned URL — something between the client and R2 is altering the request (a proxy, or a rewritten method/headers)."
-        } else if code == "RequestTimeTooSkewed" {
-            " The signing server's clock is off relative to R2; fix NTP on the API server."
-        } else if code == "AccessDenied" || detail.to_ascii_lowercase().contains("expire") {
-            " The presigned URL had expired (they last ~2 minutes) or the credentials can't write this key. A slow upload of a large clip can outrun the expiry."
-        } else if status.as_u16() == 403 && text.is_empty() {
-            " Empty 403 body usually means CORS stripped the response: check the R2 bucket's CORS rules allow PUT from this origin."
-        } else {
-            ""
-        };
-        eprintln!(
-            "[lookout] R2 upload failed: status={} code={code} detail={detail} body={}",
-            status.as_u16(),
-            text.chars().take(1000).collect::<String>()
-        );
-        let code_part = if code.is_empty() {
-            String::new()
-        } else {
-            format!(" ({code})")
-        };
-        let detail_part = if !detail.is_empty() {
-            format!(" — {detail}")
-        } else if !text.is_empty() {
-            format!(" — {}", text.chars().take(200).collect::<String>())
-        } else {
-            String::new()
-        };
-        Err(ApiError {
-            status: Some(status.as_u16()),
-            message: format!(
-                "R2 upload failed: HTTP {}{code_part}{detail_part}{hint}",
-                status.as_u16()
-            ),
-        })
+    /// PUT a payload to a presigned R2 URL.
+    pub async fn upload_to_r2(&self, upload_url: &str, bytes: Vec<u8>, content_type: &str) -> ApiResult<()> {
+        api::upload_to_r2(self.transport(), upload_url, bytes::Bytes::from(bytes), content_type).await
     }
 
-    // ── Not session-scoped ───────────────────────────────────────────
-
-    /// `GET /api/programs` — the program registry the "+" menu offers.
-    /// `timeout` overrides [`API_TIMEOUT`]; the Settings page probes a
-    /// user-typed server with a short one so a typo fails fast.
-    pub async fn programs(
-        &self,
-        api_base_url: &str,
-        timeout: Option<std::time::Duration>,
-    ) -> ApiResult<Value> {
-        self.api_json(
-            reqwest::Method::GET,
-            format!("{api_base_url}/api/programs"),
-            None,
-            timeout.unwrap_or(API_TIMEOUT),
-        )
-        .await
+    /// `GET /api/programs` — the program registry. `timeout` overrides
+    /// [`API_TIMEOUT`] so a settings page can probe a typed server fast.
+    pub async fn programs(&self, api_base_url: &str, timeout: Option<std::time::Duration>) -> ApiResult<Value> {
+        api::programs(self.transport(), api_base_url, timeout).await
     }
 
-    /// `GET /api/announcement` — the admin-authored banner, if any. `client`
-    /// and `version` say who is asking so the server can target announcements
-    /// (e.g. "please update" only to versions ≤ X); both are optional and a
-    /// server treats a missing version as version 0, like the old builds.
+    /// `GET /api/announcement`.
     pub async fn announcement(
         &self,
         api_base_url: &str,
         client: Option<&str>,
         version: Option<&str>,
     ) -> ApiResult<Value> {
-        self.api_get(who_is_asking_url(api_base_url, "/api/announcement", client, version)?)
-            .await
+        api::announcement(self.transport(), api_base_url, client, version).await
     }
 
-    /// `GET /api/tip` — the active tip sheet, if any. Same `client`/`version`
-    /// targeting as [`Core::announcement`].
-    pub async fn tip(
-        &self,
-        api_base_url: &str,
-        client: Option<&str>,
-        version: Option<&str>,
-    ) -> ApiResult<Value> {
-        self.api_get(who_is_asking_url(api_base_url, "/api/tip", client, version)?)
-            .await
+    /// `GET /api/tip`.
+    pub async fn tip(&self, api_base_url: &str, client: Option<&str>, version: Option<&str>) -> ApiResult<Value> {
+        api::tip(self.transport(), api_base_url, client, version).await
     }
 
     /// `POST /api/sessions/batch` — gallery summaries for up to 100 tokens.
     pub async fn sessions_batch(&self, api_base_url: &str, tokens: &[String]) -> ApiResult<Value> {
-        self.api_post(
-            format!("{api_base_url}/api/sessions/batch"),
-            Some(serde_json::json!({ "tokens": tokens })),
-        )
-        .await
+        api::sessions_batch(self.transport(), api_base_url, tokens).await
     }
-}
-
-/// `{base}{path}` plus the optional `client`/`version` query the targeted
-/// public endpoints (announcement, tip) accept. No query at all when neither
-/// is given, so the request stays identical to what old builds sent.
-fn who_is_asking_url(
-    api_base_url: &str,
-    path: &str,
-    client: Option<&str>,
-    version: Option<&str>,
-) -> ApiResult<String> {
-    let mut query: Vec<(&str, &str)> = Vec::new();
-    if let Some(c) = client {
-        query.push(("client", c));
-    }
-    if let Some(v) = version {
-        query.push(("version", v));
-    }
-    let base = format!("{api_base_url}{path}");
-    if query.is_empty() {
-        return Ok(base);
-    }
-    reqwest::Url::parse_with_params(&base, &query)
-        .map(|u| u.to_string())
-        .map_err(|e| ApiError {
-            status: None,
-            message: format!("Invalid URL for {path}: {e}"),
-        })
-}
-
-/// First `<tag>…</tag>` text in a small XML body, without an XML parser.
-fn xml_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
-    #[test]
-    fn error_detail_prefers_error_then_message_then_text() {
-        assert_eq!(error_detail(r#"{"error":"paused","message":"x"}"#), "paused");
-        assert_eq!(error_detail(r#"{"message":"nope"}"#), "nope");
-        assert_eq!(error_detail("plain text"), "plain text");
-        assert_eq!(error_detail(r#"{"other":1}"#), r#"{"other":1}"#);
-    }
 
-    #[test]
-    fn error_detail_caps_at_500_chars() {
-        let long = "x".repeat(800);
-        assert_eq!(error_detail(&long).len(), 500);
-    }
 
-    #[test]
-    fn xml_tag_extracts_s3_fields() {
-        let body = "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>";
-        assert_eq!(xml_tag(body, "Code").as_deref(), Some("AccessDenied"));
-        assert_eq!(xml_tag(body, "Message").as_deref(), Some("Request has expired"));
-        assert_eq!(xml_tag(body, "Nope"), None);
-    }
 
-    #[test]
-    fn session_url_shape() {
-        let s = SessionConfig {
-            token: "abc".into(),
-            api_base_url: "https://lookout.example".into(),
-        };
-        assert_eq!(session_url(&s, ""), "https://lookout.example/api/sessions/abc");
-        assert_eq!(
-            session_url(&s, "/status"),
-            "https://lookout.example/api/sessions/abc/status"
-        );
-    }
 
     // ── Against a local mock server ─────────────────────────────────
     // Minimal HTTP/1.1 responder: enough to prove the request shapes
@@ -723,19 +377,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn api_error_serializes_as_status_and_message() {
-        let e = ApiError {
-            status: Some(409),
-            message: "HTTP 409 Conflict from x".into(),
-        };
-        let v = serde_json::to_value(&e).unwrap();
-        assert_eq!(v["status"], 409);
-        assert_eq!(v["message"], "HTTP 409 Conflict from x");
-        let e = ApiError {
-            status: None,
-            message: "net".into(),
-        };
-        assert_eq!(serde_json::to_value(&e).unwrap()["status"], Value::Null);
-    }
 }

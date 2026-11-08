@@ -95,12 +95,22 @@ jobs:
           workspaces: "./clients/desktop/src-tauri -> target"
           shared-key: rust-${{ matrix.platform }}-${{ matrix.args || 'native' }}
 
+      # @lookout/react, which the desktop frontend bundles, loads the recorder
+      # from @lookout/wasm; build it before react.
+      - name: Install wasm toolchain
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          packages/wasm/install-bindgen.sh
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build workspace dependencies
+        shell: bash
         run: |
           npm run build -w packages/shared
+          npm run build -w packages/wasm
           npm run build -w clients/react
 
       # A placeholder key here fails silently: the package installs fine and
@@ -343,7 +353,7 @@ jobs:
                 echo "depend = glib2" >> .PKGINFO
                 echo "depend = gtk3" >> .PKGINFO
                 echo "depend = hicolor-icon-theme" >> .PKGINFO
-                echo "depend = libsoup" >> .PKGINFO
+                echo "depend = libsoup3" >> .PKGINFO
                 echo "depend = pango" >> .PKGINFO
                 echo "depend = webkit2gtk-4.1" >> .PKGINFO
                 # GStreamer, spelled out. The .deb and .rpm both declare these
@@ -371,6 +381,22 @@ jobs:
               fi
             done
           fi
+
+      # The archlinux image is x86_64 only, so the aarch64 package goes
+      # unchecked. Its .PKGINFO comes from the same lines as this one.
+      - name: Verify the Arch package installs
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          set -euo pipefail
+          dir=clients/desktop/src-tauri/target/release/bundle/deb
+          pkg=$(find "$dir" -maxdepth 1 -name '*.pkg.tar.zst' | head -1)
+          if [ -z "$pkg" ]; then echo "no .pkg.tar.zst produced — nothing to verify"; exit 0; fi
+          echo "verifying $pkg  ($(du -h "$pkg" | cut -f1))"
+          docker run --rm \
+            -v "$PWD/$dir":/pkg:ro \
+            -v "$PWD/scripts/verify-arch.sh":/verify.sh:ro \
+            -e "PKGFILE=$(basename "$pkg")" \
+            archlinux:latest bash /verify.sh
 
       # 0.3.11 shipped a signed installer wrapped around an UNSIGNED app
       # binary, and nothing in this pipeline noticed. The installer carrying a

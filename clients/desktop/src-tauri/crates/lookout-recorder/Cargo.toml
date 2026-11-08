@@ -1,0 +1,19 @@
+[package]
+name = "lookout-recorder"
+version = "0.3.14"
+edition = "2021"
+description = "Lookout's recording orchestration — the recorder state machine, the capture loop, the ordered uploader with its backlog, the tray clock — over host traits, so every client runs one implementation"
+publish = false
+
+[lib]
+name = "lookout_recorder"
+
+[dependencies]
+lookout-session = { path = "../lookout-session" }
+lookout-protocol = { path = "../lookout-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+base64 = "0.23"
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

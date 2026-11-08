@@ -1,0 +1,15 @@
+[package]
+name = "lookout-session"
+version = "0.3.14"
+edition = "2021"
+description = "Lookout's recording session as pure logic: phases, clock, schedule, timing — no I/O, no runtime, no platform"
+publish = false
+
+[lib]
+name = "lookout_session"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

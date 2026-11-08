@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
@@ -13,13 +13,34 @@ RUN npm run build -w packages/server
 # the runtime image copies node_modules wholesale from `builder`, so keeping
 # vite/tsup and the whole React toolchain out of that tree is the difference
 # between shipping them and not. Only the built assets cross over.
-FROM node:20-alpine AS recorder
+# The recorder engine, compiled to WebAssembly (@lookout/wasm), which
+# @lookout/react loads. Only lookout-web and the crates under it build here;
+# the desktop app's own sources are stand-ins so Cargo can read the
+# workspace without them (and a desktop UI change doesn't bust this cache).
+FROM rust:1-slim-bookworm AS wasm
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && rustup target add wasm32-unknown-unknown
+WORKDIR /app
+COPY clients/desktop/src-tauri/Cargo.toml clients/desktop/src-tauri/Cargo.lock clients/desktop/src-tauri/
+COPY packages/wasm/install-bindgen.sh packages/wasm/
+RUN packages/wasm/install-bindgen.sh /usr/local/bin
+COPY clients/desktop/src-tauri/crates clients/desktop/src-tauri/crates
+RUN mkdir -p clients/desktop/src-tauri/src \
+  && touch clients/desktop/src-tauri/src/lib.rs clients/desktop/src-tauri/src/main.rs
+COPY packages/wasm/build.sh packages/wasm/
+RUN bash packages/wasm/build.sh
+
+FROM node:24-alpine AS recorder
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
+COPY packages/wasm/package.json packages/wasm/
 COPY clients/react/package.json clients/react/
 COPY clients/hosted/package.json clients/hosted/
 RUN npm ci
+COPY --from=wasm /app/packages/wasm/dist packages/wasm/dist
 COPY clients/react clients/react
 COPY clients/hosted clients/hosted
 # Consume shared as a built artifact rather than rebuilding it here. Its tsc
@@ -30,7 +51,7 @@ COPY --from=builder /app/packages/shared/dist packages/shared/dist
 RUN npm run build -w clients/react
 RUN npm run build -w clients/hosted
 
-FROM node:20-alpine
+FROM node:24-alpine
 WORKDIR /app
 COPY --from=builder /app/packages/server/dist ./dist
 COPY --from=builder /app/packages/server/public ./public

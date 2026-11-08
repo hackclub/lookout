@@ -117,6 +117,11 @@ export interface UploaderResult {
  * always stale → `delay=0` → burst captures (3-5/min instead of 1/min).
  * Serial eliminates the race entirely; the chain knows exactly when to
  * fire next because the value comes from the same capture's response.
+ *
+ * @deprecated `useLookout()` now uploads through the shared
+ * recorder engine (retries, ordering and the offline backlog included) and
+ * no longer uses this hook; it is kept, working as before, for programs that
+ * built their own capture loop on it. Prefer `useLookout()`.
  */
 export function useUploader(): UploaderResult {
   const { client, config } = useLookoutContext();

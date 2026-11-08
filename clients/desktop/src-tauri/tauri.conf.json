@@ -3,7 +3,7 @@
   "productName": "Lookout",
   "mainBinaryName": "lookout",
   "identifier": "com.hackclub.lookout",
-  "version": "0.4.0",
+  "version": "0.3.14",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",

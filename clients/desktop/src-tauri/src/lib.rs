@@ -26,11 +26,15 @@ use lookout_core::apps::AppEntry;
 use lookout_core::capture_diagnostics::CaptureEnvironment;
 use lookout_core::screencast::StreamInfo;
 use lookout_core::sources::CaptureSourceList;
+use lookout_core::timer::format_tray_time;
 use lookout_core::{
-    ApiError, CaptureResult, CaptureSource, CaptureUploadResult, Core, CoreEvent, Frontend,
-    SessionConfig,
+    ApiError, BoxFuture, CameraFrame, CaptureSource, ControlMode, Core, CoreEvent, FinishOutcome,
+    Frontend, PickedSource, RecorderError, RecorderPhase, RecorderState, RecordingSource,
+    SessionConfig, StopOutcome,
 };
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::http;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -43,9 +47,17 @@ pub struct AppState {
     pub cold_start_urls: Mutex<Option<Vec<String>>>,
 }
 
+/// What the webview answers a camera request with.
+enum CameraReply {
+    Started,
+    Frame(CameraFrame),
+}
+
 /// The core's view of this shell: events go onto the Tauri event bus, the
-/// preview is wanted while the main window is focused, and the clock text
-/// goes to the menu-bar item / tray (and the GNOME pill on Linux).
+/// preview is wanted while the main window is focused, the clock text goes
+/// to the menu-bar item / tray (and the GNOME pill on Linux), the tray's
+/// presence follows the recorder's state, and camera frames come from the
+/// webview's getUserMedia stream over a request/reply pair of events.
 ///
 /// Constructed before the Tauri app exists (the core is managed state, so
 /// it has to be built first) and bound to the [`AppHandle`] in `setup`.
@@ -54,11 +66,130 @@ pub struct AppState {
 #[derive(Default)]
 struct TauriFrontend {
     app: OnceLock<AppHandle>,
+    /// Outstanding camera requests, by id, waiting for the webview to call
+    /// `camera_request_done` / `camera_frame_delivered`.
+    camera_waiters: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<CameraReply, String>>>>,
+    camera_next_id: AtomicU64,
+    /// The tray item's state as last shown: `None` while hidden.
+    tray_shown: Mutex<Option<ControlMode>>,
+}
+
+/// What the webview is asked for. `requestId` comes back on the reply.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CameraRequest {
+    request_id: u64,
+    device_id: String,
 }
 
 impl TauriFrontend {
     fn bind(&self, app: AppHandle) {
         let _ = self.app.set(app);
+    }
+
+    /// Ask the webview for something camera-related and hand back the
+    /// future that resolves when it answers. A webview that never answers
+    /// is the core's problem to time out; a reply for an id nobody is
+    /// waiting on is dropped.
+    fn camera_request(
+        &self,
+        event: &'static str,
+        device_id: &str,
+    ) -> BoxFuture<'static, Result<CameraReply, String>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let Some(app) = self.app.get() else {
+            return Box::pin(async { Err("no window to ask for the camera".to_string()) });
+        };
+        let request_id = self.camera_next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.camera_waiters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(request_id, tx);
+        let payload = CameraRequest {
+            request_id,
+            device_id: device_id.to_string(),
+        };
+        if let Err(e) = app.emit(event, payload) {
+            self.camera_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&request_id);
+            return Box::pin(async move { Err(format!("couldn't reach the window: {e}")) });
+        }
+        Box::pin(async move {
+            rx.await
+                .unwrap_or_else(|_| Err("the window went away before answering".to_string()))
+        })
+    }
+
+    /// Resolve a camera request. Returns whether anyone was waiting.
+    fn camera_reply(&self, request_id: u64, reply: Result<CameraReply, String>) -> bool {
+        let waiter = self
+            .camera_waiters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&request_id);
+        match waiter {
+            Some(tx) => tx.send(reply).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Keep the tray item in step with the recorder: shown while a
+    /// recording is open, with the paused glyph following the control
+    /// mode, hidden once it is finished or closed. The clock text itself is
+    /// the ticker's job (`set_tray_title`).
+    ///
+    /// Called from the core's tasks, never the main thread — and the tray
+    /// (GTK's status item on Linux, the NSStatusItem on macOS) is main-thread
+    /// only, so every touch is dispatched there.
+    fn sync_tray(&self, state: Option<&RecorderState>) {
+        let Some(app) = self.app.get() else {
+            return;
+        };
+        let visible = state
+            .filter(|s| !matches!(s.phase, RecorderPhase::LoadError | RecorderPhase::Finished));
+        let mut shown = self.tray_shown.lock().unwrap_or_else(|e| e.into_inner());
+        match visible {
+            None => {
+                if shown.take().is_some() {
+                    on_main_thread(app, |app| tray::hide(&app));
+                }
+            }
+            Some(state) => {
+                let text = format_tray_time(state.display_seconds);
+                let paused = state.control_mode == ControlMode::Paused;
+                match *shown {
+                    None => {
+                        on_main_thread(app, move |app| {
+                            if let Err(e) = tray::show(&app, &text, paused) {
+                                eprintln!("[tray] show failed: {e}");
+                            }
+                        });
+                        *shown = Some(state.control_mode);
+                    }
+                    Some(mode) if mode != state.control_mode => {
+                        // The glyph has to flip now, not on the ticker's
+                        // next second.
+                        on_main_thread(app, move |app| {
+                            let _ = tray::update(&app, &text, paused);
+                        });
+                        *shown = Some(state.control_mode);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+}
+
+/// Run `f` on the main thread with a clone of the app handle. Tray and
+/// menu work is main-thread only on every platform; the core's tasks that
+/// drive it are not.
+fn on_main_thread(app: &AppHandle, f: impl FnOnce(AppHandle) + Send + 'static) {
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || f(handle)) {
+        eprintln!("[tray] main-thread dispatch failed: {e}");
     }
 }
 
@@ -72,11 +203,19 @@ impl Frontend for TauriFrontend {
             CoreEvent::Progress(message) => app.emit(name, message),
             CoreEvent::TrackedSeconds(seconds) => app.emit(name, seconds),
             CoreEvent::SessionTerminated(payload) => app.emit(name, payload),
-            CoreEvent::TickResult(payload) => app.emit(name, payload),
+            // The recorder folds this into its state and re-emits the
+            // preview; the raw payload (a full-size base64 JPEG) would only
+            // cross the bridge a second time for nobody.
+            CoreEvent::TickResult(_) => Ok(()),
             CoreEvent::TickError(payload) => app.emit(name, payload),
             CoreEvent::SourceLost(payload) => app.emit(name, payload),
             CoreEvent::PreviewFrame(payload) => app.emit(name, payload),
             CoreEvent::ScreencastRevoked(payload) => app.emit(name, payload),
+            CoreEvent::RecorderState(state) => {
+                self.sync_tray(state.as_ref());
+                app.emit(name, state)
+            }
+            CoreEvent::RecorderNotice(notice) => app.emit(name, notice),
         };
     }
 
@@ -88,30 +227,35 @@ impl Frontend for TauriFrontend {
             .unwrap_or(false)
     }
 
-    /// Write the menu-bar time text (and, off macOS, the hover tooltip).
+    /// Write the menu-bar time text, the paused glyph, and (off macOS) the
+    /// hover tooltip. The one writer of the tray title.
     fn set_tray_title(&self, time_text: &str, paused: bool) {
-        #[cfg(target_os = "linux")]
-        crate::gnome_indicator::publish_tick(time_text, paused);
-
-        #[cfg(not(target_os = "linux"))]
-        let _ = paused;
-
-        #[cfg(target_os = "macos")]
-        {
-            // None = keep the current pause state; the Swift side renders the
-            // tooltip and the numericText digit roll.
-            let _ = crate::native_tray::update(time_text, None);
+        if let Some(app) = self.app.get() {
+            let text = time_text.to_string();
+            on_main_thread(app, move |app| {
+                let _ = tray::update(&app, &text, paused);
+            });
         }
-        #[cfg(not(target_os = "macos"))]
-        if let Some(tray) = self
-            .app
-            .get()
-            .and_then(|app| app.tray_by_id("timelapse_tray"))
-        {
-            let _ = tray.set_title(Some(time_text));
-            // Windows doesn't render tray titles — the hover tooltip is the
-            // only way to see the recorded time there.
-            let _ = tray.set_tooltip(Some(format!("Lookout — {time_text} recorded")));
+    }
+
+    fn camera_start(&self, device_id: &str) -> BoxFuture<'static, Result<(), String>> {
+        let fut = self.camera_request("camera-start-request", device_id);
+        Box::pin(async move { fut.await.map(|_| ()) })
+    }
+
+    fn camera_grab_frame(&self, device_id: &str) -> BoxFuture<'static, Result<CameraFrame, String>> {
+        let fut = self.camera_request("camera-frame-request", device_id);
+        Box::pin(async move {
+            match fut.await? {
+                CameraReply::Frame(frame) => Ok(frame),
+                CameraReply::Started => Err("the window answered a frame request with 'started'".into()),
+            }
+        })
+    }
+
+    fn camera_stop(&self) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit("camera-stop", ());
         }
     }
 }
@@ -412,141 +556,139 @@ fn release_screencast(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Initialize the session config so Rust knows where the server is.
+// ── The recorder ─────────────────────────────────────────────────────
+// The recording session lives in the core (`lookout_core::recorder`); the
+// webview opens it, issues actions, and draws the `RecorderState` it is
+// handed on `recorder-state`. Every command here is `async` so it runs on
+// Tauri's tokio runtime — the core spawns tasks, and a sync command has no
+// runtime in context (which is what aborted camera sessions in 0.2.0).
+
+/// Open a recording for a session on the picked sources: load it, and
+/// start capturing if it is recordable. Replaces any recording already
+/// open. The returned state is also broadcast on `recorder-state`.
 #[tauri::command]
-fn configure(
+async fn recorder_open(
     token: String,
     api_base_url: String,
+    sources: Vec<PickedSource>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    state.core.configure(token, api_base_url)
-}
-
-/// Take a native screenshot, encode as JPEG, return base64.
-#[tauri::command]
-fn take_screenshot(
-    source: CaptureSource,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    state: State<'_, AppState>,
-) -> Result<CaptureResult, String> {
+) -> Result<RecorderState, RecorderError> {
+    let source = RecordingSource::from_picked(sources)
+        .map_err(|message| RecorderError::Other { message })?;
     state
         .core
-        .take_screenshot(source, max_width, max_height, jpeg_quality)
-}
-
-/// Full capture-upload-confirm pipeline in Rust (no browser CORS issues).
-/// Returns the confirm data AND the screenshot preview (base64) so the
-/// frontend can display the captured frame without a separate IPC call.
-#[tauri::command]
-async fn capture_and_upload(
-    sources: Vec<CaptureSource>,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
-    state: State<'_, AppState>,
-) -> Result<CaptureUploadResult, String> {
-    state
-        .core
-        .capture_and_upload(sources, max_width, max_height, jpeg_quality)
+        .recorder_open(SessionConfig { token, api_base_url }, source)
         .await
 }
 
-/// Upload a pre-captured frame (e.g. from browser camera capture).
-/// Accepts base64-encoded JPEG from the frontend, runs the upload pipeline.
+/// Close the recording: flush the partial minute, release the camera, and
+/// leave the session itself alone (it stays open, keeping its time).
 #[tauri::command]
-async fn upload_frame(
-    base64: String,
-    width: u32,
-    height: u32,
-    state: State<'_, AppState>,
-) -> Result<CaptureUploadResult, String> {
-    state.core.upload_frame(base64, width, height).await
+async fn recorder_close(state: State<'_, AppState>) -> Result<(), String> {
+    state.core.recorder_close().await;
+    Ok(())
 }
 
-/// Start the Rust-side capture loop. Replaces any existing loop.
-/// For screen/window/pipewire sources only — camera sources stay JS-driven.
-///
-/// `async` so it runs on Tauri's tokio runtime: the core spawns tasks.
 #[tauri::command]
-async fn start_capture_loop(
-    sources: Vec<CaptureSource>,
-    max_width: u32,
-    max_height: u32,
-    jpeg_quality: u8,
+async fn recorder_pause(state: State<'_, AppState>) -> Result<RecorderState, RecorderError> {
+    state.core.recorder_pause().await
+}
+
+#[tauri::command]
+async fn recorder_resume(state: State<'_, AppState>) -> Result<RecorderState, RecorderError> {
+    state.core.recorder_resume().await
+}
+
+#[tauri::command]
+async fn recorder_begin_stop(state: State<'_, AppState>) -> Result<RecorderState, RecorderError> {
+    state.core.recorder_begin_stop().await
+}
+
+#[tauri::command]
+async fn recorder_cancel_stop(state: State<'_, AppState>) -> Result<RecorderState, RecorderError> {
+    state.core.recorder_cancel_stop().await
+}
+
+#[tauri::command]
+async fn recorder_finish_stop(
+    name: Option<String>,
+    edit: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<StopOutcome, RecorderError> {
+    state.core.recorder_finish_stop(name, edit).await
+}
+
+/// The open recording's state, for a window that just mounted (the tray
+/// popup, a reloaded main window).
+#[tauri::command]
+fn recorder_state(state: State<'_, AppState>) -> Option<RecorderState> {
+    state.core.recorder_state()
+}
+
+/// Rename (optional) and stop a session the way the recorder does, for the
+/// source picker's Stop button — no recording is open there.
+#[tauri::command]
+async fn session_finish(
+    token: String,
+    api_base_url: String,
+    name: Option<String>,
+    edit: bool,
+    state: State<'_, AppState>,
+) -> Result<FinishOutcome, ApiError> {
     state
         .core
-        .start_capture_loop(sources, max_width, max_height, jpeg_quality)
+        .session_finish(&session_ref(token, api_base_url), name.as_deref(), edit)
+        .await
 }
 
-/// Stop the Rust-side capture loop (if running).
-///
-/// Async, and AWAITED by the UI before it sends the pause/stop POST: on
-/// cancellation the loop flushes the in-progress partial minute as a
-/// `final` capture (see the end of `capture_loop_task`), and that confirm
-/// must land while the session is still active — a paused session rejects
-/// it. Bounded so a dead network can't wedge the pause button; on timeout
-/// the flush is abandoned (the partial minute is lost, exactly as it was
-/// before the flush existed).
-#[tauri::command]
-async fn stop_capture_loop(state: State<'_, AppState>) -> Result<(), String> {
-    state.core.stop_capture_loop().await
-}
+// ── Camera, answered by the webview ──────────────────────────────────
 
-/// Start the Rust-side tray title ticker (for camera sessions where
-/// the capture loop runs in JS but we still want an accurate menu bar timer).
-///
-/// MUST be `async` — `Core::start_tray_timer` calls `tokio::spawn` internally,
-/// which panics if not invoked from inside a tokio runtime. Tauri runs
-/// `async` commands on its own tokio runtime, but sync commands run on a
-/// thread without one. Calling this command sync caused SIGABRT on camera
-/// sessions in 0.2.0 + 0.2.1 (only camera path uses this; screen capture
-/// goes through `start_capture_loop` which is already async).
+/// The webview's answer to `camera-start-request`: the stream is up and
+/// producing frames, or why not.
 #[tauri::command]
-async fn start_tray_ticker(tracked_seconds: i64, state: State<'_, AppState>) -> Result<(), String> {
-    state.core.start_tray_ticker(tracked_seconds)
-}
-
-/// Pause the tray title ticker (freezes the displayed time).
-#[tauri::command]
-fn pause_tray_ticker(state: State<'_, AppState>) -> Result<(), String> {
-    state.core.pause_tray_timer();
-    Ok(())
-}
-
-/// Resume the tray title ticker.
-#[tauri::command]
-fn resume_tray_ticker(tracked_seconds: i64, state: State<'_, AppState>) -> Result<(), String> {
-    state.core.sync_tray_timer(tracked_seconds);
-    state.core.resume_tray_timer();
-    Ok(())
-}
-
-/// Stop the tray title ticker.
-#[tauri::command]
-fn stop_tray_ticker(state: State<'_, AppState>) -> Result<(), String> {
-    state.core.stop_tray_timer();
-    Ok(())
-}
-
-/// Sync the tray timer to an authoritative tracked_seconds value from JS.
-#[tauri::command]
-fn sync_tray_tracked_seconds(
-    tracked_seconds: i64,
-    anchor_at_ms: Option<i64>,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    match anchor_at_ms {
-        // Align the ticker with the main window's interpolation anchor so
-        // the two surfaces show the same seconds.
-        Some(anchor) => state.core.sync_tray_timer_anchored(tracked_seconds, anchor),
-        None => state.core.sync_tray_timer(tracked_seconds),
+fn camera_request_done(request_id: u64, error: Option<String>) {
+    let reply = match error {
+        None => Ok(CameraReply::Started),
+        Some(e) => Err(e),
+    };
+    if !frontend().camera_reply(request_id, reply) {
+        eprintln!("[camera] stray start reply for request {request_id}");
     }
-    Ok(())
 }
+
+/// The webview's answer to `camera-frame-request`: a JPEG (base64) with
+/// its dimensions, or why there isn't one.
+#[tauri::command]
+fn camera_frame_delivered(
+    request_id: u64,
+    base64: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    error: Option<String>,
+) {
+    let reply = match (base64, error) {
+        (_, Some(e)) => Err(e),
+        (Some(b64), None) => lookout_core::base64_decode(&b64).map(|jpeg| {
+            CameraReply::Frame(CameraFrame {
+                jpeg,
+                width: width.unwrap_or(0),
+                height: height.unwrap_or(0),
+            })
+        }),
+        (None, None) => Err("no frame".into()),
+    };
+    if !frontend().camera_reply(request_id, reply) {
+        eprintln!("[camera] stray frame reply for request {request_id}");
+    }
+}
+
+/// The shell behind the core — the `TauriFrontend` handed to `Core::new`.
+fn frontend() -> &'static TauriFrontend {
+    FRONTEND.get().expect("frontend is set before the app runs")
+}
+
+/// The one `TauriFrontend`, reachable from commands that answer it.
+static FRONTEND: OnceLock<Arc<TauriFrontend>> = OnceLock::new();
 
 // ── Server API, through the core ────────────────────────────────────
 // The webview never speaks HTTP to the Lookout server itself; each of these
@@ -815,18 +957,19 @@ pub fn run() {
 
     // Keep _sentry_guard alive for the lifetime of the app so events flush on exit.
     let _sentry_guard = option_env!("SENTRY_DSN").map(|dsn| {
-        sentry::init((dsn, sentry::ClientOptions {
-            release: sentry::release_name!(),
-            environment: Some("desktop-tauri".into()),
-            send_default_pii: true,
-            sample_rate: 1.0,
-            ..Default::default()
-        }))
+        // `ClientOptions` is non-exhaustive as of sentry 0.49, so it is
+        // built up rather than written out.
+        let mut options = sentry::ClientOptions::new();
+        options.release = sentry::release_name!();
+        options.environment = Some("desktop-tauri".into());
+        options.send_default_pii = true;
+        sentry::init((dsn, options.sample_rate(1.0)))
     });
 
     // The core is managed state, so it exists before the Tauri app does; the
     // frontend it reports to gets its AppHandle in `setup`.
     let frontend = Arc::new(TauriFrontend::default());
+    let _ = FRONTEND.set(Arc::clone(&frontend));
     let core = Core::new(
         Arc::clone(&frontend) as Arc<dyn Frontend>,
         "Lookout Desktop",
@@ -973,17 +1116,17 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_capture_sources,
-            configure,
-            take_screenshot,
-            capture_and_upload,
-            upload_frame,
-            start_capture_loop,
-            stop_capture_loop,
-            start_tray_ticker,
-            pause_tray_ticker,
-            resume_tray_ticker,
-            stop_tray_ticker,
-            sync_tray_tracked_seconds,
+            recorder_open,
+            recorder_close,
+            recorder_pause,
+            recorder_resume,
+            recorder_begin_stop,
+            recorder_cancel_stop,
+            recorder_finish_stop,
+            recorder_state,
+            session_finish,
+            camera_request_done,
+            camera_frame_delivered,
             get_cold_start_urls,
             enable_vibrancy,
             disable_vibrancy,
@@ -1006,12 +1149,7 @@ pub fn run() {
             get_blacklisted_apps,
             list_installed_apps,
             get_app_icon,
-            tray::show_tray,
-            tray::update_tray_time,
-            tray::hide_tray,
             tray::tray_action,
-            tray::set_tray_state,
-            tray::get_tray_state,
             api_session_get,
             api_session_status,
             api_session_pause,
@@ -1031,7 +1169,6 @@ pub fn run() {
             api_tip,
             api_sessions_batch,
         ])
-        .manage(tray::TrayStateMutex(std::sync::Mutex::new(tray::TrayState::default())))
         .setup(move |app| {
             // From here on the core can reach the webview.
             frontend.bind(app.handle().clone());
@@ -1298,28 +1435,18 @@ pub fn run() {
                 windows_permissions::register_permission_handler(&window);
 
                 // When the main window is closed during an active recording,
-                // clean up the capture loop and tray immediately. The session
-                // pause is handled in the RunEvent::ExitRequested handler below
-                // to ensure it completes before the process exits.
+                // tear the recording down immediately — the window that
+                // answers camera requests and draws the state is gone. The
+                // session pause is handled in the RunEvent::ExitRequested
+                // handler below to ensure it completes before the process
+                // exits.
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::Destroyed = event {
                         let state = app_handle.state::<AppState>();
-
-                        // Stop capture loop
-                        if let Some(handle) = state.core.take_capture_loop() {
-                            eprintln!("[window-close] stopping capture loop");
-                            handle.cancel();
-                        }
-
-                        // Stop tray timer
-                        state.core.stop_tray_timer();
-
-                        // Remove tray icon
-                        app_handle.remove_tray_by_id("timelapse_tray");
-                        if let Some(w) = app_handle.get_webview_window("tray") {
-                            let _ = w.close();
-                        }
+                        eprintln!("[window-close] aborting the recording");
+                        state.core.recorder_abort();
+                        tray::hide(&app_handle);
                     }
                 });
             }
@@ -1335,7 +1462,10 @@ pub fn run() {
                 // auto-pauses (5 min timeout).
                 let state = app.state::<AppState>();
                 let has_active_loop = state.core.has_capture_loop();
-                let config = state.core.config.lock().ok().and_then(|g| g.clone());
+                let config = state
+                    .core
+                    .recorder_session()
+                    .or_else(|| state.core.config());
 
                 if has_active_loop {
                     if let Some(config) = config {

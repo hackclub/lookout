@@ -33,5 +33,6 @@ export function resolveConfig(config: LookoutConfig): ResolvedConfig {
     callbacks: config.callbacks ?? {},
     statusPollIntervalMs: config.statusPollIntervalMs ?? 3000,
     autoStart: config.autoStart ?? false,
+    appName: config.appName,
   };
 }

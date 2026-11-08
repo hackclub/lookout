@@ -1,27 +1,35 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  CLIP_FRAME_INTERVAL_MS,
-  MAX_CLIP_UPLOAD_FAILURES,
-} from "@lookout/shared";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { buildBrowserClientInfo, type SessionStatus } from "@lookout/shared";
+import type { LookoutRecorder as WasmRecorder } from "@lookout/wasm";
 import { useLookoutContext } from "../LookoutProvider.js";
 import { useScreenCapture } from "./useScreenCapture.js";
 import { useCameraCapture } from "./useCameraCapture.js";
-import {
-  useUploader,
-  ClipFormatRejectedError,
-  type UploadPayload,
-  type UploadConfirmResult,
-} from "./useUploader.js";
-import { useSession } from "./useSession.js";
-import { useSessionTimer } from "./useSessionTimer.js";
 import { useSilentAudioKeepAlive } from "./useSilentAudioKeepAlive.js";
-import { computeBestTrackedSeconds } from "./computeBestTracked.js";
-import { ClipRecorder } from "./clipRecorder.js";
-import type { LookoutState, LookoutActions, RecorderStatus } from "../types.js";
+import { createBrowserHost } from "../wasm/browserHost.js";
+import { createRecorder } from "../wasm/loadRecorder.js";
+import { retryTimingPatch } from "../wasm/retryTiming.js";
+import {
+  recorderErrorMessage,
+  useRecorderClock,
+  type RecorderState,
+  type StopOutcome,
+} from "../wasm/recorderState.js";
+import type { LookoutState, LookoutActions, RecorderStatus, UploadState } from "../types.js";
+
+// Injected at build time by tsup (see tsup.config.ts `define`).
+declare const __LOOKOUT_VERSION__: string;
+const SDK_VERSION = typeof __LOOKOUT_VERSION__ === "string" ? __LOOKOUT_VERSION__ : "0.0.0";
 
 /**
  * Primary hook for Lookout integration.
- * Composes all lower-level hooks and orchestrates the capture-upload loop.
+ *
+ * The recording itself — when to capture, how to upload, what to do when
+ * the link drops, the order of a pause, the clock — is the shared Rust
+ * recorder (`lookout-recorder`, running here as WebAssembly), the same
+ * code the desktop app runs. This hook is the browser's view of it: it
+ * hands the recorder a host made of `getDisplayMedia`/`getUserMedia`
+ * frames, the WebCodecs clip encoder and `fetch`, draws the state the
+ * recorder publishes, and turns the page's buttons into recorder actions.
  */
 export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   const { config, client } = useLookoutContext();
@@ -29,487 +37,280 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
   callbacksRef.current = config.callbacks;
 
   const captureMode = config.capture.mode;
-
-  const session = useSession();
   const screenCapture = useScreenCapture();
   const cameraCapture = useCameraCapture();
-  // Delegate to the active capture source — both hooks are always called
-  // (React rules of hooks) but only the active one's methods are invoked.
+  // Both hooks are always called (rules of hooks); only the active one's
+  // methods are invoked.
   const capture = captureMode === "camera" ? cameraCapture : screenCapture;
-  const uploader = useUploader();
 
-  // The timer reads ONLY server-authoritative values. See
-  // computeBestTrackedSeconds for why — the previous code added a
-  // third input derived from `uploads.completed`, which inflated the
-  // display whenever uploads succeeded but didn't credit (e.g. ~90s
-  // upload latency where every other capture lands outside the streak
-  // window). The visible symptom was "timer shows 2x the recording
-  // time", reported by browser users while desktop users were fine
-  // (desktop bypasses this code path entirely).
-  const bestTrackedSeconds = computeBestTrackedSeconds({
-    sessionTrackedSeconds: session.trackedSeconds,
-    uploaderTrackedSeconds: uploader.trackedSeconds,
-  });
+  // ── The recorder ─────────────────────────────────────────────────
+  const recorderRef = useRef<WasmRecorder | null>(null);
+  const [recorderState, setRecorderState] = useState<RecorderState | null>(null);
+  const [tokenStatus, setTokenStatus] = useState<"resolving" | "none" | "ok">("resolving");
+  const tokenRef = useRef<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadState>({ pending: 0, completed: 0, failed: 0 });
+  const [lastScreenshotUrl, setLastScreenshotUrl] = useState<string | null>(null);
+  // The session's status after the recorder is done with it: compiling,
+  // then complete or failed, from the status poll below.
+  const [terminalStatus, setTerminalStatus] = useState<SessionStatus | null>(null);
+  const [terminalTracked, setTerminalTracked] = useState<number | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
-  // Set the instant pause/stop is invoked, before the flush/POST round
-  // trips, so the visible clock stops exactly when the user acted instead
-  // of ticking on through the network wait. Cleared on resume.
-  const [timerHoldAt, setTimerHoldAt] = useState<number | null>(null);
-  const displaySeconds = useSessionTimer(
-    bestTrackedSeconds,
-    capture.isSharing && (session.status === "active" || session.status === "pending"),
-    timerHoldAt,
+  const getVideoRef = useRef<() => HTMLVideoElement | null>(() => null);
+  getVideoRef.current = captureMode === "camera" ? cameraCapture.getVideo : screenCapture.getVideo;
+  const openCameraRef = useRef<(deviceId: string) => Promise<void>>(async () => {});
+  openCameraRef.current = async () => {
+    if (!cameraCapture.hasStream()) await cameraCapture.startSharing();
+  };
+  const closeCameraRef = useRef<() => void>(() => {});
+  closeCameraRef.current = () => cameraCapture.stopSharing();
+
+  const clientInfo = useMemo(
+    () => buildBrowserClientInfo({ type: "sdk", version: SDK_VERSION, embeddedApp: config.appName }),
+    [config.appName],
   );
 
-  // Holds either a setInterval ID (legacy bucket-mode fallback) or
-  // setTimeout ID (credit-mode self-scheduling chain). Cleared on unmount.
-  const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Flushes the in-progress partial minute as a `final` capture, so pausing
-  // at 03:15 resumes at 03:15 instead of 03:00 (the server credits elapsed
-  // since the last credited mark — see its creditFinalCapture). Populated by
-  // the capture effect while a chain is running; pause/stop take it (and
-  // null it) BEFORE the session leaves "active", because a paused session
-  // rejects confirms. Best-effort: a failed flush loses only the partial
-  // minute, which is exactly what happened before the flush existed.
-  const flushFinalCaptureRef = useRef<(() => Promise<void>) | null>(null);
-
-  /** Run the final-capture flush, bounded so a dead network can't wedge the
-   *  pause/stop button. Must complete (or be abandoned) BEFORE the session
-   *  leaves "active" — a paused session rejects the confirm. */
-  const runFinalFlush = useCallback(async () => {
-    const flush = flushFinalCaptureRef.current;
-    flushFinalCaptureRef.current = null;
-    if (!flush) return;
-    try {
-      await Promise.race([
-        flush(),
-        new Promise((resolve) => setTimeout(resolve, 15_000)),
-      ]);
-    } catch (err) {
-      console.warn("[lookout] final capture flush failed:", err);
-    }
-  }, []);
-  // Clip recorder for sessions with clips enabled (screen mode only).
-  // Null = classic one-JPEG-per-minute captures.
-  const clipRecorderRef = useRef<ClipRecorder | null>(null);
-  const capturingRef = useRef(false);
-  const prevStatusRef = useRef<RecorderStatus>(session.status);
-  const intentionalPauseRef = useRef(false);
-  // Per-action re-entrancy guards. A pause/resume/stop request is a single
-  // POST to a rate-limited endpoint (10 req/min per token). When the button
-  // feels unresponsive, users rage-click — and without a guard each click
-  // fired its own request, bursting past the limit and tripping 429s. These
-  // suppress duplicate invocations of the *same* action while one is in
-  // flight; distinct actions (e.g. pause then stop) are unaffected. Refs, not
-  // state: the dedup must take effect synchronously within the same tick, and
-  // it never needs to trigger a re-render.
-  const pauseInFlightRef = useRef(false);
-  const resumeInFlightRef = useRef(false);
-  const stopInFlightRef = useRef(false);
-
-  // Sync best tracked seconds to session
+  // Create the recorder once; it lives as long as the hook.
   useEffect(() => {
-    if (bestTrackedSeconds > session.trackedSeconds) {
-      session.updateTrackedSeconds(bestTrackedSeconds);
-    }
-  }, [bestTrackedSeconds, session.trackedSeconds, session.updateTrackedSeconds]);
+    let cancelled = false;
+    let created: WasmRecorder | null = null;
+    const host = createBrowserHost({
+      getVideo: () => getVideoRef.current(),
+      openCamera: (deviceId) => openCameraRef.current(deviceId),
+      closeCamera: () => closeCameraRef.current(),
+      settings: {
+        maxWidth: config.capture.maxWidth,
+        maxHeight: config.capture.maxHeight,
+        jpegQuality: config.capture.jpegQuality,
+      },
+      clientInfo,
+      wantsPreviewFrames: () =>
+        typeof document === "undefined" || document.visibilityState !== "hidden",
+      onCapture: (c) => callbacksRef.current.onCapture?.(c),
+      onEvent: (name, payload) => {
+        if (cancelled) return;
+        switch (name) {
+          case "recorder-state":
+            setRecorderState((payload as RecorderState | null) ?? null);
+            break;
+          case "capture-preview-frame": {
+            const p = payload as { previewBase64: string };
+            if (p.previewBase64) setLastScreenshotUrl(`data:image/jpeg;base64,${p.previewBase64}`);
+            break;
+          }
+          case "capture-tick-result": {
+            const r = payload as { screenshotId: string; trackedSeconds: number };
+            setUploads((u) => ({ ...u, completed: u.completed + 1 }));
+            callbacksRef.current.onUploadSuccess?.({
+              screenshotId: r.screenshotId,
+              trackedSeconds: r.trackedSeconds,
+            });
+            break;
+          }
+          case "capture-tick-error": {
+            const e = payload as { message: string };
+            setUploads((u) => ({ ...u, failed: u.failed + 1 }));
+            callbacksRef.current.onUploadFailure?.(new Error(e.message));
+            break;
+          }
+          case "recorder-notice": {
+            const n = payload as { title: string; body: string };
+            console.warn(`[lookout] ${n.title}: ${n.body}`);
+            break;
+          }
+          default:
+            break;
+        }
+      },
+    });
+    (async () => {
+      try {
+        const recorder = await createRecorder(host);
+        if (cancelled) {
+          recorder.free();
+          return;
+        }
+        created = recorder;
+        recorderRef.current = recorder;
+        // `retry.maxRetries` / `retry.retryDelays` predate the engine; keep
+        // honouring them. Merged over the current timing, not replacing it.
+        const retryPatch = retryTimingPatch(config.retry);
+        if (retryPatch) recorder.setTiming({ ...recorder.timing(), ...retryPatch });
+        let token: string;
+        try {
+          token = await client.resolveToken();
+        } catch {
+          token = "";
+        }
+        if (cancelled) return;
+        if (!token) {
+          setTokenStatus("none");
+          return;
+        }
+        tokenRef.current = token;
+        setTokenStatus("ok");
+        const source =
+          captureMode === "camera"
+            ? { type: "camera", deviceId: cameraCapture.selectedDeviceId ?? config.capture.camera.deviceId ?? "" }
+            : { type: "screen", sources: [] };
+        const state = (await recorder.open(token, config.apiBaseUrl, source)) as RecorderState;
+        if (cancelled) return;
+        setRecorderState(state);
+        // The recorder starts capturing on an active session, but a page
+        // has no stream until the user shares one: park the session
+        // paused (flushing nothing) so the server doesn't accrue dead
+        // time, exactly as the page always did on reload.
+        if (state.phase === "recording") {
+          try {
+            await recorder.pause();
+          } catch {
+            // Refused or failed: the state event says what happened.
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          const message = recorderErrorMessage(err);
+          callbacksRef.current.onError?.(new Error(message), "open");
+          setLocalError(message);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      recorderRef.current = null;
+      if (created) {
+        // Flush and release; the page is leaving. Best effort.
+        void created
+          .close()
+          .catch(() => {})
+          .finally(() => created?.free());
+      }
+    };
+    // The recorder is bound to the provider's config for its lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, clientInfo, captureMode]);
 
-  // Fire onStatusChange callback
+  const phase = recorderState?.phase ?? null;
+  const sessionStatus = (recorderState?.sessionStatus ?? null) as SessionStatus | null;
+
+  // ── Pending uploads from the recorder's own count ────────────────
+  useEffect(() => {
+    const pending = recorderState?.pendingUploads ?? 0;
+    setUploads((u) => (u.pending === pending ? u : { ...u, pending }));
+  }, [recorderState?.pendingUploads]);
+
+  // ── Status: the recorder's, then the compile poll's ──────────────
+  const status: RecorderStatus = useMemo(() => {
+    if (localError) return "error";
+    if (tokenStatus === "none") return "no-token";
+    if (tokenStatus === "resolving" || !recorderState) return "loading";
+    if (phase === "loadError") return "error";
+    if (phase === "loading") return "loading";
+    if (terminalStatus) return terminalStatus;
+    return sessionStatus ?? "loading";
+  }, [localError, tokenStatus, recorderState, phase, sessionStatus, terminalStatus]);
+
+  const error =
+    localError ?? (phase === "loadError" ? recorderState?.sessionError ?? "Failed to load session" : null);
+
+  // Status transition callbacks.
+  const prevStatusRef = useRef<RecorderStatus>(status);
   useEffect(() => {
     const prev = prevStatusRef.current;
-    const next = session.status;
-    if (prev !== next) {
-      callbacksRef.current.onStatusChange?.(prev, next);
-      if (next === "failed") {
-        callbacksRef.current.onCompilationFailed?.();
-      }
-      prevStatusRef.current = next;
+    if (prev !== status) {
+      callbacksRef.current.onStatusChange?.(prev, status);
+      if (status === "failed") callbacksRef.current.onCompilationFailed?.();
+      prevStatusRef.current = status;
     }
-  }, [session.status]);
+  }, [status]);
 
-  // Refs to the latest action implementations so the chain's tick body
-  // always calls the freshest function without re-running the effect.
-  const takeScreenshotRef = useRef(capture.takeScreenshot);
-  takeScreenshotRef.current = capture.takeScreenshot;
-  const captureUploadConfirmRef = useRef(uploader.captureUploadConfirm);
-  captureUploadConfirmRef.current = uploader.captureUploadConfirm;
-  const serverNowRef = useRef(uploader.serverNowMs);
-  serverNowRef.current = uploader.serverNowMs;
+  // Poll the compile once the session is stopped, until it is complete
+  // or failed; then fetch the video.
+  const pollable = status === "stopped" || status === "compiling";
+  useEffect(() => {
+    if (!pollable) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const data = await client.getStatus();
+        if (cancelled) return;
+        setTerminalStatus(data.status);
+        setTerminalTracked(data.trackedSeconds);
+      } catch (e) {
+        console.warn("[session] poll error:", e);
+      }
+    };
+    const id = setInterval(tick, config.statusPollIntervalMs);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [pollable, client, config.statusPollIntervalMs]);
 
-  // Start/stop capture interval based on sharing + session state.
-  const isActive = session.status === "active" || session.status === "pending";
+  useEffect(() => {
+    if (status !== "complete") return;
+    let cancelled = false;
+    client
+      .getVideo()
+      .then((data: { videoUrl: string }) => {
+        if (cancelled) return;
+        setVideoUrl(data.videoUrl);
+        callbacksRef.current.onComplete?.({ videoUrl: data.videoUrl });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [status, client]);
+
+  // ── Sharing ↔ recording ──────────────────────────────────────────
+  const isActive = sessionStatus === "active" || sessionStatus === "pending";
 
   // Keep the page "audible" while recording so the browser doesn't
-  // throttle our setTimeout chain when the user backgrounds the tab or
-  // enables Low Power Mode. The live MediaStream track already exempts
-  // us from some throttling, but Low Power Mode user reports suggest
-  // it's not enough on its own. Harmless on desktop (Tauri) — the Rust
-  // capture loop is independent of this.
+  // throttle timers when the user backgrounds the tab. The recorder's
+  // loop runs on the page's event loop, so this matters here.
   useSilentAudioKeepAlive(capture.isSharing && isActive);
 
-  useEffect(() => {
-    if (!capture.isSharing || !isActive) return;
-
-    capturingRef.current = true;
-    let cancelled = false;
-
-    // Clip mode: the session accepts clips (known from the session fetch,
-    // BEFORE any upload), this browser can encode them, and we're capturing
-    // the screen (camera mode stays on JPEG). The recorder starts grabbing
-    // frames immediately so the very first upload is already a clip — the
-    // compiled timelapse has motion from second zero, never a still.
-    const frameIntervalMs = session.frameIntervalMs ?? CLIP_FRAME_INTERVAL_MS;
-    let clipRecorder: ClipRecorder | null = null;
-    if (
-      captureMode !== "camera" &&
-      session.clipsEnabled &&
-      ClipRecorder.isSupported()
-    ) {
-      const video = screenCapture.getVideo();
-      if (video) {
-        try {
-          // No openingFrameIntervalMs: the seed tick fires immediately (see
-          // below), so there is no opening window to densify — the first
-          // real clip is the full first minute at the normal cadence.
-          clipRecorder = new ClipRecorder(video, frameIntervalMs, {
-            maxWidth: config.capture.maxWidth,
-            maxHeight: config.capture.maxHeight,
-            jpegQuality: config.capture.jpegQuality,
-          });
-          clipRecorder.start();
-        } catch (err) {
-          console.warn(
-            "[lookout] clip recorder unavailable, using JPEG captures:",
-            err,
-          );
-          clipRecorder = null;
-        }
-      }
-    }
-    clipRecorderRef.current = clipRecorder;
-
-    // Capture-upload chain — mirrors the desktop Rust loop in
-    // `clients/desktop/src-tauri/src/lib.rs::capture_loop_task`, including
-    // its concurrency shape.
-    //
-    // The upload runs CONCURRENTLY with recording rather than blocking it.
-    // The previous version awaited the full round trip before scheduling the
-    // next tick, which made every second of upload latency a second the
-    // recorder wasn't cutting on schedule. On a slow uplink that compounds:
-    // clips stretch to cover minutes each (a clip renders as ONE second of
-    // video however long it took to record, so that footage is genuinely
-    // lost), capturedAt drifts past the server's ±30s streak window so the
-    // minute credits nothing, and the oversized clip is refused on arrival.
-    // Uploading off the critical path keeps the cut cadence tied to the
-    // clock instead of to the network.
-    //
-    // Strictly ONE upload in flight, exactly as desktop does it: the next
-    // tick settles the previous upload before cutting. That preserves
-    // capturedAt monotonicity and the per-session rate-limit assumptions,
-    // and it is what stops a bad connection from fanning out into parallel
-    // uploads that make the congestion worse.
-    let inFlight: Promise<UploadConfirmResult> | null = null;
-
-    // Clip-failure accounting, mirroring the desktop loop's latch. Clips are
-    // an enhancement; a JPEG a minute is the contract. Anything that makes
-    // clips unworkable must degrade to that instead of costing the user
-    // minutes, however many devices and browsers this runs on.
-    let clipFailures = 0;
-    const disableClips = (why: string) => {
-      if (!clipRecorderRef.current) return;
-      console.warn(
-        `[lookout] ${why} — recording one JPEG per minute for the rest of ` +
-          `this session.`,
-      );
-      clipRecorderRef.current.stop();
-      clipRecorderRef.current = null;
-    };
-
-    /**
-     * Upload a capture, and if a CLIP upload fails, retry the same tick as a
-     * single JPEG.
-     *
-     * The retry reuses the clip's own cut-time JPEG snapshot and — critically
-     * — its `capturedAtMs`, so the capture still lands inside the server's
-     * ±30s streak window and the minute credits. Without this a failed clip
-     * upload cost the whole minute: the desktop client had the fallback, the
-     * web client didn't.
-     */
-    const uploadWithFallback = async (
-      payload: UploadPayload,
-    ): Promise<UploadConfirmResult> => {
-      const isClip = payload.format != null && payload.format !== "jpeg";
-      try {
-        const result = await captureUploadConfirmRef.current(payload);
-        if (isClip) clipFailures = 0; // a clip landed: earlier trouble was transient
-        return result;
-      } catch (err) {
-        if (!isClip) throw err;
-
-        // The session no longer accepts clips. Retrying is pointless.
-        if (err instanceof ClipFormatRejectedError) {
-          disableClips("the server no longer accepts clips for this session");
-        } else if (++clipFailures >= MAX_CLIP_UPLOAD_FAILURES) {
-          disableClips(
-            `${clipFailures} consecutive clip uploads failed`,
-          );
-        }
-
-        if (!payload.previewBlob) throw err;
-        console.warn("[lookout] clip upload failed — retrying as a JPEG:", err);
-        return await captureUploadConfirmRef.current({
-          blob: payload.previewBlob,
-          width: payload.width,
-          height: payload.height,
-          capturedAtMs: payload.capturedAtMs,
-          // Keep the pause/stop flush flag: without it, a flush whose clip
-          // upload failed would credit as a NORMAL capture — inside the
-          // ±30s window that rounds the partial minute UP to a full one
-          // (pause at 1:39 → display 2:00), outside it the minute credits 0.
-          ...(payload.final ? { final: true } : {}),
-        });
-      }
-    };
-
-    /** Await the in-flight upload, if any, and fold its result into the
-     *  schedule. Returns the server's fresh nextExpectedAt, or null. */
-    const settleInFlight = async (): Promise<string | null> => {
-      if (!inFlight) return null;
-      const pending = inFlight;
-      try {
-        return (await pending).nextExpectedAt;
-      } catch (err) {
-        // Pipeline failure (network / server / 409). The chain stays alive
-        // on the local fallback cadence; useUploader has already surfaced
-        // the error and any 409 conflict.
-        console.warn("[lookout] capture upload failed:", err);
-        return null;
-      } finally {
-        // Only clear if nothing newer replaced it.
-        if (inFlight === pending) inFlight = null;
-      }
-    };
-
-    // The pause/stop flush (see flushFinalCaptureRef). Settles the in-flight
-    // upload FIRST: the final capture resets the streak anchor, and a
-    // still-unconfirmed full minute confirmed after that reset would credit
-    // nothing. Then cuts whatever the recorder holds (or grabs a JPEG) and
-    // uploads it flagged `final`.
-    flushFinalCaptureRef.current = async () => {
-      await settleInFlight();
-      let payload: UploadPayload | null =
-        (await clipRecorderRef.current?.cut().catch(() => null)) ?? null;
-      if (!payload) payload = await takeScreenshotRef.current();
-      if (!payload) return;
-      await uploadWithFallback({ ...payload, final: true });
-    };
-
-    const scheduleNext = (nextExpectedAt: string | null) => {
-      if (cancelled) return;
-      // nextExpectedAt is SERVER wall-clock — subtract our estimate of the
-      // server's now, never the raw local clock. Raw Date.now() baked the
-      // machine's clock skew into every delay: >30s of skew pushed every
-      // capture out of the ±30s credit window (trackedSeconds stuck at 0),
-      // and >60s pinned the delay at the clamp below, halving the capture
-      // rate and with it the compiled video's length.
-      const now = serverNowRef.current();
-      const target = nextExpectedAt
-        ? Date.parse(nextExpectedAt)
-        : now + config.capture.intervalMs;
-      // Defensive upper bound: never sleep longer than 2x interval.
-      // Matches desktop's same clamp — protects against malformed
-      // server timestamps.
-      const uncapped = Math.max(0, target - now);
-      if (uncapped > config.capture.intervalMs * 2) {
-        // With the offset applied this should never bind for clock skew —
-        // if it fires, something else is feeding us bad targets, and
-        // silence here is how the skew bug ran unnoticed for three months.
-        console.warn(
-          `[lookout] next-capture delay ${uncapped}ms exceeds the ` +
-            `2x-interval clamp — capping to ${config.capture.intervalMs * 2}ms`,
-        );
-      }
-      const delay = Math.min(config.capture.intervalMs * 2, uncapped);
-      if (intervalRef.current !== null) clearTimeout(intervalRef.current);
-      intervalRef.current = setTimeout(tick, delay);
-    };
-
-    const tick = async () => {
-      if (cancelled) return;
-
-      // Settle the previous upload BEFORE cutting, so uploads stay ordered.
-      // Every step of it is deadline-bounded (UPLOAD_STEP_TIMEOUT_MS), so a
-      // dead socket can't park the loop here indefinitely.
-      let nextExpectedAt = await settleInFlight();
-      if (cancelled) return;
-
-      try {
-        // cut() finalizes the last interval's clip and immediately starts
-        // recording the next one. A null cut (empty clip, encoder hiccup)
-        // falls back to a single JPEG so the tick — and the session's
-        // credit streak — never skips a beat.
-        let payload: UploadPayload | null =
-          (await clipRecorderRef.current?.cut()) ?? null;
-        if (payload?.truncated) {
-          console.warn(
-            "[lookout] clip hit its frame cap — uploads are running behind " +
-              "the capture cadence, so this clip covers a longer window.",
-          );
-        }
-        if (!payload) {
-          payload = await takeScreenshotRef.current();
-        }
-        if (payload) {
-          callbacksRef.current.onCapture?.(payload);
-          // Fire and hold, don't await: recording of the next clip is
-          // already underway and must not wait on this.
-          inFlight = uploadWithFallback(payload);
-          // Refine the schedule the moment the confirm lands, if that
-          // happens before the next tick — the same role desktop's third
-          // select arm plays. Rejections are handled by settleInFlight;
-          // swallow here so this never becomes an unhandled rejection.
-          const pending = inFlight;
-          pending
-            .then((result) => {
-              if (cancelled || inFlight !== pending) return;
-              inFlight = null;
-              scheduleNext(result.nextExpectedAt);
-            })
-            .catch(() => {});
-        }
-      } catch (err) {
-        // Capture-side failure (canvas, encoder, no video). The upload
-        // path has its own handling.
-        console.warn("[lookout] capture cycle failed:", err);
-      }
-      if (cancelled) return;
-
-      // Provisional: one interval out, refined above when the confirm
-      // lands. When the upload outlives the interval the next tick settles
-      // it first, which is what keeps uploads serialized.
-      scheduleNext(nextExpectedAt);
-    };
-
-    // Fire the seed tick immediately, clips or not. The first capture is
-    // the streak seed: it credits 0 seconds, plants the anchor every later
-    // 60s credit mark is measured from, and the compiler drops it from the
-    // video regardless — so its content doesn't matter, but its TIMING is
-    // the session's `startedAt`. The old CLIP_FIRST_CUT_DELAY_MS wait
-    // (giving the opening clip a few frames) shifted the whole credit
-    // schedule ~8s past record-press: those seconds were never credited,
-    // and the display timer sat frozen at 1:00 until the first real credit
-    // landed at ~68s. An immediate cut yields an empty/single-frame clip,
-    // which falls back to a plain JPEG below — exactly the legacy seed.
-    tick();
-
-    return () => {
-      capturingRef.current = false;
-      cancelled = true;
-      flushFinalCaptureRef.current = null;
-      if (intervalRef.current !== null) {
-        clearTimeout(intervalRef.current);
-        intervalRef.current = null;
-      }
-      clipRecorderRef.current?.stop();
-      clipRecorderRef.current = null;
-    };
-  }, [
-    capture.isSharing,
-    isActive,
-    config.capture.intervalMs,
-    config.capture.maxWidth,
-    config.capture.maxHeight,
-    config.capture.jpegQuality,
-    captureMode,
-    session.clipsEnabled,
-    session.frameIntervalMs,
-    screenCapture.getVideo,
-  ]);
-
-  // Auto-resume when screen sharing *starts* while session is paused
-  // (e.g., user clicked "Share Screen & Resume" after a reload).
-  // Only triggers on the false→true transition of isSharing, so that
-  // calling pause() while already sharing does not immediately re-resume.
+  // The stream ended while recording (the user hit the browser's "Stop
+  // sharing", the camera was unplugged): pause, which flushes the last
+  // frame and parks the session so it doesn't accrue dead time.
   const wasSharingRef = useRef(capture.isSharing);
   useEffect(() => {
-    const wasSharing = wasSharingRef.current;
+    const was = wasSharingRef.current;
     wasSharingRef.current = capture.isSharing;
-
-    if (!wasSharing && capture.isSharing && session.status === "paused") {
-      intentionalPauseRef.current = false;
-      session.resume().then(() => {
-        callbacksRef.current.onResume?.();
-      }).catch(() => {});
+    if (was && !capture.isSharing && phase === "recording") {
+      recorderRef.current?.pause().catch(() => {});
+      callbacksRef.current.onShareStop?.();
     }
-  }, [capture.isSharing, session.status, session.resume]);
+  }, [capture.isSharing, phase]);
 
-  // Auto-pause when screen sharing ends unexpectedly (mid-session loss)
-  // OR on mount when session is active but stream was lost (page reload).
-  // capturingRef.current distinguishes mid-session loss from mount recovery,
-  // but both cases should auto-pause so the server doesn't stay active with no captures.
+  // Sharing started while the session is paused ("Share screen & resume"
+  // after a reload, or the camera coming up): resume.
+  const intentionalPauseRef = useRef(false);
   useEffect(() => {
-    if (!capture.isSharing && session.status === "active") {
-      let flushed: Promise<void> = Promise.resolve();
-      if (capturingRef.current) {
-        // Mid-session: stream ended while capturing
-        capturingRef.current = false;
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-        // The stream is gone but the recorder still holds the frames it
-        // already grabbed — flush them as the final partial capture before
-        // pausing, then discard the recorder.
-        flushed = runFinalFlush().then(() => {
-          clipRecorderRef.current?.stop();
-          clipRecorderRef.current = null;
-        });
-        callbacksRef.current.onShareStop?.();
-      }
-      // Both cases: pause the server session so it doesn't accumulate dead
-      // time — after the flush, which a paused session would reject.
-      flushed.finally(() => {
-        session.pause().catch(() => {});
-      });
+    if (capture.isSharing && phase === "paused" && !intentionalPauseRef.current) {
+      recorderRef.current
+        ?.resume()
+        .then(() => callbacksRef.current.onResume?.())
+        .catch(() => {});
     }
-  }, [capture.isSharing, session.status, session.pause, runFinalFlush]);
-
-  // Sync session status when uploader detects a 409 conflict
-  useEffect(() => {
-    if (uploader.sessionConflict) {
-      session.syncStatus().then(() => uploader.resetConflict());
-    }
-  }, [uploader.sessionConflict, session.syncStatus, uploader.resetConflict]);
-
-  // Auto-resume when server paused the session while we're still sharing
-  // (e.g., stale lastScreenshotAt triggered the cron auto-pause).
-  // Intentional user pauses are excluded via intentionalPauseRef.
-  useEffect(() => {
-    if (capture.isSharing && session.status === "paused" && !intentionalPauseRef.current) {
-      session.resume().then(() => {
-        callbacksRef.current.onResume?.();
-      }).catch(() => {});
-    }
-  }, [capture.isSharing, session.status, session.resume]);
+  }, [capture.isSharing, phase]);
 
   // Auto-start
   useEffect(() => {
-    if (
-      config.autoStart &&
-      !capture.isSharing &&
-      (session.status === "pending" || session.status === "active")
-    ) {
+    if (config.autoStart && !capture.isSharing && isActive) {
       capture.startSharing().catch(() => {});
     }
-  }, [config.autoStart, session.status, capture.isSharing, capture.startSharing]);
+  }, [config.autoStart, isActive, capture.isSharing, capture.startSharing]);
 
-  // Actions
+  // ── Actions ──────────────────────────────────────────────────────
   const startSharing = useCallback(async () => {
     try {
+      intentionalPauseRef.current = false;
       await capture.startSharing();
       callbacksRef.current.onShareStart?.();
-      // Auto-resume is handled by the useEffect above reacting to
-      // capture.isSharing becoming true while session.status is "paused"
+      // The resume is the effect above, on isSharing turning true.
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       let message: string;
@@ -524,106 +325,82 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
         message = e.message || (isCamera ? "Failed to start camera." : "Failed to start screen sharing.");
       }
       callbacksRef.current.onError?.(new Error(message), "startSharing");
-      session.setError(message);
+      setLocalError(message);
     }
-  }, [capture.startSharing, session, captureMode]);
+  }, [capture, captureMode]);
 
   const stopSharing = useCallback(() => {
     capture.stopSharing();
-    callbacksRef.current.onShareStop?.();
-  }, [capture.stopSharing]);
+    // The pause is the effect above, on isSharing turning false.
+  }, [capture]);
 
   const pause = useCallback(async () => {
-    if (pauseInFlightRef.current) return;
-    pauseInFlightRef.current = true;
+    const recorder = recorderRef.current;
+    if (!recorder) return;
     intentionalPauseRef.current = true;
-    setTimerHoldAt(Date.now());
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    // Flush the partial minute while the recorder (and the session's
-    // active status) are still alive, THEN discard the recorder — don't
-    // keep grabbing frames while the pause request is in flight.
-    await runFinalFlush();
-    clipRecorderRef.current?.stop();
-    clipRecorderRef.current = null;
-    capturingRef.current = false;
     try {
-      await session.pause();
-      callbacksRef.current.onPause?.({ totalActiveSeconds: session.totalActiveSeconds });
-    } finally {
-      pauseInFlightRef.current = false;
+      const state = (await recorder.pause()) as RecorderState;
+      callbacksRef.current.onPause?.({ totalActiveSeconds: state.trackedSeconds });
+    } catch (err) {
+      // A refused action (already pausing, nothing open) is not an error
+      // for the page; a failed one is reported by the state's actionError.
+      console.warn("[lookout] pause:", recorderErrorMessage(err));
     }
-  }, [session.pause, session.totalActiveSeconds, runFinalFlush]);
+  }, []);
 
   const resume = useCallback(async () => {
-    if (resumeInFlightRef.current) return;
-    resumeInFlightRef.current = true;
+    const recorder = recorderRef.current;
+    if (!recorder) return;
     intentionalPauseRef.current = false;
-    setTimerHoldAt(null);
     try {
-      await session.resume();
+      await recorder.resume();
       callbacksRef.current.onResume?.();
-    } finally {
-      resumeInFlightRef.current = false;
+    } catch (err) {
+      console.warn("[lookout] resume:", recorderErrorMessage(err));
     }
-  }, [session.resume]);
+  }, []);
 
-  const stop = useCallback(async (options?: { name?: string; edit?: boolean }) => {
-    if (stopInFlightRef.current) return;
-    stopInFlightRef.current = true;
-    setTimerHoldAt(Date.now());
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    // Flush the partial minute before the stream and the session go away —
-    // the tail of the recording credits (and appears in the video) instead
-    // of being discarded.
-    await runFinalFlush();
-    clipRecorderRef.current?.stop();
-    clipRecorderRef.current = null;
-    capturingRef.current = false;
-    capture.stopSharing();
-    try {
-      await session.stop(options?.name, { edit: options?.edit });
-      callbacksRef.current.onStop?.({
-        trackedSeconds: session.trackedSeconds,
-        totalActiveSeconds: session.totalActiveSeconds,
-      });
-    } finally {
-      stopInFlightRef.current = false;
-    }
-  }, [session.stop, session.trackedSeconds, session.totalActiveSeconds, capture.stopSharing, runFinalFlush]);
-
-  // Fetch video URL when session reaches "complete"
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (session.status !== "complete") return;
-    let cancelled = false;
-    client.getVideo().then((data: { videoUrl: string }) => {
-      if (!cancelled) {
-        setVideoUrl(data.videoUrl);
-        callbacksRef.current.onComplete?.({ videoUrl: data.videoUrl });
+  const stop = useCallback(
+    async (options?: { name?: string; edit?: boolean }) => {
+      const recorder = recorderRef.current;
+      if (!recorder) return;
+      intentionalPauseRef.current = true;
+      // Stop = pause (flushing the partial minute first) into the prompt,
+      // then finish: rename, stop with retries, done. Both are the
+      // recorder's; this just chains them for a page that has already
+      // asked its own question.
+      const current = recorder.state() as RecorderState | undefined;
+      if (current && current.phase !== "stopPrompting") {
+        await recorder.beginStop();
       }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [session.status, client]);
+      const outcome = (await recorder.finishStop(options?.name ?? null, options?.edit ?? false)) as StopOutcome;
+      capture.stopSharing();
+      const after = recorder.state() as RecorderState | undefined;
+      setTerminalStatus(outcome.status as SessionStatus);
+      callbacksRef.current.onStop?.({
+        trackedSeconds: after?.trackedSeconds ?? 0,
+        totalActiveSeconds: after?.trackedSeconds ?? 0,
+      });
+    },
+    [capture],
+  );
 
-  const isRecording = capture.isSharing && (session.status === "active" || session.status === "pending");
+  // ── State ────────────────────────────────────────────────────────
+  const displaySeconds = useRecorderClock(recorderState?.clock ?? null);
+  const trackedSeconds = Math.max(recorderState?.trackedSeconds ?? 0, terminalTracked ?? 0);
+  const isRecording = capture.isSharing && isActive;
 
   const state: LookoutState = {
-    status: session.status,
+    status,
     isSharing: capture.isSharing,
     isRecording,
-    trackedSeconds: bestTrackedSeconds,
-    displaySeconds,
-    screenshotCount: Math.max(session.screenshotCount, uploader.uploads.completed),
-    uploads: uploader.uploads,
-    lastScreenshotUrl: uploader.lastScreenshotUrl,
+    trackedSeconds,
+    displaySeconds: isActive ? displaySeconds : trackedSeconds,
+    screenshotCount: recorderState?.captureCount ?? 0,
+    uploads,
+    lastScreenshotUrl,
     videoUrl,
-    error: session.error,
+    error,
     captureMode,
     availableCameras: cameraCapture.devices,
     selectedCameraId: cameraCapture.selectedDeviceId,

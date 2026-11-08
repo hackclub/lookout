@@ -49,12 +49,9 @@ export type { SessionDetailProps } from "./components/SessionDetail.js";
 export { useLookout } from "./hooks/useLookout.js";
 export { useScreenCapture } from "./hooks/useScreenCapture.js";
 export { useCameraCapture } from "./hooks/useCameraCapture.js";
-export { useUploader } from "./hooks/useUploader.js";
-export type { UploadPayload } from "./hooks/useUploader.js";
 export { ClipRecorder } from "./hooks/clipRecorder.js";
 export type { ClipCaptureResult, ClipRecorderOptions } from "./hooks/clipRecorder.js";
 export { drawScaledHQ } from "./hooks/hqScale.js";
-export { useSession } from "./hooks/useSession.js";
 export {
   useSessionTimer,
   useSessionTimerState,
@@ -64,9 +61,37 @@ export {
   formatTrackedTime,
 } from "./hooks/useSessionTimer.js";
 export type { SessionTimerState } from "./hooks/useSessionTimer.js";
+export { isTooShortToCompile } from "./hooks/tooShortToCompile.js";
+// Deprecated: superseded by the recorder engine inside useLookout(), kept
+// so programs built on them keep working.
+export { useUploader } from "./hooks/useUploader.js";
+export type { UploadPayload } from "./hooks/useUploader.js";
+export { useSession } from "./hooks/useSession.js";
 export { computeBestTrackedSeconds } from "./hooks/computeBestTracked.js";
 export type { BestTrackedInputs } from "./hooks/computeBestTracked.js";
-export { isTooShortToCompile } from "./hooks/tooShortToCompile.js";
+
+// The shared recorder (WebAssembly) and its state, for surfaces that
+// draw the recording themselves.
+export {
+  deriveRecorderDisplaySeconds,
+  useRecorderClock,
+  isRecorderError,
+  recorderErrorMessage,
+} from "./wasm/recorderState.js";
+export type {
+  RecorderState,
+  RecorderPhase,
+  RecorderClock,
+  RecordingSource,
+  ControlMode,
+  CaptureSourceLoss,
+  RecorderNotice,
+  StopOutcome,
+  RecorderErrorPayload,
+} from "./wasm/recorderState.js";
+export { createBrowserHost, browserRequest } from "./wasm/browserHost.js";
+export type { BrowserHostOptions, BrowserCaptureSettings } from "./wasm/browserHost.js";
+export { loadRecorderModule, createRecorder, setWasmInput, setRecorderTiming } from "./wasm/loadRecorder.js";
 
 // Gallery hooks
 export { useTokenStore } from "./hooks/useTokenStore.js";

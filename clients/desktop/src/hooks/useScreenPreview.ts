@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import type { CaptureSource } from "./useNativeCapture.js";
+import type { CaptureSource } from "../recorder.js";
 
 const sharedPreviewUrlCache = new Map<string, string>();
 const previewListeners = new Map<string, Set<(url: string) => void>>();

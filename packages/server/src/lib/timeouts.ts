@@ -11,6 +11,7 @@ import {
 } from "./queue.js";
 import { cleanupRateLimits } from "./timing.js";
 import { publishHeldSession } from "./publish.js";
+import { purgeDeletedSessions } from "./deletion.js";
 import {
   AUTO_PAUSE_AFTER_MINUTES,
   AUTO_STOP_AFTER_MINUTES,
@@ -35,6 +36,7 @@ export async function registerTimeoutJobs() {
   await boss.schedule(CHECK_TIMEOUTS_JOB, "* * * * *");
   await boss.work(CHECK_TIMEOUTS_JOB, async () => {
     await checkTimeouts();
+    await purgeDeletedSessions();
     cleanupRateLimits();
   });
 

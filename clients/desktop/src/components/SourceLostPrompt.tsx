@@ -14,7 +14,7 @@
  */
 
 import { Button, Overlay, colors, spacing, fontSize, fontWeight } from "@lookout/react";
-import type { CaptureSourceLoss } from "../hooks/useNativeCapture.js";
+import type { CaptureSourceLoss } from "../recorder.js";
 
 interface SourceLostPromptProps {
   loss: CaptureSourceLoss;

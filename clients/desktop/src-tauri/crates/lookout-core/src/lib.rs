@@ -3,30 +3,42 @@
 //! Everything a Lookout desktop client has to do that is *not* drawing a
 //! window lives here: enumerating monitors and windows, grabbing and
 //! redacting frames, encoding per-minute H.264 clips, the self-scheduling
-//! capture loop with its sleep/pause recovery and final flush, the
-//! presigned-URL upload pipeline with its retry policy and clock-offset
+//! capture loop with its sleep/pause recovery and final flush, the ordered
+//! uploader with its backlog (captures taken during an outage are
+//! delivered when the link is back, stamped with when they were taken),
+//! the presigned-URL upload pipeline with its retry policy and clock-offset
 //! estimate, the menu-bar recording clock, and every call to the server
 //! API. The Tauri app in `src-tauri/src` is one shell over this crate; a GTK
 //! or Qt shell would link the same crate and implement [`Frontend`].
+//!
+//! This crate is the desktop host of three platform-free crates it
+//! re-exports: `lookout-session` (the recording's state, clock, schedule
+//! and timing as pure logic), `lookout-protocol` (the server API and upload
+//! pipeline over a `Transport` the host supplies) and `lookout-recorder`
+//! (the recorder, the capture loop and the uploader over a `Host`). A
+//! browser or device client links those three and brings its own capture
+//! and HTTP — `lookout-web` is the browser host.
 //!
 //! The contract is deliberately small:
 //!
 //! - Construct a [`Core`] with a [`Frontend`] implementation and a client
 //!   name/version (the telemetry string sent to the server).
-//! - Call [`Core::configure`] with the session token + API base URL, then
-//!   [`Core::start_capture_loop`] / [`Core::stop_capture_loop`].
-//! - Receive progress, previews, credited seconds and failures as
-//!   [`CoreEvent`]s, and the clock text through
-//!   [`Frontend::set_tray_title`].
-//! - Drive the session itself (status, pause, resume, stop, rename, video,
-//!   cut editing) and read the program registry / announcement through the
-//!   [`api`] methods, so no shell speaks HTTP to the server on its own.
-//!   Session *creation* happens on the program's website and reaches a
-//!   shell as a `lookout://` deep link with the token.
+//! - Open a recording with [`Core::recorder_open`] and drive it with the
+//!   `recorder_*` actions; draw the [`RecorderState`] published as
+//!   [`CoreEvent::RecorderState`]. The capture loop, the session's status,
+//!   the clock and the order of operations behind every button are the
+//!   core's — see [`recorder`].
+//! - Receive previews, notices and the raw loop events as [`CoreEvent`]s,
+//!   and the clock text through [`Frontend::set_tray_title`].
+//! - Read the program registry / announcement, and drive sessions that
+//!   aren't being recorded here, through the [`api`] methods, so no shell
+//!   speaks HTTP to the server on its own. Session *creation* happens on
+//!   the program's website and reaches a shell as a `lookout://` deep link
+//!   with the token.
 //!
-//! Anything that spawns (`start_capture_loop`, `start_tray_timer`,
-//! `start_tray_ticker`, the screencast portal) uses `tokio::spawn` and so
-//! must be called from inside a tokio runtime.
+//! Anything that spawns (the recorder actions, `start_capture_loop`, the
+//! screencast portal) uses `tokio::spawn` and so must be called from inside
+//! a tokio runtime.
 
 pub mod api;
 pub mod apps;
@@ -34,15 +46,31 @@ pub mod capture;
 pub mod capture_diagnostics;
 pub mod capture_loop;
 pub mod clips;
-pub mod clock_offset;
 mod crop;
+pub mod host;
+#[cfg(test)]
+pub(crate) mod mock_server;
 mod pipewire;
 #[cfg(target_os = "macos")]
 pub mod power;
+pub mod recorder;
+#[cfg(test)]
+mod recorder_stress;
+#[cfg(test)]
+mod credit_sim;
 pub mod screencast;
 pub mod sources;
 pub mod timer;
+pub mod transport;
 pub mod upload;
+
+// The pure session logic lives in `lookout-session`, the orchestration in
+// `lookout-recorder`; these aliases keep every `lookout_core::` path a
+// shell or a test has always used.
+pub use lookout_session::clock;
+pub use lookout_session::clock_offset;
+pub use lookout_session::timing as tuning;
+pub use lookout_session::{CaptureSource, SessionConfig};
 
 /// Test-only helpers shared by the per-module leak tests.
 #[cfg(test)]
@@ -97,21 +125,37 @@ pub(crate) mod test_support {
     }
 }
 
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, OnceLock};
+use serde::Serialize;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 
 pub use api::{ApiError, ApiResult};
 pub use capture_loop::{
-    CaptureLoopHandle, CapturePreviewFrame, CaptureSessionTerminated, CaptureSourceLost,
-    CaptureTickError, CaptureTickResult,
+    CaptureLoopHandle, CaptureLoopSpec, CapturePreviewFrame, CaptureSessionTerminated,
+    CaptureSourceLost, CaptureTickError, CaptureTickResult, FrameSource,
+    SessionClipCapabilities,
 };
-pub use screencast::ScreencastRevoked;
+pub use clock::{ClockState, MAX_INTERPOLATION_SECS, TIMER_INTERPOLATION_SLACK_SECS};
+pub use lookout_recorder::{CoreEvent, Recorder, ScreencastRevoked};
+pub use recorder::{
+    ControlMode, FinishOutcome, PickedSource, RecorderError, RecorderNotice, RecorderPhase,
+    RecorderState, RecordingSource, SourceLoss, SourceLossReason, StopOutcome,
+};
 pub use upload::CaptureUploadResult;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SessionConfig {
-    pub token: String,
-    pub api_base_url: String,
+/// A boxed, sendable future — what the camera hooks on [`Frontend`] return,
+/// so the trait stays object-safe without an async-trait dependency.
+pub type BoxFuture<'a, T> = lookout_protocol::transport::BoxFuture<'a, T>;
+
+/// One frame off the shell's camera pipeline: a JPEG already scaled to fit
+/// the capture bounds, plus its dimensions. The core decodes it when it
+/// needs pixels (clip encoding, the live preview) and uploads the bytes as
+/// they are otherwise.
+#[derive(Clone, Debug)]
+pub struct CameraFrame {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Serialize)]
@@ -121,17 +165,6 @@ pub struct CaptureResult {
     pub width: u32,
     pub height: u32,
     pub size_bytes: usize,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum CaptureSource {
-    #[serde(rename = "monitor")]
-    Monitor { id: u32 },
-    #[serde(rename = "window")]
-    Window { id: u32 },
-    #[serde(rename = "pipewire")]
-    PipeWire { id: u32 },
 }
 
 /// What the core needs from whatever is drawing the UI.
@@ -150,56 +183,46 @@ pub trait Frontend: Send + Sync + 'static {
 
     /// Show the recording clock text (`mm:ss` or `h:mm:ss`) in the menu bar
     /// / tray, and whether the recording is paused. Called once a second
-    /// while a session is recording, but only when the text changed (or
-    /// right after a pause).
+    /// while a recording is open, but only when the text or the paused flag
+    /// changed. This is the ONLY writer of the tray title: two writers
+    /// interpolating to different seconds is what flickered the menu bar
+    /// between "0m"/"1m" at every minute boundary.
     fn set_tray_title(&self, time_text: &str, paused: bool);
-}
 
-/// Everything the core reports to the shell. [`CoreEvent::name`] is the
-/// stable wire name each event has always had on the Tauri event bus, for
-/// shells that forward these over some other bus as JSON.
-#[derive(Clone)]
-pub enum CoreEvent {
-    /// Human-readable upload pipeline progress (`"uploading 84KB to R2..."`).
-    Progress(String),
-    /// Authoritative credited seconds learned during sleep recovery.
-    TrackedSeconds(i64),
-    /// The server reports the session in a terminal state; the loop stopped.
-    SessionTerminated(CaptureSessionTerminated),
-    /// An upload tick confirmed.
-    TickResult(CaptureTickResult),
-    /// An upload tick failed (after retries); the loop carries on.
-    TickError(CaptureTickError),
-    /// The capture source is gone for good and the loop gave up.
-    SourceLost(CaptureSourceLost),
-    /// A live-preview frame, between upload ticks, while previews are wanted.
-    PreviewFrame(CapturePreviewFrame),
-    /// The compositor tore a screencast session down (Linux portal).
-    ScreencastRevoked(ScreencastRevoked),
-}
+    // ── Camera (optional) ─────────────────────────────────────────────
+    //
+    // Camera sessions run through the same capture loop as screen sessions
+    // — the cadence, sleep recovery, pause flush, clips and upload pipeline
+    // — with only the *frame* coming from the shell. The Tauri shell answers
+    // these from the webview's getUserMedia stream; a shell with a native
+    // camera stack answers them itself; a headless shell leaves the
+    // defaults, which refuse camera sources.
 
-impl CoreEvent {
-    /// The event's wire name (the Tauri event channel it is emitted on).
-    pub fn name(&self) -> &'static str {
-        match self {
-            CoreEvent::Progress(_) => "capture-progress",
-            CoreEvent::TrackedSeconds(_) => "capture-tracked-seconds",
-            CoreEvent::SessionTerminated(_) => "capture-session-terminated",
-            CoreEvent::TickResult(_) => "capture-tick-result",
-            CoreEvent::TickError(_) => "capture-tick-error",
-            CoreEvent::SourceLost(_) => "capture-source-lost",
-            CoreEvent::PreviewFrame(_) => "capture-preview-frame",
-            CoreEvent::ScreencastRevoked(_) => "screencast-revoked",
-        }
+    /// Open the camera and wait until it is producing frames. Called before
+    /// the capture loop starts (and again on resume), so the very first tick
+    /// has a frame to upload: the seed capture is what activates the session
+    /// and anchors its credit schedule, and a tick that finds no frame would
+    /// push that a full interval out.
+    fn camera_start(&self, device_id: &str) -> BoxFuture<'static, Result<(), String>> {
+        let _ = device_id;
+        Box::pin(async { Err("this shell has no camera backend".to_string()) })
     }
+
+    /// Grab one frame from the open camera.
+    fn camera_grab_frame(&self, device_id: &str) -> BoxFuture<'static, Result<CameraFrame, String>> {
+        let _ = device_id;
+        Box::pin(async { Err("this shell has no camera backend".to_string()) })
+    }
+
+    /// Release the camera. Called on pause, stop and close — the light must
+    /// go off when the recording isn't recording.
+    fn camera_stop(&self) {}
 }
 
-/// The engine. One per process, shared behind an [`Arc`]: the capture loop,
-/// the clock task and the screencast portal tasks hold clones while they run.
+/// The engine. One per process, shared behind an [`Arc`]. Everything about
+/// the recording is the [`Recorder`] it derefs to; what is here is the
+/// desktop's own: the screencast sessions, the Filtered Apps list, the host.
 pub struct Core {
-    /// Where uploads go: session token + API base URL. `None` until
-    /// [`Core::configure`] is called.
-    pub config: Mutex<Option<SessionConfig>>,
     /// Maps PipeWire node_id -> the RawFd of the screencast session that owns it.
     /// This allows streams from different portal sessions to coexist (e.g. when
     /// the user incrementally adds sources via the "+" button).
@@ -215,24 +238,15 @@ pub struct Core {
     pub screencast_sessions: Mutex<Vec<screencast::ScreencastSession>>,
     /// App names whose windows should be blacked out in monitor captures.
     pub blacklisted_apps: Mutex<Vec<String>>,
-    /// Active Rust-side capture loop (if running). Holds the cancel channel
-    /// and JoinHandle so we can stop it from `stop_capture_loop`.
-    pub(crate) capture_loop: Mutex<Option<CaptureLoopHandle>>,
-    /// Rust-side 1s tray title ticker — keeps the menu bar time accurate
-    /// even when the WebView's JS timers are throttled.
-    pub(crate) tray_timer: Mutex<Option<timer::TrayTimerHandle>>,
-    /// Running estimate of `serverNow - clientNow`. Fed by the `serverTime`
-    /// on every upload response; read wherever we stamp a capture or turn a
-    /// server wall-clock target into a local delay. This is what makes a
-    /// wrong system clock cost nothing: without it, any skew past ±30s
-    /// zeroed the credit and past 60s halved the capture rate (the skew
-    /// leaked into every `nextExpectedAt - now` delay and hit the
-    /// 2x-interval clamp).
-    pub clock_offset: Mutex<clock_offset::ClockOffset>,
-    pub(crate) frontend: Arc<dyn Frontend>,
-    client_name: String,
-    client_version: String,
-    client_info: OnceLock<String>,
+    recorder: Arc<Recorder>,
+    host: Arc<host::DesktopHost>,
+}
+
+impl Deref for Core {
+    type Target = Recorder;
+    fn deref(&self) -> &Recorder {
+        &self.recorder
+    }
 }
 
 impl Core {
@@ -244,39 +258,93 @@ impl Core {
         client_name: impl Into<String>,
         client_version: impl Into<String>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            config: Mutex::new(None),
-            #[cfg(target_os = "linux")]
-            pipewire_fds: Mutex::new(std::collections::HashMap::new()),
-            #[cfg(target_os = "linux")]
-            screencast_sessions: Mutex::new(Vec::new()),
-            blacklisted_apps: Mutex::new(Vec::new()),
-            capture_loop: Mutex::new(None),
-            tray_timer: Mutex::new(None),
-            clock_offset: Mutex::new(clock_offset::ClockOffset::new()),
-            frontend,
-            client_name: client_name.into(),
-            client_version: client_version.into(),
-            client_info: OnceLock::new(),
+        let client_name = client_name.into();
+        let client_version = client_version.into();
+        Arc::new_cyclic(|weak| {
+            let host = Arc::new(host::DesktopHost::new(
+                frontend,
+                weak.clone(),
+                client_name,
+                client_version,
+            ));
+            let recorder = Recorder::new(host.clone());
+            Self {
+                #[cfg(target_os = "linux")]
+                pipewire_fds: Mutex::new(std::collections::HashMap::new()),
+                #[cfg(target_os = "linux")]
+                screencast_sessions: Mutex::new(Vec::new()),
+                blacklisted_apps: Mutex::new(Vec::new()),
+                recorder,
+                host,
+            }
         })
     }
 
     /// The shell this core reports to.
     pub fn frontend(&self) -> &dyn Frontend {
-        &*self.frontend
+        &*self.host.frontend
     }
 
-    pub(crate) fn emit(&self, event: CoreEvent) {
-        self.frontend.emit(event);
+    /// The recorder behind this core (also reachable by deref).
+    pub fn recorder(&self) -> &Arc<Recorder> {
+        &self.recorder
+    }
+
+    /// This core's HTTP transport, for the protocol crate's calls.
+    pub fn transport(&self) -> &dyn lookout_protocol::Transport {
+        lookout_recorder::host::Host::transport(&*self.host)
+    }
+
+    /// The telemetry string sent with every upload-url request.
+    pub fn client_info(&self) -> &str {
+        lookout_recorder::host::Host::client_info(&*self.host)
+    }
+
+    // ── Recorder actions (the `Arc<Recorder>` receivers, forwarded) ──
+
+    pub async fn recorder_open(
+        self: &Arc<Self>,
+        cfg: SessionConfig,
+        source: RecordingSource,
+    ) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_open(cfg, source).await
+    }
+
+    pub async fn recorder_pause(self: &Arc<Self>) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_pause().await
+    }
+
+    pub async fn recorder_resume(self: &Arc<Self>) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_resume().await
+    }
+
+    pub async fn recorder_begin_stop(self: &Arc<Self>) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_begin_stop().await
+    }
+
+    pub async fn recorder_cancel_stop(self: &Arc<Self>) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_cancel_stop().await
+    }
+
+    pub async fn recorder_finish_stop(
+        self: &Arc<Self>,
+        name: Option<String>,
+        edit: bool,
+    ) -> Result<StopOutcome, RecorderError> {
+        self.recorder.recorder_finish_stop(name, edit).await
+    }
+
+    pub async fn recorder_close(self: &Arc<Self>) {
+        self.recorder.recorder_close().await
+    }
+
+    pub fn start_capture_loop(self: &Arc<Self>, spec: CaptureLoopSpec) -> Result<u64, String> {
+        self.recorder.start_capture_loop(spec)
     }
 
     /// Initialize the session config so the core knows where the server is.
     pub fn configure(&self, token: String, api_base_url: String) -> Result<(), String> {
-        let mut config = self.config.lock().map_err(|e| e.to_string())?;
-        *config = Some(SessionConfig {
-            token,
-            api_base_url,
-        });
+        self.recorder.configure(token, api_base_url);
         Ok(())
     }
 
@@ -319,8 +387,7 @@ pub fn base64_decode(b64: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn base64_encode(data: &[u8]) -> String {
-    use base64_engine::*;
-    ENGINE.encode(data)
+    lookout_recorder::base64_encode(data)
 }
 
 mod base64_engine {

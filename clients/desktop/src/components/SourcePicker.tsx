@@ -13,7 +13,7 @@ import {
 } from "@lookout/react";
 import { CaptureErrorDialog } from "./CaptureErrorDialog.js";
 import { isCancelledCaptureError } from "../captureDiagnosis.js";
-import type { CaptureSource } from "../hooks/useNativeCapture.js";
+import type { CaptureSource } from "../recorder.js";
 import { useScreenPreview } from "../hooks/useScreenPreview.js";
 import { enumerateCameras } from "../hooks/useCameraCapture.js";
 

@@ -219,11 +219,21 @@ export function useCameraCapture(overrides?: CaptureSettings) {
     };
   }, []);
 
+  // Stable accessor for the live capture <video> — for the capture host,
+  // which needs the current element inside callbacks without re-render
+  // staleness.
+  const getVideo = useCallback(() => videoRef.current, []);
+
+  /** Whether a stream is live right now (preview or recording). */
+  const hasStream = useCallback(() => streamRef.current !== null, []);
+
   return {
     isSharing,
     startSharing,
     takeScreenshot,
     stopSharing,
+    getVideo,
+    hasStream,
     // Camera-specific:
     devices,
     selectedDeviceId,

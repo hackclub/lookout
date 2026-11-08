@@ -153,6 +153,8 @@ export interface ResolvedConfig {
   callbacks: LookoutCallbacks;
   statusPollIntervalMs: number;
   autoStart: boolean;
+  /** The host program's name, for client telemetry. */
+  appName?: string;
 }
 
 // ─── Lookout State ──────────────────────────────────────

@@ -3,7 +3,6 @@ import * as Sentry from "@sentry/node";
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: "worker",
-  sendDefaultPii: true,
   tracesSampleRate: 0.2,
 });
 
@@ -11,7 +10,7 @@ import PgBoss from "pg-boss";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq } from "drizzle-orm";
-import { compileTimelapse } from "./compile.js";
+import { compileTimelapse, DeletionScheduledError } from "./compile.js";
 import * as schema from "./schema.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -50,6 +49,10 @@ await boss.work<{ sessionId: string }>(
           `Compilation complete for session ${sessionId}: ${result.videoR2Key}`,
         );
       } catch (error) {
+        if (error instanceof DeletionScheduledError) {
+          console.log(`Skipping session ${sessionId}: scheduled for deletion`);
+          continue;
+        }
         console.error(
           `Compilation failed for session ${sessionId}:`,
           error,

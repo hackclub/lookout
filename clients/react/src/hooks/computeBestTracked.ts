@@ -1,4 +1,7 @@
 /**
+ * @deprecated `useLookout()` takes tracked seconds straight from
+ * the recorder engine and no longer needs this; kept for existing callers.
+ *
  * Computes the "best" tracked-seconds value to feed into useSessionTimer.
  *
  * The ONLY legitimate inputs are server-derived values:

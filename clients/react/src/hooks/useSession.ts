@@ -22,6 +22,12 @@ interface SessionState {
   error: string | null;
 }
 
+/**
+ * @deprecated `useLookout()` now drives the session through the
+ * shared recorder engine and no longer uses this hook; it is kept, working
+ * as before, for programs that built their own recorder on it. Prefer
+ * `useLookout()`, or `createLookoutClient()` for raw API calls.
+ */
 export function useSession() {
   const { client, config } = useLookoutContext();
   const pollIntervalMs = config.statusPollIntervalMs;

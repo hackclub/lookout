@@ -1,0 +1,24 @@
+{
+  "name": "@lookout/wasm",
+  "version": "0.3.7",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "description": "Lookout's recorder for the browser: lookout-recorder compiled to WebAssembly (crates/lookout-web)",
+  "main": "./dist/lookout_web.js",
+  "types": "./dist/lookout_web.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lookout_web.d.ts",
+      "default": "./dist/lookout_web.js"
+    },
+    "./lookout_web_bg.wasm": "./dist/lookout_web_bg.wasm"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bash ./build.sh",
+    "dev": "bash ./build.sh"
+  }
+}

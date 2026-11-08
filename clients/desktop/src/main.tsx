@@ -16,12 +16,10 @@ Sentry.init({
   dsn: import.meta.env.VITE_SENTRY_DSN,
   release: `lookout-desktop@${__APP_VERSION__}`,
   environment: "desktop",
-  sendDefaultPii: true,
   tracesSampleRate: 0.2,
   integrations: [
     Sentry.consoleLoggingIntegration({ levels: ["warn", "error"] }),
   ],
-  enableLogs: true,
 });
 
 // Add global debug helper for deep links

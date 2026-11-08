@@ -52,7 +52,7 @@ import { useAppUpdate } from "./hooks/useAppUpdate.js";
 import { useAnnouncement } from "./hooks/useAnnouncement.js";
 import { useTip } from "./hooks/useTip.js";
 import { useLinuxUpdate } from "./hooks/useLinuxUpdate.js";
-import { ensureNotificationPermission } from "./hooks/useSessionNotifications.js";
+import { ensureNotificationPermission } from "./hooks/useRecorderNotices.js";
 import {
   createTauriLookoutClient,
   fetchPrograms as fetchProgramRegistry,

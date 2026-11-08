@@ -327,6 +327,13 @@ export const STUCK_COMPILING_TIMEOUT_MINUTES = 60;
  *  Default: 3 */
 export const MAX_COMPILE_ATTEMPTS = 3;
 
+/** How long a session a program asked to delete stays recoverable before
+ *  its captures, video and rows are purged for good. The session is hidden
+ *  from every token and media endpoint for the whole window; only the
+ *  owning program can still see it, and restore it.
+ *  Default: 60 (minutes) */
+export const SESSION_DELETION_GRACE_MINUTES = 60;
+
 // ──────────────────────────────────────────────────────────
 // Rate limiting & abuse prevention
 // ──────────────────────────────────────────────────────────

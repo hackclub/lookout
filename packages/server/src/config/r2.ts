@@ -37,4 +37,20 @@ export const r2Client = new S3Client({
 });
 
 export const R2_BUCKET = R2_BUCKET_NAME;
-export const R2_PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN || "";
+
+/**
+ * Public URL for an object when the bucket is fronted by R2_PUBLIC_DOMAIN,
+ * or null when it isn't and the caller must presign instead.
+ *
+ * Presigned URLs only work on the account's r2.cloudflarestorage.com
+ * endpoint — Cloudflare doesn't honour them on custom domains — so a public
+ * domain is the only way to hand out a stable, cacheable URL for published
+ * media. Read at call time rather than module load so tests can exercise
+ * both modes against the same app.
+ */
+export function publicObjectUrl(key: string): string | null {
+  const domain = (process.env.R2_PUBLIC_DOMAIN || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
+  return domain ? `https://${domain}/${key}` : null;
+}
