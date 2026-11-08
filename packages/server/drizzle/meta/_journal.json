@@ -232,6 +232,13 @@
       "when": 1791700000000,
       "tag": "0032_session_deletion",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791800000000,
+      "tag": "0033_capture_activity",
+      "breakpoints": true
     }
   ]
 }

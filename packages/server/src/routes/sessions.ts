@@ -21,6 +21,7 @@ import {
 } from "../lib/timing.js";
 import { now } from "../lib/clock.js";
 import { extractJa4 } from "../lib/ja4.js";
+import { sanitizeActivity } from "../lib/activity.js";
 import {
   SCREENSHOT_INTERVAL_MS,
   CLIP_FRAME_INTERVAL_MS,
@@ -719,6 +720,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       fileSize: number;
       frameCount?: number;
       final?: boolean;
+      activity?: unknown;
     };
   }>(
     "/api/sessions/:token/screenshots",
@@ -740,6 +742,10 @@ export async function sessionRoutes(app: FastifyInstance) {
             // minute since the last credited mark isn't lost (credit-mode
             // only — see creditFinalCapture). Old clients never send it.
             final: { type: "boolean" as const },
+            // Pointer and focus samples for the interval (lib/activity).
+            // Shape-checked by sanitizeActivity, not here: a malformed
+            // side-channel must never cost the user their minute.
+            activity: { type: "object" as const },
           },
           additionalProperties: false,
         },
@@ -774,6 +780,11 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       const { screenshotId, width, height, fileSize, frameCount } = request.body;
       const isFinal = request.body.final === true;
+      // Program-only interaction metadata. NULL when absent or unusable.
+      const activity = sanitizeActivity(request.body.activity);
+      if (request.body.activity !== undefined && activity === null) {
+        request.log.warn({ screenshotId }, "confirm carried unusable activity — dropped");
+      }
       // Belt-and-braces telemetry for the flag itself: Fastify strips
       // unknown body fields (removeAdditional), so if a client SENT final
       // and a proxy or an old schema ate it, this is the only trace. Also
@@ -908,6 +919,7 @@ export async function sessionRoutes(app: FastifyInstance) {
               fileSizeBytes: fileSize,
               frameCount: frameCount ?? null,
               isFinal,
+              activity,
               creditedSeconds: decision.credit,
               expectedAt: decision.expectedAt,
             })
@@ -974,6 +986,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             // Irrelevant to bucket-mode crediting, but the compiler skips
             // flushes in both modes.
             isFinal,
+            activity,
           })
           .where(eq(schema.screenshots.id, screenshotId));
 

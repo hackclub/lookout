@@ -162,6 +162,39 @@ The value is best-effort: a client that can't detect part of this omits it; the 
 
 ---
 
+## Interaction Metadata
+
+Native clients sample, at every clip frame (and at each upload tick), where the pointer is and what has the focus, and send the interval's samples with the confirm as `activity`. Programs read it back per capture with [`GET /api/internal/sessions/:sessionId/activity`](#get-capture-activity).
+
+**Internal only**, like the JA4 fingerprint: it is never returned on a token-authenticated endpoint (the token belongs to the person being recorded, and echoing the data back would let a forger tune it). It is client-reported, so spoofable like `clientInfo` — a signal for spotting lazy cheating (a pointer that never moves, coordinates repeating exactly, a recorded window that is never in front), not proof.
+
+```json
+{
+  "v": 1,
+  "samples": [
+    {
+      "at": 1750000000000,
+      "method": "ax",
+      "cursor": { "display": 1, "x": 0.4123, "y": 0.7331, "inCapture": true },
+      "frontmost": { "app": "com.microsoft.VSCode", "captured": true },
+      "windows": [{ "id": 123, "active": true }]
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `at` | Unix ms (corrected to server time) the sample was taken. |
+| `method` | How focus was determined, i.e. how far to trust it. `ax` (macOS Accessibility, exact), `window-order` (macOS without Accessibility: the frontmost app's topmost window), `win32`, `x11` (exact). On Wayland: `gnome-shell` (via the Lookout GNOME extension), `kwin`, `hyprland`, `sway` (the compositor names the focused app exactly; whether that is a *captured* window is inferred from geometry, see `windows`), or `portal` (no compositor support: the pointer only, from the screencast stream). |
+| `cursor` | `null` when unknown. `display` is the display's id — the same id a monitor capture source uses (on Wayland, the screencast stream's PipeWire node id; a screen nobody records is named by the compositor's monitor index; with `method: "portal"` and only a window recorded, the window's stream is the "display"). `x`/`y` are 0–1 fractions of that display, rounded to 1/10000, origin top-left. `inCapture`: the pointer is over what is being recorded — on a captured display, or over a captured window (on X11, Windows and macOS: with nothing on top of it there). |
+| `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. |
+| `windows` | Window captures only: each captured window (on Wayland, by its stream's node id) and whether it has the focus (or owns the focused dialog). On Wayland the portal never says which window a stream is, so focus is inferred — the pointer sitting at the same place in the focused window and in the stream, or the shapes not matching — and a window it can't decide is **left out** rather than guessed. |
+
+Window titles are never sent. Absent (`activity: null` on read) for clients that can't sample: the web SDK, cameras, and older builds. On Wayland the pointer needs a portal with the "metadata" cursor mode (GNOME, KDE); the focus needs GNOME Shell with the Lookout extension loaded (installed by the app, active from the next login), KWin, Hyprland or Sway.
+
+---
+
 ## Public Endpoints
 
 ### Get Session Status
@@ -332,6 +365,7 @@ Confirms that a screenshot was successfully uploaded to R2. The server verifies 
 | `height` | integer | yes | ≥ 1 |
 | `fileSize` | integer | yes | ≥ 1 |
 | `frameCount` | integer | no | 1–600. Frames inside an uploaded [clip](#clips); informational (the compiler demuxes for the real count). Omit for JPEG captures. |
+| `activity` | object | no | [Interaction metadata](#interaction-metadata) for the interval. Sanitized, never validated: a malformed value is dropped and the confirm still succeeds. |
 
 **Response `200 OK`:**
 ```json
@@ -961,6 +995,38 @@ Returns full session details including internal fields.
 ```
 
 `clientInfo` is the [client telemetry string](#client-info) from the session's first screenshot upload; `null` if none recorded.
+
+---
+
+### Get Capture Activity
+
+```
+GET /api/internal/sessions/:sessionId/activity
+```
+
+The [interaction metadata](#interaction-metadata) of every confirmed capture, oldest first. Owner-scoped like the session writes: only the program whose key created the session can read it (legacy-key sessions only with a legacy key).
+
+**Response `200 OK`:**
+```json
+{
+  "sessionId": "uuid",
+  "captures": [
+    {
+      "screenshotId": "uuid",
+      "capturedAt": "2025-06-01T12:00:00.000Z",
+      "format": "mp4",
+      "final": false,
+      "activity": { "v": 1, "samples": [ ... ] }
+    }
+  ]
+}
+```
+
+`activity` is `null` for captures whose client sent none.
+
+**Errors:**
+- `401` — Missing or invalid API key
+- `404` — Session not found, or not owned by the calling key
 
 ---
 

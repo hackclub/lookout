@@ -405,6 +405,60 @@ export async function internalRoutes(app: FastifyInstance) {
     },
   );
 
+  // Interaction metadata, per confirmed capture: where the pointer was (as a
+  // fraction of its display), the frontmost app, and whether the captured
+  // windows had the focus. INTERNAL ONLY (see the `activity` column) and
+  // owner-scoped like the session writes: it describes what someone was
+  // doing on their computer, so only the program that owns the session sees
+  // it. `activity` is null for captures from clients that can't sample
+  // (web, cameras, Wayland, older builds).
+  app.get<{
+    Params: { sessionId: string };
+  }>(
+    "/api/internal/sessions/:sessionId/activity",
+    {
+      schema: { params: sessionIdParamSchema },
+    },
+    async (request, reply) => {
+      const { sessionId } = request.params;
+      const session = await writableSession(request, sessionId);
+      if (!session) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+
+      const rows = await db
+        .select({
+          screenshotId: schema.screenshots.id,
+          capturedAt: schema.screenshots.capturedAt,
+          requestedAt: schema.screenshots.requestedAt,
+          format: schema.screenshots.format,
+          isFinal: schema.screenshots.isFinal,
+          activity: schema.screenshots.activity,
+        })
+        .from(schema.screenshots)
+        .where(
+          and(
+            eq(schema.screenshots.sessionId, sessionId),
+            eq(schema.screenshots.confirmed, true),
+          ),
+        )
+        .orderBy(
+          sql`coalesce(${schema.screenshots.capturedAt}, ${schema.screenshots.requestedAt}) ASC`,
+        );
+
+      return {
+        sessionId,
+        captures: rows.map((r) => ({
+          screenshotId: r.screenshotId,
+          capturedAt: (r.capturedAt ?? r.requestedAt).toISOString(),
+          format: r.format,
+          final: r.isFinal,
+          activity: r.activity ?? null,
+        })),
+      };
+    },
+  );
+
   // Lookup session by token
   app.get<{
     Params: { token: string };

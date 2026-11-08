@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
+import type { Activity } from "../lib/activity.js";
 
 function randomHex(bytes: number): string {
   return randomBytes(bytes).toString("hex");
@@ -373,6 +374,18 @@ export const screenshots = pgTable(
     // the entire reason the column is harder to forge than clientInfo. It is
     // exposed on the api-key-authenticated internal session endpoint only.
     ja4: text("ja4"),
+    // Interaction metadata the client sent with the confirm: pointer
+    // position as a fraction of its display, the frontmost app, and whether
+    // the captured windows had the focus, sampled at every clip frame
+    // (`{ v, samples: [...] }`, see lib/activity). Client-reported, so
+    // spoofable like clientInfo, but it exposes lazy cheating (a pointer that
+    // never moves, a recorded window that is never in front). NULL for
+    // clients that don't send it (web, cameras, Wayland, older builds).
+    //
+    // INTERNAL ONLY, for the same reason as ja4: never return it on a
+    // token-authenticated endpoint. Read via the api-key-authenticated
+    // GET /api/internal/sessions/:sessionId/activity.
+    activity: jsonb("activity").$type<Activity>(),
     // The pause/stop flush capture — the confirm's `final: true`, kept so the
     // compiler can skip it (a partial minute must not earn a full second of
     // video). Set in both tracking modes; false for old clients and every
