@@ -68,3 +68,12 @@ drop the patch and switch `ui/video.rs` to its API.
 - Used by `crates/lookout-native/src/ui/primitives.rs` (`edge_faded`) for the
   gallery and source-list fades, the Tauri app's CSS `mask-image`: content goes
   transparent, so vibrancy and Mica show through.
+
+## Deferred window callbacks after close
+
+- `gpui-pre/src/window.rs`: the `on_active_status_change` and
+  `on_visibility_change` handlers ignore a missing window (`.ok()` instead of
+  `.log_err()`). On Windows both are delivered from spawned tasks
+  (`gpui-pre-windows/src/events.rs`), and closing an active window sends a
+  final `WM_ACTIVATE`, so the task can run after `remove_window`. Upstream
+  logs "window not found" at error level, which Sentry reported as an issue.

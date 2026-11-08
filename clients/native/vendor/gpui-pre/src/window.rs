@@ -2026,7 +2026,10 @@ impl Window {
 
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
-                    .log_err();
+                    // Lookout patch: Windows delivers this from a spawned task, and
+                    // closing an active window sends a last deactivation, so the
+                    // window can be gone by the time it runs. Nothing to update then.
+                    .ok();
             }
         }));
         platform_window.on_visibility_change(Box::new({
@@ -2036,7 +2039,9 @@ impl Window {
                     .update(&mut cx, |_, window, cx| {
                         window.refresh_visibility(cx);
                     })
-                    .log_err();
+                    // Lookout patch: deferred like activation (above); the window
+                    // may have closed before delivery.
+                    .ok();
             }
         }));
         platform_window.on_hover_status_change(Box::new({
