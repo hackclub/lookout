@@ -509,7 +509,7 @@ impl Render for SessionPage {
             .justify_between()
             .items_center()
             .mb(px(16.0))
-            .child(if !is_linux() {
+            .child(if !crate::theme::header_bar_shown() {
                 back_button("session-back", "Back", &t, move |_, _, cx| e_back.update(cx, |_, cx| cx.emit(SessionEvent::Back)))
                     .into_any_element()
             } else {

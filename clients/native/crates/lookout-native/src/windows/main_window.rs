@@ -1077,6 +1077,7 @@ impl Render for MainWindow {
         }
         let t = theme(cx).clone();
         let csd = uses_header_bar(window);
+        crate::theme::set_header_bar_shown(csd);
         self.frame_offset = if csd { WINDOW_MARGIN } else { 0.0 };
         self.mount_pending(window, cx);
         if std::mem::take(&mut self.focus_requested) {

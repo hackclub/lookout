@@ -17,7 +17,7 @@ use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::screens::modals::{CaptureErrorDialog, CaptureErrorEvent, NamingEvent, NamingModal};
 use crate::screens::recorder::{RecorderView, RecorderViewEvent, close_recording};
 use crate::screens::source_picker::{PickerEvent, Sel, SourcePicker};
-use crate::theme::{self, is_linux, theme};
+use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::overlay::{Entrance, ModalWidth};
@@ -266,7 +266,7 @@ impl RecordPage {
             .w_full()
             .relative()
             .h(px(16.0 + 30.0))
-            .when(!is_linux(), |d| {
+            .when(!crate::theme::header_bar_shown(), |d| {
                 d.child(back_button("picker-back", "Gallery", &t, move |_, _, cx| e_back.update(cx, |_, cx| cx.emit(RecordEvent::Back))))
             })
             .child(
@@ -364,7 +364,7 @@ impl Render for RecordPage {
                 let e = cx.entity();
                 return crate::screens::layout::page_layout(
                     &t,
-                    (!is_linux()).then(|| -> Rc<dyn Fn(&mut Window, &mut App)> {
+                    (!crate::theme::header_bar_shown()).then(|| -> Rc<dyn Fn(&mut Window, &mut App)> {
                         Rc::new(move |_, cx| e.update(cx, |_, cx| cx.emit(RecordEvent::Back)))
                     }),
                     Some(page_icon(Icon::LkErrorCircle.el(32.0, theme::status::danger())).into_any_element()),
@@ -382,7 +382,7 @@ impl Render for RecordPage {
                 let token = self.token.clone();
                 return crate::screens::layout::page_layout(
                     &t,
-                    (!is_linux()).then(|| -> Rc<dyn Fn(&mut Window, &mut App)> {
+                    (!crate::theme::header_bar_shown()).then(|| -> Rc<dyn Fn(&mut Window, &mut App)> {
                         Rc::new(move |_, cx| e.update(cx, |_, cx| cx.emit(RecordEvent::Back)))
                     }),
                     Some(page_icon(Icon::LkCheckLine.el(32.0, t.text_tertiary)).into_any_element()),

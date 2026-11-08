@@ -45,6 +45,19 @@ pub fn is_linux() -> bool {
     OS == Os::Linux
 }
 
+static HEADER_BAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the main window is showing the Linux header bar, which carries
+/// the page title and Back button. When it isn't (macOS, Windows, or a Linux
+/// session where the window manager draws the frame), pages draw their own.
+/// Set by the main window each frame, before its pages render.
+pub fn header_bar_shown() -> bool {
+    HEADER_BAR.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_header_bar_shown(on: bool) {
+    HEADER_BAR.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `#rrggbb` + alpha → Hsla.
 pub const fn rgba8(r: u8, g: u8, b: u8, a: f32) -> Rgba {
     Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a }

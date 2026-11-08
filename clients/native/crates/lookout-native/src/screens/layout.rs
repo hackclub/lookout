@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{AnyElement, App, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
-use crate::theme::{Theme, is_linux};
+use crate::theme::Theme;
 use crate::ui::primitives::back_button;
 use crate::ui::text::TextExt;
 
@@ -29,8 +29,8 @@ pub fn page_layout(
         .max_w(px(480.0))
         .mx_auto()
         .p(px(16.0))
-        .when_some(on_back.filter(|_| !is_linux()), |d, f| {
-            d.child(div().flex_none().child(back_button("page-back", "Back", t, move |_, w, cx| f(w, cx))))
+        .when_some(on_back.filter(|_| !crate::theme::header_bar_shown()), |d, f| {
+            d.child(div().flex_none().flex().child(back_button("page-back", "Back", t, move |_, w, cx| f(w, cx))))
         })
         .child(
             div()

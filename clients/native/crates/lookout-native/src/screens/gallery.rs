@@ -157,7 +157,7 @@ impl GalleryPage {
                             .padding(0.0, 0.0)
                             .font_size(18.0)
                             .tooltip("Settings")
-                            .child(Icon::GearSixFill.el(30.0, t.text_secondary))
+                            .child(Icon::GearSixFill.el(GALLERY_ICON, t.text_secondary))
                             .on_click(move |_, _, cx| entity.update(cx, |_, cx| cx.emit(GalleryEvent::Settings))),
                     )
                     .child(
@@ -171,7 +171,7 @@ impl GalleryPage {
                                     .padding(0.0, 0.0)
                                     .font_size(18.0)
                                     .tooltip("Start")
-                                    .child(Icon::PlusBold.el(28.0, t.text_secondary))
+                                    .child(Icon::PlusBold.el(GALLERY_ICON, t.text_secondary))
                                     .on_click(move |_, _, cx| {
                                         entity2.update(cx, |this, cx| cx.emit(GalleryEvent::Add(this.add_anchor)))
                                     }),
@@ -299,6 +299,13 @@ impl Render for GalleryPage {
         .into_any_element()
     }
 }
+
+/// What the Tauri gallery header's gear and + actually render at. The source
+/// asks for `size={30}` / `size={28}` (`Gallery.tsx`), but the 40×40 button's
+/// inner span is `width: 100%` with the `sm` padding (12px a side) under the
+/// global `box-sizing: border-box`, leaving a 14px content box; the SVGs are
+/// flex items, so they shrink to it, keeping their aspect ratio.
+const GALLERY_ICON: f32 = 14.0;
 
 fn gallery_skeleton() -> impl IntoElement {
     let card = || {

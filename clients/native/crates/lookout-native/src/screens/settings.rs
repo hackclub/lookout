@@ -330,7 +330,7 @@ impl SettingsPage {
     fn chrome(&self, title: &str, description: AnyElement, t: &Theme, cx: &mut Context<Self>) -> gpui_kit::gpui::Div {
         let me = cx.entity();
         let mut d = div().flex().flex_col().size_full().max_w(px(480.0)).mx_auto().p(px(16.0));
-        if !is_linux() {
+        if !theme::header_bar_shown() {
             let back = Button::empty(ElementId::Name(format!("settings-back-{title}").into()))
                 .variant(Variant::Secondary)
                 .size(BtnSize::Sm)
@@ -341,13 +341,13 @@ impl SettingsPage {
             } else {
                 back.gap(4.0).child(Icon::CaretLeftBold.el(14.0, t.text_secondary)).child("Back")
             };
-            d = d.child(div().flex_none().mb(px(16.0)).child(back));
+            d = d.child(div().flex_none().flex().mb(px(16.0)).child(back));
         }
         d.child(
             div()
                 .flex_none()
                 .mb(px(16.0))
-                .when(!is_linux(), |d| d.child(div().ts(20.0).w700().text_color(t.text_primary).mb(px(4.0)).child(title.to_string())))
+                .when(!theme::header_bar_shown(), |d| d.child(div().ts(20.0).w700().text_color(t.text_primary).mb(px(4.0)).child(title.to_string())))
                 .child(description),
         )
     }
@@ -407,14 +407,11 @@ impl SettingsPage {
     }
 
     fn filtered_apps(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let n = store(cx).blacklisted_apps.len();
         let desc = div()
             .ts_lh(12.0, 1.5)
             .text_color(t.text_secondary)
             .child("Selected apps will be blacked out in monitor screen captures.")
-            .when(n > 0, |d| {
-                d.child(div().text_color(theme::status::warning()).child(format!(" {n} app{} filtered.", if n == 1 { "" } else { "s" })))
-            })
+
             .into_any_element();
         let chrome = self.chrome("Filtered Apps", desc, t, cx);
         if self.is_wayland {
