@@ -88,7 +88,7 @@ docs/                ui-spec.md (source of truth), gpui-research.md, design-guid
 packaging/           release bundling, runnable locally (see Packaging):
   version.sh         print / stamp the workspace version
   macos/             bundle.sh (Lookout.app, .app.tar.gz, .dmg; sign + notarize), Info.plist, Entitlements.plist
-  windows/           lookout.nsi (per-user NSIS installer, lookout:// handler)
+  windows/           lookout.nsi: the old NSIS installer, unused since lookout.exe installs itself (src/installer/); kept until that's proven on real Windows
   linux/             appimage.sh, .desktop entry with the lookout:// handler, local install script
 ```
 
@@ -159,7 +159,7 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
 | platform | script | artifacts |
 |---|---|---|
 | macOS (Xcode) | `packaging/macos/bundle.sh --target aarch64-apple-darwin` | `Lookout-native_<v>_darwin-<arch>.app.tar.gz` (updater) + `.dmg` |
-| Windows (NSIS 3.08+) | `cargo build --release`, then `makensis -DVERSION=… -DSRC_DIR=… packaging/windows/lookout.nsi` | `Lookout-native_<v>_windows-x86_64-setup.exe` |
+| Windows | `cargo build --release`, sign `target/release/lookout.exe`, copy it to the artifact name (the exe is its own installer) | `Lookout-native_<v>_windows-x86_64-setup.exe` |
 | Linux | `packaging/linux/appimage.sh` | `Lookout-native_<v>_linux-x86_64.AppImage` |
 
 - **macOS**: `Lookout.app` reuses the Tauri app's bundle identifier
@@ -168,10 +168,15 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   notarizing use the Tauri job's `APPLE_*` secrets; without them the bundle is
   ad-hoc signed. Nothing besides the executable is bundled (AVFoundation,
   VideoToolbox, OS Swift runtime), and the script fails if that changes.
-- **Windows**: per-user install to `%LOCALAPPDATA%\Lookout` with the Tauri
-  installer's registry keys, so it upgrades a Tauri install in place.
-  Registers `lookout://`; takes `/S`, `/UPDATE`, `/R` (the updater's flags).
-  `-DSIGN_CMD=<script>` signs the installer and uninstaller as they're built.
+- **Windows**: one signed `lookout.exe` that is also its installer and
+  uninstaller (`src/installer/`). Run from anywhere but the install folder, it
+  opens the installer window; it installs per user to `%LOCALAPPDATA%\Lookout`
+  with the Tauri/NSIS installers' registry keys, so it upgrades those installs
+  in place. Registers `lookout://`, adds a Start menu shortcut, and takes the
+  NSIS flags `/S`, `/UPDATE`, `/R`, `/D=` (what the updater runs) plus
+  `--uninstall [/S]`. Debug builds on any OS: `LOOKOUT_INSTALLER=demo` (or
+  `demo-uninstall`) shows the window with simulated steps;
+  `LOOKOUT_INSTALLER_DEMO_FAIL=1` shows the "Installation Aborted" page.
 - **Linux AppImage** (build on Ubuntu 24.04, so glibc ≥ 2.39): bundles GTK 3,
   WebKitGTK 4.1 and its helper processes, libsoup 3, glib-networking, and
   GStreamer with the plugins the app uses (x264, libav, VP9, mp4/webm, v4l2,

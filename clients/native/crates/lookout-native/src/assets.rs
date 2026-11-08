@@ -55,6 +55,13 @@ static ICONS: &[(&str, &[u8])] = embed!(
     "vp-loop",
     "vp-expand",
     "vp-shrink",
+    "scissors-bold",
+    "magnifying-glass-plus-bold",
+    "magnifying-glass-minus-bold",
+    "clock-fill",
+    "selection-bold",
+    "trash-bold",
+    "arrow-counter-clockwise-bold",
 );
 
 pub static FONTS: &[&[u8]] = &[
@@ -66,11 +73,18 @@ pub static FONTS: &[&[u8]] = &[
 pub static APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon.png");
 pub static TRAY_ICON_PNG: &[u8] = include_bytes!("../../../assets/tray-icon.png");
 
+/// The installer window's art (Figma "Fallen" 494:13).
+static INSTALLER: &[(&str, &[u8])] = &[
+    ("installer/app-icon.png", include_bytes!("../../../assets/installer/app-icon.png")),
+    ("installer/download-badge.svg", include_bytes!("../../../assets/installer/download-badge.svg")),
+    ("installer/hack-club-flag.svg", include_bytes!("../../../assets/installer/hack-club-flag.svg")),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        Ok(ICONS.iter().find(|(n, _)| *n == path).map(|(_, b)| Cow::Borrowed(*b)))
+        Ok(ICONS.iter().chain(INSTALLER).find(|(n, _)| *n == path).map(|(_, b)| Cow::Borrowed(*b)))
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {

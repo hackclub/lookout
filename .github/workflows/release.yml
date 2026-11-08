@@ -633,9 +633,8 @@ jobs:
         working-directory: clients/native
         run: cargo build --release -p lookout-native
 
-      # Same signer, account and preflight as the Tauri job above. sign.cmd is
-      # what makensis calls (!finalize / !uninstfinalize) for the installer
-      # and its uninstaller; lookout.exe is signed before it is packed.
+      # Same signer, account and preflight as the Tauri job above. sign.cmd
+      # signs lookout.exe, which is also the installer (src/installer/).
       - name: Configure Windows code signing
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
         shell: bash
@@ -653,7 +652,7 @@ jobs:
             exit 1
           fi
           signtool=$(cygpath -w "$signtool")
-          # makensis runs SIGN_CMD unquoted through cmd, so its path must have no spaces.
+          # SIGN_CMD runs unquoted through cmd, so its path must have no spaces.
           sign_cmd="$RUNNER_TEMP\\lookout-sign.cmd"
           printf '@echo off\r\nartifact-signing-cli -e https://eus.codesigning.azure.net -a hackclub -c hackatime-desktop --sign-tool-path "%s" %%1\r\n' "$signtool" > "$sign_cmd"
           cat "$sign_cmd"
@@ -676,24 +675,16 @@ jobs:
           set -euo pipefail
           version=$(clients/native/packaging/version.sh)
           mkdir -p clients/native/dist
-          # Absolute paths: makensis resolves relative ones (and ${__FILEDIR__})
-          # against the script's folder, which doubled the icon path.
-          src=$(cygpath -aw clients/native/target/release)
-          out=$(cygpath -aw "clients/native/dist/Lookout-native_${version}_windows-x86_64-setup.exe")
-          sign=()
+          # lookout.exe is its own installer (src/installer/): sign it and
+          # ship it under the -setup.exe name that native-updates and the
+          # in-app updater (which runs it with /S /UPDATE /R) key off.
+          exe=clients/native/target/release/lookout.exe
           if [ -n "${SIGN_CMD:-}" ]; then
-            cmd //c "$SIGN_CMD" "$src\\lookout.exe"
-            sign=("-DSIGN_CMD=$SIGN_CMD")
+            cmd //c "$SIGN_CMD" "$(cygpath -aw "$exe")"
           fi
-          makensis=$(command -v makensis || true)
-          if [ -z "$makensis" ]; then
-            makensis="/c/Program Files (x86)/NSIS/makensis.exe"
-            [ -x "$makensis" ] || choco install nsis -y --no-progress
-          fi
-          "$makensis" -V3 "-DVERSION=$version" "-DSRC_DIR=$src" "-DOUTFILE=$out" "${sign[@]}" \
-            "$(cygpath -aw clients/native/packaging/windows/lookout.nsi)"
+          cp "$exe" "clients/native/dist/Lookout-native_${version}_windows-x86_64-setup.exe"
 
-      - name: Verify the installer and its payload are signed (Windows)
+      - name: Verify the installer is signed (Windows)
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
         shell: bash
         run: |
@@ -701,9 +692,6 @@ jobs:
           "$SIGNTOOL" verify //pa //v clients/native/target/release/lookout.exe
           for exe in clients/native/dist/Lookout-native_*-setup.exe; do
             "$SIGNTOOL" verify //pa //v "$exe"
-            payload=$(mktemp -d)
-            7z x -y -o"$payload" "$exe" > /dev/null
-            "$SIGNTOOL" verify //pa "$payload/lookout.exe"
           done
 
       - name: Upload artifacts

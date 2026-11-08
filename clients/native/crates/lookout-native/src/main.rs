@@ -25,6 +25,7 @@ mod logbuf;
 mod previews;
 mod programs;
 mod images;
+mod installer;
 mod motion;
 mod platform;
 mod player;
@@ -50,6 +51,13 @@ fn main() {
         crash::init();
         std::process::exit(0);
     }
+    // `lookout.exe` is its own installer and uninstaller (see installer/).
+    match installer::mode() {
+        installer::Mode::App => {}
+        mode => std::process::exit(installer::run(mode)),
+    }
+    #[cfg(windows)]
+    installer::ops::remove_leftovers();
     // Before any window exists: macOS 26 would otherwise freeze every window
     // after its first frame (see platform/macos_occlusion.rs).
     #[cfg(target_os = "macos")]

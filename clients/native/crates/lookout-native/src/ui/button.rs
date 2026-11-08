@@ -104,6 +104,9 @@ pub struct Button {
     gap: f32,
     tooltip: Option<SharedString>,
     press_scale: f32,
+    hover_bg: Option<Hsla>,
+    drop: Option<Hsla>,
+    medium: bool,
 }
 
 impl Button {
@@ -136,6 +139,9 @@ impl Button {
             gap: 8.0,
             tooltip: None,
             press_scale: 0.96,
+            hover_bg: None,
+            drop: None,
+            medium: false,
         }
     }
 
@@ -207,6 +213,22 @@ impl Button {
     }
     pub fn press_scale(mut self, s: f32) -> Self {
         self.press_scale = s;
+        self
+    }
+    /// A hover fill for a [`Self::bg`] button (which otherwise only presses).
+    pub fn hover_bg(mut self, c: Hsla) -> Self {
+        self.hover_bg = Some(c);
+        self
+    }
+    /// A crisp 1px drop under the shape (`0 1px 2px` in the tactile recipe),
+    /// pressed along with it.
+    pub fn drop(mut self, c: Hsla) -> Self {
+        self.drop = Some(c);
+        self
+    }
+    /// Medium label instead of semibold.
+    pub fn medium(mut self) -> Self {
+        self.medium = true;
         self
     }
     pub fn child(mut self, el: impl IntoElement) -> Self {
@@ -299,7 +321,7 @@ impl RenderOnce for Button {
         let t = theme(cx).clone();
         let (idle_bg, idle_border, hover_bg, hover_border, variant_text) = variant_colors(self.variant, &t);
         let idle_bg = self.bg.unwrap_or(idle_bg);
-        let hover_bg = self.bg.unwrap_or(hover_bg);
+        let hover_bg = self.hover_bg.or(self.bg).unwrap_or(hover_bg);
         let idle_border = self.border.unwrap_or(idle_border);
         let hover_border = self.border.unwrap_or(hover_border);
         let text_color = self.color.unwrap_or(variant_text);
@@ -323,6 +345,7 @@ impl RenderOnce for Button {
         let fill = theme::mix(idle_bg, hover_bg, hover);
         let border = theme::mix(idle_border, hover_border, hover);
         let radius = self.radius;
+        let drop = self.drop;
 
         let (py, pxl, fs) = self.size.metrics();
         let (py, pxl) = self.pad.unwrap_or((py, pxl));
@@ -339,7 +362,7 @@ impl RenderOnce for Button {
             .py(px(py))
             .px(px(pxl))
             .ts(fs)
-            .w600()
+            .font_weight(if self.medium { gpui_kit::gpui::FontWeight::MEDIUM } else { gpui_kit::gpui::FontWeight::SEMIBOLD })
             .text_color(text_color)
             .whitespace_nowrap();
         if self.loading {
@@ -364,6 +387,11 @@ impl RenderOnce for Button {
             .when_some_opacity(inert)
             .child(
                 canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    if let Some(d) = drop {
+                        let mut below = bounds;
+                        below.origin.y += px(1.0);
+                        paint_squircle_bg(below, radius, 0.7, scale, d, theme::transparent(), window);
+                    }
                     paint_squircle_bg(bounds, radius, 0.7, scale, fill, border, window);
                 })
                 .absolute()
