@@ -21,6 +21,7 @@ mod diagnosis;
 mod editor_math;
 mod filmstrip;
 mod fmt;
+mod hang;
 mod logbuf;
 mod previews;
 mod programs;
@@ -121,6 +122,7 @@ fn main() {
         ui::input::bind_keys(cx);
         platform::app_menu::init(cx);
         app::init(cx, rt.clone());
+        hang::start(cx);
         let main = windows::main_window::open(cx);
         smoke::start(cx);
         smoke::start_tour(cx);
@@ -151,5 +153,6 @@ fn main() {
             .detach();
         }
     });
+    crash::on_exit();
     drop(runtime);
 }

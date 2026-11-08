@@ -33,6 +33,7 @@ pub fn init(cx: &mut App) {
                     return;
                 }
             }
+            crate::crash::note_quit("Quit chosen");
             cx.quit();
         })
     });

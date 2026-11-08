@@ -474,6 +474,12 @@ impl WindowsPlatform {
                     };
                     for hwnd in all_windows.read().iter() {
                         unsafe {
+                            // Lookout patch: a window stays tracked until the main
+                            // thread handles its WM_GPUI_CLOSE_ONE_WINDOW, after
+                            // it's destroyed; don't redraw (and report) it then.
+                            if !IsWindow(Some(hwnd.as_raw())).as_bool() {
+                                continue;
+                            }
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
                                     && !IsIconic(hwnd.as_raw()).as_bool()
@@ -596,6 +602,14 @@ impl Platform for WindowsPlatform {
                 }
             }
         }
+        // Lookout patch: windows are torn down from here on. Stop the vsync
+        // thread first (it redraws every tracked window) and mark shutdown so
+        // posts to destroyed windows aren't reported as errors.
+        log::info!("[gpui] message loop ended (WM_QUIT)");
+        crate::dispatcher::SHUTTING_DOWN.store(true, Ordering::Release);
+        if let Some(stop) = self.vsync_stop.borrow().as_ref() {
+            stop.store(true, Ordering::Release);
+        }
 
         self.inner.with_callback(
             |callbacks| &callbacks.quit,
@@ -606,6 +620,8 @@ impl Platform for WindowsPlatform {
     }
 
     fn quit(&self) {
+        // Lookout patch: say so, so an exit's breadcrumbs show it was asked for.
+        log::info!("[gpui] quit requested");
         self.foreground_executor()
             .spawn(async { unsafe { PostQuitMessage(0) } })
             .detach();
@@ -1201,7 +1217,23 @@ impl WindowsPlatformInner {
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
-            WM_ENDSESSION if wparam.0 != 0 => self.handle_end_session(),
+            WM_ENDSESSION if wparam.0 != 0 => {
+                log::warn!("[gpui] Windows is ending the session (sign-out, shutdown or restart)");
+                self.handle_end_session()
+            }
+            // Lookout patch: this hidden window carries every main-thread task.
+            // `DefWindowProc` destroys it on WM_CLOSE (Task Manager's End task,
+            // `taskkill` without /F, cleanup tools…), after which nothing posted
+            // to the main thread ever runs and the app freezes. Ignore it; the
+            // visible windows get their own WM_CLOSE.
+            WM_CLOSE => {
+                log::warn!("[gpui] ignored WM_CLOSE sent to the hidden platform window");
+                Some(0)
+            }
+            WM_DESTROY if !crate::dispatcher::SHUTTING_DOWN.load(Ordering::Acquire) => {
+                log::error!("[gpui] the hidden platform window was destroyed while the app was running");
+                None
+            }
             _ => None,
         };
         if let Some(result) = handled {

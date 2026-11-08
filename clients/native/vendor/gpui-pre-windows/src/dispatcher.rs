@@ -25,6 +25,11 @@ use gpui::{
     PlatformDispatcher, Priority, PriorityQueueSender, RunnableVariant, TimerResolutionGuard,
 };
 
+/// Lookout patch: set once the message loop has ended, so teardown noise
+/// (posting to the destroyed platform window) isn't reported as an error.
+pub(crate) static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static POST_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
+
 pub(crate) struct WindowsDispatcher {
     pub(crate) wake_posted: AtomicBool,
     main_sender: PriorityQueueSender<RunnableVariant>,
@@ -119,14 +124,27 @@ impl PlatformDispatcher for WindowsDispatcher {
         match self.main_sender.send(priority, runnable) {
             Ok(_) => {
                 if !self.wake_posted.swap(true, Ordering::AcqRel) {
-                    unsafe {
+                    let posted = unsafe {
                         PostMessageW(
                             Some(self.platform_window_handle.as_raw()),
                             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD,
                             WPARAM(self.validation_number),
                             LPARAM(0),
                         )
-                        .log_err();
+                    };
+                    // Lookout patch: upstream left `wake_posted` set when the post
+                    // failed, so no thread ever posted a wake-up again and every
+                    // main-thread task stalled for good (a frozen app). Clear it so
+                    // the next dispatch retries, and only report a failure while
+                    // the app is running: during shutdown the platform window is
+                    // already gone and this is expected.
+                    if let Err(error) = posted {
+                        self.wake_posted.store(false, Ordering::Release);
+                        if !SHUTTING_DOWN.load(Ordering::Acquire)
+                            && !POST_FAILURE_REPORTED.swap(true, Ordering::AcqRel)
+                        {
+                            log::error!("failed to wake the main thread: {error:#}");
+                        }
                     }
                 }
             }

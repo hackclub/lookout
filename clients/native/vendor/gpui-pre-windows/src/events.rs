@@ -319,6 +319,8 @@ impl WindowsWindowInner {
         let mut callback = self.state.callbacks.should_close.take()?;
         let should_close = callback();
         self.state.callbacks.should_close.set(Some(callback));
+        // Lookout patch: who closed a window is the first question after an exit.
+        log::info!("[gpui] WM_CLOSE on a window (closing: {should_close})");
         if should_close { None } else { Some(0) }
     }
 

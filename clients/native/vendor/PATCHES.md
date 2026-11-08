@@ -80,3 +80,18 @@ drop the patch and switch `ui/video.rs` to its API.
   (`gpui-pre-windows/src/events.rs`), and closing an active window sends a
   final `WM_ACTIVATE`, so the task can run after `remove_window`. Upstream
   logs "window not found" at error level, which Sentry reported as an issue.
+
+## Windows robustness (LOOKOUT-NATIVE-9 / -A, testers' freezes and exits)
+
+- `gpui-pre-windows/src/dispatcher.rs`: a failed `PostMessageW` wake-up left
+  `wake_posted` set, so nothing ever woke the main thread again and every
+  foreground task stalled (frozen app). Now it's cleared so the next dispatch
+  retries; the failure is logged once, and not at all after shutdown begins
+  (`SHUTTING_DOWN`).
+- `gpui-pre-windows/src/platform.rs`: the hidden platform window ignores
+  `WM_CLOSE` (DefWindowProc would destroy it, killing the task queue) and
+  logs an unexpected `WM_DESTROY`; the vsync thread skips windows that are
+  already destroyed but still tracked, and is stopped as soon as the message
+  loop ends; `quit()`, the end of the loop and `WM_ENDSESSION` are logged.
+- `gpui-pre-windows/src/events.rs`: logs `WM_CLOSE` on a window.
+- `gpui-pre/src/app.rs`: logs "last window closed, quitting".

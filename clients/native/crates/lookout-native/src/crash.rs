@@ -83,7 +83,8 @@ pub fn wrap_logger<L: log::Log>(dest: L) -> impl log::Log {
     sentry::integrations::log::SentryLogger::with_dest(dest)
 }
 
-/// `LOOKOUT_CRASH_TEST=segfault|abort|panic|error` fails on purpose right
+/// `LOOKOUT_CRASH_TEST=segfault|abort|panic|error` (and `hang`, see
+/// `hang.rs`) fails on purpose right
 /// after startup, to check each reporting layer end to end on a real machine.
 pub fn self_test() {
     let Ok(kind) = std::env::var("LOOKOUT_CRASH_TEST") else { return };
@@ -96,6 +97,25 @@ pub fn self_test() {
         "abort" => std::process::abort(),
         "panic" => panic!("LOOKOUT_CRASH_TEST panic"),
         "error" => log::error!("[crash] LOOKOUT_CRASH_TEST error"),
+        "hang" => {}
         other => log::warn!("[crash] unknown LOOKOUT_CRASH_TEST {other:?}"),
+    }
+}
+
+static QUIT_REASON: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Records that the user asked to quit (closed the main window, chose
+/// Quit…), so [`on_exit`] can tell that exit from one nobody asked for.
+pub fn note_quit(reason: &'static str) {
+    log::info!("[app] quit: {reason}");
+    *QUIT_REASON.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+}
+
+/// Call once `app.run` has returned. An exit nobody asked for (the app
+/// "just closed") is reported, with the lines before it as breadcrumbs.
+pub fn on_exit() {
+    match *QUIT_REASON.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some(reason) => log::info!("[app] exiting ({reason})"),
+        None => log::error!("[app] Lookout quit without being asked to"),
     }
 }

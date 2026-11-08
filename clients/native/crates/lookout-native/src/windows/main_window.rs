@@ -223,6 +223,7 @@ pub fn main_should_close(cx: &mut App) -> bool {
     static QUITTING: AtomicBool = AtomicBool::new(false);
     let capturing = app::state(cx).recorder.read(cx).state.as_ref().map(|s| s.capturing).unwrap_or(false);
     if !capturing || QUITTING.load(Ordering::Relaxed) {
+        crate::crash::note_quit("main window closed");
         return true;
     }
     QUITTING.store(true, Ordering::Relaxed);
@@ -233,6 +234,7 @@ pub fn main_should_close(cx: &mut App) -> bool {
     });
     cx.spawn(async move |cx| {
         task.await;
+        crate::crash::note_quit("main window closed during a capture");
         cx.update(|cx| cx.quit());
     })
     .detach();

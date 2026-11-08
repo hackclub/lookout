@@ -3325,6 +3325,8 @@ impl App {
                     };
 
                     if quit_on_empty && cx.windows.is_empty() {
+                        // Lookout patch: name the reason in the exit's breadcrumbs.
+                        log::info!("[gpui] last window closed, quitting");
                         cx.quit();
                     }
                 } else {
