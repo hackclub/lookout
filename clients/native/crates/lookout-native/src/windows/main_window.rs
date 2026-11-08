@@ -1069,7 +1069,6 @@ impl MainWindow {
                 e1.update(cx, |mw, cx| mw.navigate(Route::Settings, cx))
             })
             .tooltip("Settings")
-            .caption_if(HeaderChrome::windows_captions())
             .into_any_element(),
             div()
                 .relative()
@@ -1080,8 +1079,7 @@ impl MainWindow {
                             mw.open_add_menu(a, cx)
                         })
                     })
-                    .tooltip("Start")
-                    .caption_if(HeaderChrome::windows_captions()),
+                    .tooltip("Start"),
                 )
                 .child({
                     let probe = cx.entity();

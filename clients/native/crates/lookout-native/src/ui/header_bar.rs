@@ -26,8 +26,10 @@ use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 pub const HEADER_BAR_HEIGHT: f32 = 47.0;
-/// Windows 11 caption buttons: 46px wide, the title bar's full height.
-const WIN_CAPTION_W: f32 = 46.0;
+/// Windows caption cells: the title bar's full height and Windows' square
+/// hover, but on Lookout's spacing: as wide as a round header button, with
+/// the same 4px gap and edge padding as the gear and +.
+const WIN_CAPTION_W: f32 = 30.0;
 
 /// Where the traffic lights go, centred on the bar (`TitlebarOptions`).
 pub const MAC_TRAFFIC_LIGHT_POSITION: (f32, f32) = (16.0, 16.0);
@@ -398,8 +400,7 @@ impl RenderOnce for HeaderBar {
                     _ if has_back => 8.0,
                     _ => 12.0,
                 };
-                // Windows' caption buttons sit flush with the window edge.
-                d.pl(px(lead)).pr(px(if chrome == HeaderChrome::Windows { 0.0 } else { 8.0 }))
+                d.pl(px(lead)).pr(px(8.0))
             })
             .opacity(self.backdrop);
         let bar = match chrome {
@@ -427,8 +428,7 @@ impl RenderOnce for HeaderBar {
                 div()
                     .flex()
                     .items_center()
-                    // Windows: caption cells sit side by side, flush right.
-                    .gap(px(if win { 0.0 } else { 4.0 }))
+                    .gap(px(4.0))
                     .flex_none()
                     .children(self.actions)
                     .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
