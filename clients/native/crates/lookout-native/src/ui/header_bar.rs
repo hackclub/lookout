@@ -428,6 +428,9 @@ impl RenderOnce for HeaderBar {
             .child({
                 let win = chrome == HeaderChrome::Windows;
                 let on_close = self.on_close.clone();
+                // The divider separates page actions from the window
+                // controls, so it goes when there are no actions (subpages).
+                let has_actions = !self.actions.is_empty();
                 div()
                     .flex()
                     .items_center()
@@ -436,7 +439,7 @@ impl RenderOnce for HeaderBar {
                     .children(self.actions)
                     .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
                     .when(win, |d| {
-                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default)).child(
+                        d.when(has_actions, |d| d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default))).child(
                             // The two cells touch: no gap between them.
                             div().flex().flex_none().child(
                                 HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 10.0, |_, window, _| {
