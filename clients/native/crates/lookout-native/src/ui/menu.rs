@@ -319,9 +319,19 @@ impl Render for MenuPopup {
                         f.line_to(point(px(tr + 10.0), px(ty + dir * 9.5)));
                         f.line_to(point(px(tr + 20.0), px(ty - dir * 0.5)));
                         f.close();
+                        let fill_c = if flipped { bg_bottom } else { bg_top };
                         if let Ok(p) = f.build() {
-                            window.paint_path(p, if flipped { bg_bottom } else { bg_top });
+                            window.paint_path(p, fill_c);
                         }
+                        // Cover the panel's whole 1px border row under the
+                        // tail's base (the triangle alone reaches half of it,
+                        // leaving an antialiased seam between tail and panel).
+                        // The tail's stroke, painted next, keeps its edges.
+                        let seam_top = if flipped { ty - 1.5 } else { ty - 0.5 };
+                        window.paint_quad(gpui_kit::gpui::fill(
+                            Bounds { origin: point(px(tr + 1.0), px(seam_top)), size: gpui_kit::gpui::size(px(TAIL_W - 2.0), px(2.0)) },
+                            fill_c,
+                        ));
                         let mut st = PathBuilder::stroke(px(1.0));
                         st.move_to(point(px(tr + 0.5), px(ty - dir * 1.0)));
                         st.line_to(point(px(tr + 10.0), px(ty + dir * 9.0)));
