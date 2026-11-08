@@ -76,6 +76,10 @@ pub enum HeaderBtnKind {
 struct HoverState {
     hovered: bool,
     pressed: bool,
+    /// Pressed since the pointer arrived: the tooltip stays hidden until it
+    /// leaves, like the webview's native `title` tooltips (which hid on click
+    /// rather than sitting over the menu the button just opened).
+    tip_dismissed: bool,
     hover: Anim,
     press: Anim,
 }
@@ -128,6 +132,7 @@ impl RenderOnce for HeaderBtn {
         let st = window.use_keyed_state(self.id.clone(), cx, |_, _| HoverState {
             hovered: false,
             pressed: false,
+            tip_dismissed: false,
             hover: Anim::new(0.0),
             press: Anim::new(0.0),
         });
@@ -178,6 +183,9 @@ impl RenderOnce for HeaderBtn {
             .on_hover(move |hov, _, cx| {
                 s1.update(cx, |s, cx| {
                     s.hovered = *hov;
+                    if !*hov {
+                        s.tip_dismissed = false;
+                    }
                     s.hover.set_css(if *hov { 1.0 } else { 0.0 }, 100.0, Ease::EASE_OUT);
                     cx.notify();
                 })
@@ -187,6 +195,7 @@ impl RenderOnce for HeaderBtn {
                 cx.stop_propagation();
                 s2.update(cx, |s, cx| {
                     s.pressed = true;
+                    s.tip_dismissed = true;
                     s.press.set_css(1.0, 100.0, Ease::EASE_OUT);
                     cx.notify();
                 })
@@ -206,7 +215,8 @@ impl RenderOnce for HeaderBtn {
                 })
             })
             .on_click(move |ev, window, cx| f(ev, window, cx));
-        if let Some(tip) = self.tooltip {
+        let tip_dismissed = st.read(cx).tip_dismissed;
+        if let Some(tip) = self.tooltip.filter(|_| !tip_dismissed) {
             el = el.tooltip(move |window, cx| crate::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx));
         }
         el
