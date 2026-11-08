@@ -77,6 +77,11 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
             let b64 = rest.split_once(',').map(|(_, b)| b).unwrap_or("");
             lookout_core::base64_decode(b64).map_err(|e| anyhow::anyhow!(e))?
         } else {
+            // A handful at a time, so a gallery's worth of thumbnails reuses
+            // keep-alive connections instead of opening one each at once
+            // (browsers cap per-host connections the same way). On the macOS
+            // CI runner six simultaneous connections stalled for 30s.
+            let _permit = fetch_slots().acquire().await;
             // Network-level failures (a dropped keep-alive connection, a
             // blip) get two more tries; an HTTP error or a bad image doesn't.
             let mut attempt = 0;
@@ -134,4 +139,10 @@ impl ImageCache {
             cx.drop_image(img, None);
         }
     }
+}
+
+/// Concurrent image downloads.
+fn fetch_slots() -> &'static tokio::sync::Semaphore {
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| tokio::sync::Semaphore::new(3))
 }
