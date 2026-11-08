@@ -11,10 +11,13 @@ use gpui_kit::gpui::{
 };
 
 use crate::theme::{Theme, theme};
+use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
 const WEBSITE: &str = "https://lookout.hackclub.com";
 const DOCS: &str = "https://fallout.hackclub.com/docs";
+/// Hack Club red (#EC3750).
+const HACK_CLUB_RED: u32 = 0xEC3750;
 const GITHUB: &str = "https://github.com/hackclub/lookout/";
 
 thread_local! {
@@ -91,8 +94,41 @@ impl Render for InfoPage {
                         .child(link("about-github", "GitHub", GITHUB, &t)),
                 ),
         )
-        .child(div().flex_none().ts(11.0).text_color(t.text_tertiary).child("Made by Hack Club"))
+        .child(hack_club_footer("about-hackclub", &t))
     }
+}
+
+/// The Hack Club flag (clicks through to hackclub.com) over "Made with ♥
+/// by teens at Hack Club" and the nonprofit line. Shared by the About page
+/// and the bottom of the gallery.
+pub fn hack_club_footer(id: &'static str, t: &Theme) -> impl IntoElement {
+    // A sign-off, not content: kept quiet so it doesn't compete with the page.
+    div()
+        .opacity(0.5)
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            // 526×184 artwork, letters knocked out, in the text colour.
+            div()
+                .id(id)
+                .child(gpui_kit::gpui::svg().path(Icon::HackClubFlag.path()).w(px(80.0)).h(px(28.0)).text_color(t.text_primary))
+                .on_click(|_, _, cx| cx.open_url("https://hackclub.com")),
+        )
+        .child(
+            div()
+                .mt(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .ts(11.0)
+                .text_color(t.text_secondary)
+                .child("Made with")
+                .child(Icon::HeartFill.el(11.0, crate::theme::hex(HACK_CLUB_RED)))
+                .child("by teens at Hack Club"),
+        )
+        .child(div().mt(px(2.0)).ts(11.0).text_color(t.text_tertiary).child("A 501(c)(3) nonprofit"))
 }
 
 /// Only worth mentioning when it isn't the default server.

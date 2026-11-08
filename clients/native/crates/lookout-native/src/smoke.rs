@@ -44,3 +44,36 @@ pub fn start(cx: &mut App) {
     })
     .detach();
 }
+
+/// `LOOKOUT_SMOKE_TOUR=<dir>`: step through the screens worth checking on a
+/// real OS. At each step the app writes `<dir>/<n>.ready` (with the step's
+/// name) and waits up to 20s for `<dir>/<n>.done`, which the CI script
+/// creates after screenshotting the desktop. Used with the dev server
+/// (`DEV_PANEL=1` for the program panel step).
+pub const TOUR: &[&str] = &["gallery", "settings", "tray", "panel", "add-menu", "confirm"];
+
+pub fn start_tour(cx: &mut App) {
+    let Some(dir) = std::env::var_os("LOOKOUT_SMOKE_TOUR").map(std::path::PathBuf::from) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    cx.spawn(async move |cx| {
+        let pause = |ms: u64| cx.background_executor().timer(Duration::from_millis(ms));
+        pause(4000).await;
+        for (i, step) in TOUR.iter().enumerate() {
+            let _ = cx.update(|cx| {
+                if let Some(h) = cx.try_global::<crate::windows::MainHandle>().map(|h| h.0) {
+                    let _ = h.update(cx, |mw, window, cx| mw.smoke_step(step, window, cx));
+                }
+            });
+            pause(2500).await;
+            let _ = std::fs::write(dir.join(format!("{i}.ready")), step);
+            for _ in 0..100 {
+                if dir.join(format!("{i}.done")).exists() {
+                    break;
+                }
+                pause(200).await;
+            }
+        }
+        let _ = std::fs::write(dir.join("finished"), "");
+    })
+    .detach();
+}

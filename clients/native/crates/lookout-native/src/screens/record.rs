@@ -19,6 +19,7 @@ use crate::screens::recorder::{RecorderView, RecorderViewEvent, close_recording}
 use crate::screens::source_picker::{PickerEvent, Sel, SourcePicker};
 use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
+use crate::ui::header_bar::HeaderBtn;
 use crate::ui::icon::Icon;
 use crate::ui::overlay::{Entrance, ModalWidth};
 use crate::ui::primitives::{Skeleton, back_button, page_icon};
@@ -248,66 +249,111 @@ impl RecordPage {
         self.slots.iter().any(|s| !s.leaving && matches!(s.flow, Flow::Recorder(_)))
     }
 
-    fn picker_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Whether Stop Session is offered: on the picker of a session that has
+    /// already recorded something.
+    fn can_stop(&self) -> bool {
+        matches!(self.check, Check::Ok)
+            && !self.is_recording_view()
+            && self.session_status.is_some()
+            && self.session_status.as_deref() != Some("pending")
+    }
+
+    fn request_stop(&mut self, cx: &mut Context<Self>) {
+        let n = cx.new(|cx| NamingModal::new(false, cx));
+        self._subs.push(cx.subscribe(&n, |p, _, ev: &NamingEvent, cx| match ev {
+            NamingEvent::Confirm(name) => p.stop_from_picker(name.clone(), false, cx),
+            NamingEvent::EditAndSave(name) => p.stop_from_picker(name.clone(), true, cx),
+            NamingEvent::Resume => {
+                p.naming = None;
+                cx.notify();
+            }
+        }));
+        self.naming = Some(n);
+        cx.notify();
+    }
+
+    /// Stop Session in the header bar: the bar already says "Recording", so
+    /// the picker doesn't need a title row of its own just to hold it.
+    pub fn header_actions(&self, me: Entity<Self>) -> Vec<AnyElement> {
+        if !self.can_stop() {
+            return Vec::new();
+        }
+        vec![
+            HeaderBtn::text("hb-stop-session", if self.stopping { "Stopping…" } else { "Stop Session" }, move |_, _, cx| {
+                me.update(cx, |p, cx| p.request_stop(cx))
+            })
+            .destructive()
+            .disabled(self.stopping)
+            .into_any_element(),
+        ]
+    }
+
+    fn picker_header(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = theme(cx).clone();
         let pending = self.session_status.as_deref() == Some("pending");
-        let e_back = cx.entity();
-        let e_stop = cx.entity();
-        let title = if pending { "What should Lookout capture?" } else { "Select source" };
-        div()
-            .max_w(px(480.0))
-            .mx_auto()
-            .p(px(16.0))
-            .pb(px(0.0))
-            .flex()
-            .justify_between()
-            .items_center()
-            .flex_none()
-            .w_full()
-            .relative()
-            .h(px(16.0 + 30.0))
-            .when(!crate::theme::header_bar_shown(), |d| {
-                d.child(back_button("picker-back", "Gallery", &t, move |_, _, cx| e_back.update(cx, |_, cx| cx.emit(RecordEvent::Back))))
-            })
-            .child(
+        if crate::theme::header_bar_shown() {
+            // A fresh session asks its question; otherwise the bar's
+            // "Recording" title and Stop Session cover it.
+            return pending.then(|| {
                 div()
-                    .absolute()
-                    .left(px(if pending { 0.0 } else { 100.0 }))
-                    .right(px(if pending { 0.0 } else { 100.0 }))
-                    .top(px(16.0))
-                    .bottom(px(0.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                    .max_w(px(480.0))
+                    .mx_auto()
+                    .w_full()
+                    .flex_none()
+                    .px(px(16.0))
+                    .pt(px(16.0))
                     .ts(14.0)
                     .w700()
                     .text_color(t.text_primary)
-                    .child(title),
-            )
-            .when(!pending && self.session_status.is_some(), |d| {
-                d.child(div().ml_auto().child(
-                    Button::new("picker-stop", "Stop Session")
-                        .variant(Variant::Danger)
-                        .size(BtnSize::Md)
-                        .loading(self.stopping)
-                        .on_click(move |_, _, cx| {
-                            e_stop.update(cx, |p, cx| {
-                                let n = cx.new(|cx| NamingModal::new(false, cx));
-                                p._subs.push(cx.subscribe(&n, |p, _, ev: &NamingEvent, cx| match ev {
-                                    NamingEvent::Confirm(name) => p.stop_from_picker(name.clone(), false, cx),
-                                    NamingEvent::EditAndSave(name) => p.stop_from_picker(name.clone(), true, cx),
-                                    NamingEvent::Resume => {
-                                        p.naming = None;
-                                        cx.notify();
-                                    }
-                                }));
-                                p.naming = Some(n);
-                                cx.notify();
-                            })
-                        }),
-                ))
-            })
-            .into_any_element()
+                    .text_center()
+                    .child("What should Lookout capture?")
+                    .into_any_element()
+            });
+        }
+        // No header bar: the old in-page row with Back, title and Stop.
+        let e_back = cx.entity();
+        let e_stop = cx.entity();
+        let title = if pending { "What should Lookout capture?" } else { "Select source" };
+        Some(
+            div()
+                .max_w(px(480.0))
+                .mx_auto()
+                .p(px(16.0))
+                .pb(px(0.0))
+                .flex()
+                .justify_between()
+                .items_center()
+                .flex_none()
+                .w_full()
+                .relative()
+                .h(px(16.0 + 30.0))
+                .child(back_button("picker-back", "Gallery", &t, move |_, _, cx| e_back.update(cx, |_, cx| cx.emit(RecordEvent::Back))))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(if pending { 0.0 } else { 100.0 }))
+                        .right(px(if pending { 0.0 } else { 100.0 }))
+                        .top(px(16.0))
+                        .bottom(px(0.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .ts(14.0)
+                        .w700()
+                        .text_color(t.text_primary)
+                        .child(title),
+                )
+                .when(self.can_stop(), |d| {
+                    d.child(div().ml_auto().child(
+                        Button::new("picker-stop", "Stop Session")
+                            .variant(Variant::Danger)
+                            .size(BtnSize::Md)
+                            .loading(self.stopping)
+                            .on_click(move |_, _, cx| e_stop.update(cx, |p, cx| p.request_stop(cx))),
+                    ))
+                })
+                .into_any_element(),
+        )
     }
 }
 
@@ -429,7 +475,7 @@ impl Render for RecordPage {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(self.picker_header(cx))
+                    .children(self.picker_header(cx))
                     .child(div().flex_1().min_h(px(0.0)).child(self.picker.clone()))
                     .into_any_element()
             } else {

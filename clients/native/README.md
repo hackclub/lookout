@@ -44,6 +44,8 @@ local video). Other knobs:
 | `RUST_LOG=lookout=debug` | verbose logging |
 | `LOOKOUT_UPDATE_DEMO=1` | (debug builds) plays a fake update download → "Restart to Complete Update" in the update pill |
 | `LOOKOUT_UPDATE_URL` / `_BETA_URL` / `_PUBKEY` / `_DIR` / `_AS_VERSION` | (debug builds) point the updater at a fake release (see Auto-update) |
+| `LOOKOUT_SENTRY_DSN` | Sentry reporting ([`src/crash.rs`](crates/lookout-native/src/crash.rs)): release builds report to `hack-club/lookout-native` by default, debug builds only with this set; empty turns it off |
+| `LOOKOUT_CRASH_TEST=segfault\|abort\|panic\|error` | fails on purpose at startup, to check crash reporting end to end |
 
 `lookout://session/?token=…` and `lookout://pair?…` links can be passed on the
 command line. A second launch hands them to the running instance and exits.

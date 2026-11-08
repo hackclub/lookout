@@ -66,7 +66,10 @@ trap cleanup EXIT
 echo "==> Lookout Native $version for $target"
 
 if [ "$build" = 1 ]; then
-  (cd "$root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --release -p lookout-native --target "$target")
+  # packed: also write target/<target>/release/lookout.dSYM, the debug info
+  # CI uploads to Sentry to symbolicate native crash reports.
+  (cd "$root" && MACOSX_DEPLOYMENT_TARGET=10.15 CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed \
+    cargo build --release -p lookout-native --target "$target")
 fi
 bin="$root/target/$target/release/lookout"
 [ -x "$bin" ] || { echo "bundle.sh: $bin not found (build first, or drop --no-build)" >&2; exit 1; }

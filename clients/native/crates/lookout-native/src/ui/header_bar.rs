@@ -137,6 +137,12 @@ pub struct HeaderBtn {
     /// Windows caption shape: a 46px-wide, full-height square-cornered cell
     /// flush with the window edge (the OS rounds the window's corner).
     caption: bool,
+    /// A text action ([`Self::text`]): a 30px pill sized to its label.
+    label: Option<SharedString>,
+    /// Destructive text action: red label, red-tinted hover.
+    destructive: bool,
+    /// Dimmed to 60% and inert (a pending or unavailable action).
+    disabled: bool,
 }
 
 impl HeaderBtn {
@@ -146,7 +152,19 @@ impl HeaderBtn {
         content: impl IntoElement,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        Self { id: id.into(), kind, content: content.into_any_element(), icon: None, on_click: Rc::new(on_click), tooltip: None, danger: false, caption: false }
+        Self {
+            id: id.into(),
+            kind,
+            content: content.into_any_element(),
+            icon: None,
+            on_click: Rc::new(on_click),
+            tooltip: None,
+            danger: false,
+            caption: false,
+            label: None,
+            destructive: false,
+            disabled: false,
+        }
     }
     /// A button whose content is `icon` at `size`, tinted with the button's
     /// animated foreground colour.
@@ -160,6 +178,29 @@ impl HeaderBtn {
         let mut b = Self::new(id, kind, div(), on_click);
         b.icon = Some((icon, size));
         b
+    }
+    /// A page action with a word instead of a glyph, for actions with no
+    /// unambiguous icon ("Archive" as an ✕ would read as close). Same height,
+    /// colours and hover/press as the round actions, so it sits in the row
+    /// with them; the pill just grows to fit the label.
+    pub fn text(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        let mut b = Self::new(id, HeaderBtnKind::Action, div(), on_click);
+        b.label = Some(label.into());
+        b
+    }
+    /// Red label with a red-tinted hover, for actions that end or remove
+    /// something. Never a filled red button: the bar stays quiet.
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
+        self
+    }
+    pub fn disabled(mut self, on: bool) -> Self {
+        self.disabled = on;
+        self
     }
     pub fn tooltip(mut self, t: impl Into<SharedString>) -> Self {
         self.tooltip = Some(t.into());
@@ -221,6 +262,12 @@ impl RenderOnce for HeaderBtn {
             ),
         };
         let (fg_idle, fg_hover) = if self.caption { (t.text_primary, t.text_primary) } else { (fg_idle, fg_hover) };
+        let (hover, active, fg_idle, fg_hover) = if self.destructive {
+            let red = theme::status::danger();
+            (red.opacity(0.10), red.opacity(0.16), red, red)
+        } else {
+            (hover, active, fg_idle, fg_hover)
+        };
         let (hover, active, fg_hover) = if self.danger {
             let red: Hsla = theme::rgba8(0xf9, 0x27, 0x1e, 1.0).into();
             (red, theme::rgba8(0xf9, 0x27, 0x1e, 0.9).into(), theme::white(1.0))
@@ -232,20 +279,34 @@ impl RenderOnce for HeaderBtn {
         let (s1, s2, s3, s4) = (st.clone(), st.clone(), st.clone(), st.clone());
         let f = self.on_click.clone();
         let caption = self.caption;
+        let disabled = self.disabled;
+        let label = self.label.clone();
         let mut el = div()
             .id(self.id)
-            .map(|d| if caption { d.w(px(WIN_CAPTION_W)).h(px(HEADER_BAR_HEIGHT)) } else { d.size(px(size)).rounded_full() })
+            .map(|d| {
+                if caption {
+                    d.w(px(WIN_CAPTION_W)).h(px(HEADER_BAR_HEIGHT))
+                } else if label.is_some() {
+                    // The label's side padding matches the gap between a round
+                    // button's edge and its glyph, so text and icons share a rhythm.
+                    d.h(px(size)).px(px(12.0)).rounded_full()
+                } else {
+                    d.size(px(size)).rounded_full()
+                }
+            })
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
             .bg(bg)
             .text_color(fg)
-            .map(|d| match self.icon {
-                Some((icon, size)) => d.child(icon.el(size, fg)),
-                None => d.child(self.content),
+            .map(|d| match (self.icon, label) {
+                (Some((icon, size)), _) => d.child(icon.el(size, fg)),
+                (None, Some(l)) => d.child(div().text_size(px(13.0)).line_height(px(16.0)).w600().whitespace_nowrap().child(l)),
+                (None, None) => d.child(self.content),
             })
-            .on_hover(move |hov, _, cx| {
+            .when(disabled, |d| d.opacity(0.6))
+            .when(!disabled, |d| d.on_hover(move |hov, _, cx| {
                 s1.update(cx, |s, cx| {
                     s.hovered = *hov;
                     if !*hov {
@@ -279,7 +340,7 @@ impl RenderOnce for HeaderBtn {
                     cx.notify();
                 })
             })
-            .on_click(move |ev, window, cx| f(ev, window, cx));
+            .on_click(move |ev, window, cx| f(ev, window, cx)));
         let tip_dismissed = st.read(cx).tip_dismissed;
         if let Some(tip) = self.tooltip.filter(|_| !tip_dismissed) {
             el = el.tooltip(move |window, cx| crate::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx));

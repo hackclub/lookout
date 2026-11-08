@@ -39,6 +39,8 @@ pub enum Icon {
     LkPauseBars,
     LkPower,
     LkEditorWindow,
+    HackClubFlag,
+    HeartFill,
 }
 
 impl Icon {
@@ -76,6 +78,8 @@ impl Icon {
         Icon::LkPauseBars,
         Icon::LkPower,
         Icon::LkEditorWindow,
+        Icon::HackClubFlag,
+        Icon::HeartFill,
     ];
 
     pub fn path(self) -> &'static str {
@@ -113,6 +117,8 @@ impl Icon {
             Icon::LkPauseBars => "icons/lk-pause-bars.svg",
             Icon::LkPower => "icons/lk-power.svg",
             Icon::LkEditorWindow => "icons/lk-editor-window.svg",
+            Icon::HackClubFlag => "icons/hc-flag.svg",
+            Icon::HeartFill => "icons/heart-fill.svg",
         }
     }
 

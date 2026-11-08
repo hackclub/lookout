@@ -52,7 +52,7 @@ pub fn init() {
     )
     .build();
     let max = inner.filter();
-    if log::set_boxed_logger(Box::new(Tee { inner })).is_ok() {
+    if log::set_boxed_logger(Box::new(crate::crash::wrap_logger(Tee { inner }))).is_ok() {
         log::set_max_level(max);
     }
 }

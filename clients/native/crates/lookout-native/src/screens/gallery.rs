@@ -238,6 +238,7 @@ impl Render for GalleryPage {
                             .child(err.clone()),
                     ),
                 )
+                .child(div().flex_none().pb(px(16.0)).child(crate::screens::info::hack_club_footer("gallery-hackclub", &t)))
                 .into_any_element();
         }
 
@@ -263,6 +264,7 @@ impl Render for GalleryPage {
                                 .child("Start a recording session to see it here."),
                         ),
                 )
+                .child(div().flex_none().pb(px(16.0)).child(crate::screens::info::hack_club_footer("gallery-hackclub", &t)))
                 .into_any_element();
         }
 
@@ -291,7 +293,14 @@ impl Render for GalleryPage {
                         .track_scroll(&self.scroll)
                         .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                         .p(px(16.0))
-                        .child(div().flex().flex_col().gap(px(12.0)).children(cards)),
+                        // Cards, then a spacer that soaks up any leftover
+                        // height, then the footer: pinned to the bottom when
+                        // the list is short, after the last card when it scrolls.
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_none().flex().flex_col().gap(px(12.0)).children(cards))
+                        .child(div().flex_1().min_h(px(40.0)))
+                        .child(crate::screens::info::hack_club_footer("gallery-hackclub", &t)),
                 )
                 .when(show_top && !theme::vibrant(), |d| d.child(edge_fade(true, 20.0, t.bg_body)))
                 .when(show_bottom && !theme::vibrant(), |d| d.child(edge_fade(false, 20.0, t.bg_body))),

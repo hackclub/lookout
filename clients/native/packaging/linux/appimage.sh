@@ -92,9 +92,10 @@ fetch runtime-x86_64 \
 # ── build ────────────────────────────────────────────────────────────────
 echo "==> Lookout Native $version AppImage"
 if [ "$build" = 1 ]; then
-  # Line tables are embedded in a Linux ELF (not split out like a .pdb/.dSYM);
-  # linuxdeploy strips them anyway, so don't spend time making them.
-  (cd "$root" && CARGO_PROFILE_RELEASE_DEBUG=false cargo build --release -p lookout-native)
+  # Line tables are embedded in a Linux ELF (not split out like a .pdb/.dSYM).
+  # linuxdeploy strips the AppImage's copy; the one left in target/ is what
+  # CI uploads to Sentry so native crash reports get function names and lines.
+  (cd "$root" && cargo build --release -p lookout-native)
 fi
 bin="$root/target/release/lookout"
 [ -x "$bin" ] || { echo "appimage.sh: $bin not found (build first, or drop --no-build)" >&2; exit 1; }

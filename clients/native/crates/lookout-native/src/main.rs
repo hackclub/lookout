@@ -15,6 +15,7 @@
 
 mod app;
 mod assets;
+mod crash;
 mod deeplink;
 mod diagnosis;
 mod editor_math;
@@ -41,6 +42,13 @@ use gpui_kit::gpui::App;
 
 fn main() {
     logbuf::init();
+    // The crash reporter is this binary run again: send it straight into
+    // `crash::init` (which never returns for it) before it can touch the
+    // single-instance socket, the updater or a window.
+    if crash::is_reporter_process() {
+        crash::init();
+        std::process::exit(0);
+    }
     // Before any window exists: macOS 26 would otherwise freeze every window
     // after its first frame (see platform/macos_occlusion.rs).
     #[cfg(target_os = "macos")]
@@ -61,6 +69,10 @@ fn main() {
         }
         platform::single_instance::Instance::Primary(rx) => rx,
     };
+    // Only the primary instance reports (a link hand-off exits at once), and
+    // before the updater so a crash while installing one is caught too.
+    let _sentry = crash::init();
+    crash::self_test();
     // Before any window: roll back a version that never became healthy, or
     // install a staged update and relaunch (exits in both cases).
     updater::boot(&initial_urls);
@@ -102,6 +114,7 @@ fn main() {
         app::init(cx, rt.clone());
         let main = windows::main_window::open(cx);
         smoke::start(cx);
+        smoke::start_tour(cx);
         cx.set_global(windows::MainHandle(main));
         windows::wire_tray(rt.clone(), cx);
         if !initial_urls.is_empty() {

@@ -16,6 +16,7 @@ use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing};
+use crate::ui::header_bar::HeaderBtn;
 use crate::ui::icon::Icon;
 use crate::ui::input::{InputEvent, TextInput, new_input};
 use crate::ui::primitives::{AspectBox, BadgeSize, Skeleton, back_button, badge, card};
@@ -484,6 +485,17 @@ impl SessionPage {
     }
 }
 
+impl SessionPage {
+    /// Archive in the header bar, as a word: an archive-✕ glyph next to the
+    /// window's close reads as a second close.
+    pub fn header_actions(&self, me: Entity<Self>) -> Vec<AnyElement> {
+        vec![
+            HeaderBtn::text("hb-archive", "Archive", move |_, _, cx| me.update(cx, |_, cx| cx.emit(SessionEvent::Archive)))
+                .into_any_element(),
+        ]
+    }
+}
+
 impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -503,27 +515,28 @@ impl Render for SessionPage {
             window.request_animation_frame();
         }
 
-        let (e_back, e_archive) = (cx.entity(), cx.entity());
-        let header = div()
-            .flex()
-            .justify_between()
-            .items_center()
-            .mb(px(16.0))
-            .child(if !crate::theme::header_bar_shown() {
-                back_button("session-back", "Back", &t, move |_, _, cx| e_back.update(cx, |_, cx| cx.emit(SessionEvent::Back)))
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            })
-            .child(
-                Button::new("session-archive", "Archive")
-                    .variant(Variant::Secondary)
-                    .size(BtnSize::Sm)
-                    .card_style(&t)
-                    .on_click(move |_, _, cx| e_archive.update(cx, |_, cx| cx.emit(SessionEvent::Archive))),
-            );
+        // With the header bar (every platform today), Back and Archive live in
+        // it; this row is only the fallback for a bar-less window.
+        let header = (!crate::theme::header_bar_shown()).then(|| {
+            let (e_back, e_archive) = (cx.entity(), cx.entity());
+            div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .mb(px(16.0))
+                .child(back_button("session-back", "Back", &t, move |_, _, cx| {
+                    e_back.update(cx, |_, cx| cx.emit(SessionEvent::Back))
+                }))
+                .child(
+                    Button::new("session-archive", "Archive")
+                        .variant(Variant::Secondary)
+                        .size(BtnSize::Sm)
+                        .card_style(&t)
+                        .on_click(move |_, _, cx| e_archive.update(cx, |_, cx| cx.emit(SessionEvent::Archive))),
+                )
+        });
 
-        let mut col = div().p(px(16.0)).child(header);
+        let mut col = div().p(px(16.0)).children(header);
         if let Some(err) = &self.error {
             col = col.child(ErrorBanner::new("session-error", err.clone()).title("Error"));
         }

@@ -47,6 +47,8 @@ static ICONS: &[(&str, &[u8])] = embed!(
     "lk-pause-bars",
     "lk-power",
     "lk-editor-window",
+    "hc-flag",
+    "heart-fill",
 );
 
 pub static FONTS: &[&[u8]] = &[

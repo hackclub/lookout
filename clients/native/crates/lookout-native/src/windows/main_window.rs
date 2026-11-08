@@ -122,6 +122,14 @@ impl PageView {
             _ => None,
         }
     }
+    /// Actions the page puts in the header bar, after the title.
+    fn header_actions(&self, cx: &App) -> Vec<AnyElement> {
+        match self {
+            PageView::Session(e) => e.read(cx).header_actions(e.clone()),
+            PageView::Record(e) => e.read(cx).header_actions(e.clone()),
+            _ => Vec::new(),
+        }
+    }
     /// The modal the page wants on top of the whole window.
     fn modal(&self, cx: &App) -> Option<crate::screens::record::ModalReq> {
         match self {
@@ -412,6 +420,7 @@ impl MainWindow {
                 let token = token.clone();
                 let r = cx.new(|cx| RecordPage::new(token, window, cx));
                 self._subs.push(cx.subscribe(&r, |this, _, ev: &RecordEvent, cx| this.on_record_event(ev, cx)));
+                self._subs.push(cx.observe(&r, |_, _, cx| cx.notify()));
                 PageView::Record(r)
             }
             Route::Session(token) => {
@@ -1070,6 +1079,36 @@ impl MainWindow {
         }
     }
 
+    /// One step of the CI screenshot tour (`smoke::TOUR`).
+    pub fn smoke_step(&mut self, step: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        match step {
+            "gallery" => {
+                // A fresh runner would otherwise sit on the permission screens.
+                self.gate = None;
+                self.go_gallery(cx);
+            }
+            "settings" => self.navigate(Route::Settings, cx),
+            "tray" => {
+                self.go_gallery(cx);
+                crate::platform::tray::sync(true, "1:23:45", false, cx);
+            }
+            "panel" => {
+                crate::platform::tray::sync(false, "", false, cx);
+                if let Some(token) = store(cx).active_tokens().into_iter().next() {
+                    self.pending_panel = Some((token.clone(), format!("http://localhost:8787/panel/{token}")));
+                }
+            }
+            "add-menu" => {
+                self.panel_sheet = None;
+                let a = self.header_add_anchor;
+                self.open_add_menu(a, cx);
+            }
+            "confirm" => self.confirm("Archive Session", "Are you sure you want to archive this session?", "Archive", true, |_, _| {}, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub fn go_gallery(&mut self, cx: &mut Context<Self>) {
         self.history.clear();
         self.go(Route::Gallery, cx);
@@ -1080,8 +1119,14 @@ impl MainWindow {
         // A permission screen stands in for the whole app (the Tauri app
         // rendered it instead of the gallery, header included): no Settings
         // or + until it's resolved.
-        if !self.route.is_gallery() || self.gate.is_some() {
+        if self.gate.is_some() {
             return Vec::new();
+        }
+        // Subpages publish their own actions (Archive, Stop Session) here
+        // rather than on a row of their own under the bar.
+        if !self.route.is_gallery() {
+            let current = self.slots.iter().rev().find(|s| !s.leaving);
+            return current.map(|s| s.page.header_actions(cx)).unwrap_or_default();
         }
         let e1 = cx.entity();
         let e2 = cx.entity();
