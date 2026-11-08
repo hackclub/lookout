@@ -350,18 +350,24 @@ fn main() {
                         } }), 200),
                         (Method::Get, ["units"]) => {
                             if s.name.starts_with("Portfolio") && std::env::var("DEV_EDIT").is_ok() {
-                                let base_ms = now_ms() - 47 * 60_000;
-                                let units: Vec<Value> = (0..9).map(|i| {
-                                    let gap = if i >= 6 { 20 * 60_000 } else { 0 };
+                                let n: u64 = std::env::var("DEV_EDIT_UNITS").ok().and_then(|v| v.parse().ok()).unwrap_or(9);
+                                let base_ms = now_ms() - (n + 38) * 60_000;
+                                let units: Vec<Value> = (0..n).map(|i| {
+                                    let gap = if i >= n * 2 / 3 { 20 * 60_000 } else { 0 };
                                     json!({ "capturedAt": iso(base_ms + i * 60_000 + gap), "screenshotId": format!("s{i}") })
                                 }).collect();
-                                json_resp(json!({ "units": units, "cuts": [], "editable": true, "originalVideoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())), "recompilesRemaining": 5, "expectedUnits": 9 }), 200)
+                                let mut v = json!({ "units": units, "cuts": [], "editable": true, "originalVideoUrl": format!("file://{}", std::env::var("LOOKOUT_DEV_VIDEO").unwrap_or_else(|_| "/tmp/phoenix-media/test.webm".into())), "recompilesRemaining": 5, "expectedUnits": n });
+                                // DEV_MASKS: act like a server with the masking API (PR #198).
+                                if std::env::var("DEV_MASKS").is_ok() {
+                                    v["masks"] = json!([]);
+                                }
+                                json_resp(v, 200)
                             } else {
                                 json_resp(json!({ "units": [], "cuts": [], "editable": false, "editableReason": "published", "originalVideoUrl": null, "recompilesRemaining": 0 }), 200)
                             }
                         }
                         (Method::Post, ["editing"]) => json_resp(json!({ "held": s.name.starts_with("Portfolio") }), 200),
-                        (Method::Post, ["cuts"]) | (Method::Put, ["cuts"]) => json_resp(json!({ "cuts": [], "unitsTotal": 9, "unitsCut": 0, "trackedSeconds": s.tracked, "uncutTrackedSeconds": s.tracked }), 200),
+                        (Method::Post, ["cuts"]) | (Method::Put, ["cuts"]) => { println!("  cuts body: {body}"); json_resp(json!({ "cuts": [], "unitsTotal": 9, "unitsCut": 0, "trackedSeconds": s.tracked, "uncutTrackedSeconds": s.tracked }), 200) }
                         (Method::Post, ["compile"]) => { s.status = "published".into(); json_resp(json!({ "status": "complete", "instant": true, "recompilesRemaining": 4, "redirectUrl": null }), 200) }
                         _ => json_resp(json!({ "error": "not implemented in dev server" }), 404),
                     }

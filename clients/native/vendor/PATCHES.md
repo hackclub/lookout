@@ -64,7 +64,10 @@ drop the patch and switch `ui/video.rs` to its API.
   (`Primitive::scale_opacity`), plus the unfaded remainder. `replay` inserts
   recorded primitives unfaded (they were split when first painted). Surfaces
   (video) are never faded. No GPU struct or shader changes.
-- `gpui-pre/src/window.rs`: `Window::with_edge_fade(bounds, top, bottom, f)`.
+- `gpui-pre/src/window.rs`: `Window::with_edge_fade(bounds, top, bottom, f)`,
+  and `with_edge_fade_x(bounds, left, right, f)` for horizontal fades
+  (`EdgeFade` gains `left`/`right`; `Scene::insert_faded_x` splits into
+  one-device-pixel columns). Used by the editor timeline when zoomed.
 - Used by `crates/lookout-native/src/ui/primitives.rs` (`edge_faded`) for the
   gallery and source-list fades, the Tauri app's CSS `mask-image`: content goes
   transparent, so vibrancy and Mica show through.

@@ -330,13 +330,22 @@ pub fn card(t: &Theme) -> gpui_kit::gpui::Div {
 /// Mica shows through. Uses the vendored GPUI's `Window::with_edge_fade`.
 /// Pass 0 for an edge that shouldn't fade (nothing scrolled past it).
 pub fn edge_faded(child: impl IntoElement, top: f32, bottom: f32) -> EdgeFaded {
-    EdgeFaded { child: child.into_any_element(), top, bottom }
+    EdgeFaded { child: child.into_any_element(), top, bottom, horizontal: false }
+}
+
+/// [`edge_faded`] at the left and right edges (a horizontally scrolled
+/// view, like the zoomed editor timeline).
+pub fn edge_faded_x(child: impl IntoElement, left: f32, right: f32) -> EdgeFaded {
+    EdgeFaded { child: child.into_any_element(), top: left, bottom: right, horizontal: true }
 }
 
 pub struct EdgeFaded {
     child: AnyElement,
+    /// Top (or left, when `horizontal`) fade depth.
     top: f32,
+    /// Bottom (or right) fade depth.
     bottom: f32,
+    horizontal: bool,
 }
 
 impl IntoElement for EdgeFaded {
@@ -391,7 +400,11 @@ impl gpui_kit::gpui::Element for EdgeFaded {
         cx: &mut App,
     ) {
         let child = &mut self.child;
-        window.with_edge_fade(bounds, px(self.top), px(self.bottom), |window| child.paint(window, cx));
+        if self.horizontal {
+            window.with_edge_fade_x(bounds, px(self.top), px(self.bottom), |window| child.paint(window, cx));
+        } else {
+            window.with_edge_fade(bounds, px(self.top), px(self.bottom), |window| child.paint(window, cx));
+        }
     }
 }
 

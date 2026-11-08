@@ -4220,6 +4220,34 @@ impl Window {
             bounds: bounds.scale(scale),
             top: top.scale(scale),
             bottom: bottom.scale(scale),
+            left: px(0.).scale(scale),
+            right: px(0.).scale(scale),
+        });
+        let result = f(self);
+        self.next_frame.scene.pop_edge_fade();
+        result
+    }
+
+    /// Lookout patch: [`Self::with_edge_fade`] at the left and right edges
+    /// (a horizontally scrolled viewport).
+    pub fn with_edge_fade_x<R>(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        left: Pixels,
+        right: Pixels,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        if left <= px(0.) && right <= px(0.) {
+            return f(self);
+        }
+        let scale = self.scale_factor();
+        self.next_frame.scene.push_edge_fade(crate::scene::EdgeFade {
+            bounds: bounds.scale(scale),
+            top: px(0.).scale(scale),
+            bottom: px(0.).scale(scale),
+            left: left.scale(scale),
+            right: right.scale(scale),
         });
         let result = f(self);
         self.next_frame.scene.pop_edge_fade();

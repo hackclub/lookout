@@ -1,16 +1,108 @@
-//! Editor filmstrip thumbnails (`filmstripFrames.ts`): decode one frame per
-//! tile at the tile's centre time, at display height, on a background
-//! thread. Linux decodes with GStreamer; elsewhere the track stays plain
-//! (the web app's "all sources failed" fallback).
+//! Editor filmstrip thumbnails, decoded on demand: the editor asks for the
+//! frames its visible tiles need (they change as the timeline zooms and
+//! pans) and each lands as it's decoded. One long-lived decoder per editor,
+//! on its own thread; a newer request replaces whatever is still queued.
+//! Linux decodes with GStreamer, elsewhere with the platform decoder.
 
 use std::sync::Arc;
 
 use gpui_kit::gpui::RenderImage;
 
-/// Frames for each `times` entry (seconds), `height` px tall. Calls
-/// `publish` as frames land (the web app published every third tile).
-pub fn extract(url: &str, times: &[f64], height: u32, publish: &dyn Fn(Vec<Option<Arc<RenderImage>>>)) -> Result<(), String> {
-    imp::extract(url, times, height, publish)
+/// Frames are keyed by their index at this rate, so requests for times
+/// inside the same frame share one decode.
+pub const KEY_FPS: f64 = 30.0;
+
+pub fn key(t: f64) -> u64 {
+    (t.max(0.0) * KEY_FPS).round() as u64
+}
+
+pub fn key_time(k: u64) -> f64 {
+    k as f64 / KEY_FPS
+}
+
+/// A decoded tile, or `None` when the decoder gave up on the source.
+pub type Tile = (u64, Option<Arc<RenderImage>>);
+
+/// Handle to the decoder thread. Dropping it stops the thread.
+pub struct Filmstrip {
+    tx: flume::Sender<Vec<u64>>,
+}
+
+impl Filmstrip {
+    /// Start a decoder for `url` producing frames `height` px tall; tiles
+    /// arrive on the returned receiver.
+    pub fn spawn(url: String, height: u32) -> (Self, flume::Receiver<Tile>) {
+        let (tx, rx) = flume::unbounded::<Vec<u64>>();
+        let (out_tx, out_rx) = flume::unbounded::<Tile>();
+        std::thread::Builder::new()
+            .name("filmstrip".into())
+            .spawn(move || {
+                if let Err(e) = imp::run(&url, height, &rx, &out_tx) {
+                    log::warn!("[filmstrip] {e}");
+                    let _ = out_tx.send((u64::MAX, None));
+                }
+            })
+            .ok();
+        (Self { tx }, out_rx)
+    }
+
+    /// Decode these frames (in this order), dropping any older request.
+    pub fn request(&self, keys: Vec<u64>) {
+        let _ = self.tx.send(keys);
+    }
+}
+
+/// Pull the newest request, waiting for one if `block`.
+fn latest(rx: &flume::Receiver<Vec<u64>>, block: bool) -> Option<Result<Vec<u64>, ()>> {
+    let mut got = if block {
+        match rx.recv() {
+            Ok(v) => Some(v),
+            Err(_) => return Some(Err(())),
+        }
+    } else {
+        None
+    };
+    loop {
+        match rx.try_recv() {
+            Ok(v) => got = Some(v),
+            Err(flume::TryRecvError::Empty) => return got.map(Ok),
+            Err(flume::TryRecvError::Disconnected) => return Some(Err(())),
+        }
+    }
+}
+
+/// The shared request loop: `decode` turns a time into an image.
+fn serve(
+    rx: &flume::Receiver<Vec<u64>>,
+    out: &flume::Sender<Tile>,
+    mut decode: impl FnMut(f64) -> Option<Arc<RenderImage>>,
+) -> Result<(), String> {
+    let mut faults = 0;
+    let mut queue: Vec<u64> = Vec::new();
+    loop {
+        match latest(rx, queue.is_empty()) {
+            Some(Ok(next)) => queue = next,
+            Some(Err(())) => return Ok(()),
+            None => {}
+        }
+        if queue.is_empty() {
+            continue;
+        }
+        let k = queue.remove(0);
+        let img = decode(key_time(k));
+        if img.is_none() {
+            faults += 1;
+            // MAX_TILE_FAULTS: give up on a source that keeps failing.
+            if faults > 3 {
+                return Err("too many decode failures".into());
+            }
+        } else {
+            faults = 0;
+        }
+        if out.send((k, img)).is_err() {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -20,7 +112,7 @@ mod imp {
     use gstreamer::prelude::*;
     use gstreamer_app as gst_app;
 
-    pub fn extract(url: &str, times: &[f64], height: u32, publish: &dyn Fn(Vec<Option<Arc<RenderImage>>>)) -> Result<(), String> {
+    pub fn run(url: &str, height: u32, rx: &flume::Receiver<Vec<u64>>, out: &flume::Sender<Tile>) -> Result<(), String> {
         gst::init().map_err(|e| e.to_string())?;
         let desc = format!(
             "uridecodebin uri=\"{url}\" ! videoconvert ! videoscale ! video/x-raw,format=BGRA,height={height},pixel-aspect-ratio=1/1 ! appsink name=sink sync=false max-buffers=1"
@@ -30,33 +122,15 @@ mod imp {
         pipeline.set_state(gst::State::Paused).map_err(|e| e.to_string())?;
         let (res, _, _) = pipeline.state(gst::ClockTime::from_seconds(10));
         res.map_err(|e| format!("preroll: {e}"))?;
-        let mut out: Vec<Option<Arc<RenderImage>>> = vec![None; times.len()];
-        let mut faults = 0;
-        for (i, t) in times.iter().enumerate() {
-            let ok = pipeline.seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-                gst::ClockTime::from_nseconds((t.max(0.0) * 1e9) as u64),
-            );
-            if ok.is_err() {
-                faults += 1;
-            } else {
-                let _ = pipeline.state(gst::ClockTime::from_seconds(4));
-                match sink.try_pull_preroll(gst::ClockTime::from_seconds(4)) {
-                    Some(sample) => out[i] = sample_to_image(&sample),
-                    None => faults += 1,
-                }
-            }
-            // MAX_TILE_FAULTS: give up on a source that keeps failing.
-            if faults > 2 {
-                break;
-            }
-            if i % 3 == 2 {
-                publish(out.clone());
-            }
-        }
-        publish(out);
+        let result = serve(rx, out, |t| {
+            pipeline
+                .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, gst::ClockTime::from_nseconds((t * 1e9) as u64))
+                .ok()?;
+            let _ = pipeline.state(gst::ClockTime::from_seconds(4));
+            sink.try_pull_preroll(gst::ClockTime::from_seconds(4)).and_then(|s| sample_to_image(&s))
+        });
         let _ = pipeline.set_state(gst::State::Null);
-        Ok(())
+        result
     }
 
     fn sample_to_image(sample: &gst::Sample) -> Option<Arc<RenderImage>> {
@@ -78,30 +152,13 @@ mod imp {
 mod imp {
     use super::*;
 
-    /// Sample one frame per tile with the native decoder.
-    pub fn extract(url: &str, times: &[f64], height: u32, publish: &dyn Fn(Vec<Option<Arc<RenderImage>>>)) -> Result<(), String> {
+    pub fn run(url: &str, height: u32, rx: &flume::Receiver<Vec<u64>>, out: &flume::Sender<Tile>) -> Result<(), String> {
         let path = crate::platform::decoder::local_path(url)?;
         let mut dec = crate::platform::decoder::open(&path, Some(height))?;
-        let mut out: Vec<Option<Arc<RenderImage>>> = vec![None; times.len()];
-        let mut faults = 0;
-        for (i, t) in times.iter().enumerate() {
-            let frame = dec.seek(*t).and_then(|_| dec.next_frame());
-            match frame {
-                Ok(Some(f)) => {
-                    if let Some(img) = image::RgbaImage::from_raw(f.width, f.height, f.bgra) {
-                        out[i] = Some(Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(img)])));
-                    }
-                }
-                _ => faults += 1,
-            }
-            if faults > 2 {
-                break;
-            }
-            if i % 3 == 2 {
-                publish(out.clone());
-            }
-        }
-        publish(out);
-        Ok(())
+        serve(rx, out, |t| {
+            let f = dec.seek(t).and_then(|_| dec.next_frame()).ok()??;
+            let img = image::RgbaImage::from_raw(f.width, f.height, f.bgra)?;
+            Some(Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(img)])))
+        })
     }
 }

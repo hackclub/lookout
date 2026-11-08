@@ -47,6 +47,13 @@ pub enum Icon {
     VpLoop,
     VpExpand,
     VpShrink,
+    Scissors,
+    ZoomIn,
+    ZoomOut,
+    ClockFill,
+    Selection,
+    TrashBold,
+    UndoBold,
 }
 
 impl Icon {
@@ -92,6 +99,13 @@ impl Icon {
         Icon::VpLoop,
         Icon::VpExpand,
         Icon::VpShrink,
+        Icon::Scissors,
+        Icon::ZoomIn,
+        Icon::ZoomOut,
+        Icon::ClockFill,
+        Icon::Selection,
+        Icon::TrashBold,
+        Icon::UndoBold,
     ];
 
     pub fn path(self) -> &'static str {
@@ -137,6 +151,13 @@ impl Icon {
             Icon::VpLoop => "icons/vp-loop.svg",
             Icon::VpExpand => "icons/vp-expand.svg",
             Icon::VpShrink => "icons/vp-shrink.svg",
+            Icon::Scissors => "icons/scissors-bold.svg",
+            Icon::ZoomIn => "icons/magnifying-glass-plus-bold.svg",
+            Icon::ZoomOut => "icons/magnifying-glass-minus-bold.svg",
+            Icon::ClockFill => "icons/clock-fill.svg",
+            Icon::Selection => "icons/selection-bold.svg",
+            Icon::TrashBold => "icons/trash-bold.svg",
+            Icon::UndoBold => "icons/arrow-counter-clockwise-bold.svg",
         }
     }
 

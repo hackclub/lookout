@@ -199,6 +199,17 @@ pub async fn session_set_cuts(t: &dyn Transport, s: &SessionConfig, cuts: Value)
     .await
 }
 
+/// `PUT /api/sessions/:token/cuts` with masks too (`MaskRegion`s, the
+/// masking API from lookout PR #198). Only send `masks` to a server whose
+/// `GET /units` returned a `masks` key: older servers reject unknown fields.
+pub async fn session_set_edits(t: &dyn Transport, s: &SessionConfig, cuts: Value, masks: Option<Value>) -> ApiResult<Value> {
+    let mut body = serde_json::json!({ "cuts": cuts });
+    if let Some(m) = masks {
+        body["masks"] = m;
+    }
+    request_json(t, Method::Put, session_url(s, "/cuts"), Some(body), API_TIMEOUT).await
+}
+
 /// `POST /api/sessions/:token/compile` — publish with the current cuts
 /// applied (a cut-compile; also how an edit hold is released).
 pub async fn session_apply_cuts(t: &dyn Transport, s: &SessionConfig) -> ApiResult<Value> {

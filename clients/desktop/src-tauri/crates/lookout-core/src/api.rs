@@ -63,6 +63,12 @@ impl Core {
         api::session_set_cuts(self.transport(), s, cuts).await
     }
 
+    /// `PUT /api/sessions/:token/cuts` with optional masks; see
+    /// [`api::session_set_edits`].
+    pub async fn session_set_edits(&self, s: &SessionConfig, cuts: Value, masks: Option<Value>) -> ApiResult<Value> {
+        api::session_set_edits(self.transport(), s, cuts, masks).await
+    }
+
     /// `POST /api/sessions/:token/compile` — publish with the cuts applied.
     pub async fn session_apply_cuts(&self, s: &SessionConfig) -> ApiResult<Value> {
         api::session_apply_cuts(self.transport(), s).await

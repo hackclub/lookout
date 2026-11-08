@@ -210,23 +210,45 @@ impl ProgramPanel {
         let bg = Rgba::from(t.bg_panel);
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         let src = frame_src(&self.url, t.dark);
-        match PanelWebView::create(&src, t.dark, (to8(bg.r), to8(bg.g), to8(bg.b)), window, cx) {
-            Ok((web, rx)) => {
-                self.web = Some(Rc::new(web));
-                cx.spawn(async move |this, cx| {
-                    while let Ok(ev) = rx.recv_async().await {
-                        if this.update(cx, |p, cx| p.on_web(ev, cx)).is_err() {
-                            break;
-                        }
+        let pending = match PanelWebView::prepare(&src, t.dark, (to8(bg.r), to8(bg.g), to8(bg.b)), window, cx) {
+            Ok(p) => p,
+            Err(e) => return self.web_unavailable(e),
+        };
+        // Build outside this render: WebView2 pumps messages while it starts,
+        // which runs queued GPUI tasks, and they'd find the App borrowed
+        // (see `PendingWebView`). Between `update`s in a task it isn't.
+        cx.spawn_in(window, async move |this, cx| {
+            let built = pending.build();
+            let rx = this
+                .update_in(cx, |p, window, cx| match built {
+                    Ok((web, rx)) if !p.broken => {
+                        web.place(None, window);
+                        p.web = Some(Rc::new(web));
+                        cx.notify();
+                        Some(rx)
+                    }
+                    Ok(_) => None,
+                    Err(e) => {
+                        p.web_unavailable(e);
+                        cx.notify();
+                        None
                     }
                 })
-                .detach();
+                .ok()
+                .flatten();
+            let Some(rx) = rx else { return };
+            while let Ok(ev) = rx.recv_async().await {
+                if this.update(cx, |p, cx| p.on_web(ev, cx)).is_err() {
+                    break;
+                }
             }
-            Err(e) => {
-                log::warn!("[panel] can't embed {}: {e:#}", self.label);
-                self.broken = true;
-            }
-        }
+        })
+        .detach();
+    }
+
+    fn web_unavailable(&mut self, e: anyhow::Error) {
+        log::warn!("[panel] can't embed {}: {e:#}", self.label);
+        self.broken = true;
     }
 }
 

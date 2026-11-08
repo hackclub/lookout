@@ -146,6 +146,210 @@ pub fn count_cut_units(units: &[VideoUnit], cuts: &[CutInterval]) -> usize {
     units.iter().filter(|u| is_cut_at(parse_ms(&u.captured_at), cuts)).count()
 }
 
+/// Elapsed time as a timecode, `H:MM:SS` padded to `00:00:00`. `unit` is in
+/// capture units (real minutes), so fractions carry real seconds.
+pub fn timecode(unit: f64) -> String {
+    let secs = (unit.max(0.0) * 60.0).round() as i64;
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// A span of real time from a count of units: `45m`, `1h 5m`, `2h`.
+pub fn span_label(units: f64) -> String {
+    let m = units.max(0.0).round() as i64;
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+/// Ruler ticks inside `[from, to]` (units): `(unit, major)`, a minor tick
+/// halfway between majors.
+pub fn ruler_ticks_in(from: f64, to: f64, step: i64) -> Vec<(f64, bool)> {
+    let mut out = Vec::new();
+    if step <= 0 || to <= from {
+        return out;
+    }
+    let half = step as f64 / 2.0;
+    let mut u = (from / half).floor() * half;
+    while u <= to + 1e-9 {
+        if u >= from - 1e-9 {
+            let major = ((u / step as f64) - (u / step as f64).round()).abs() < 1e-9;
+            out.push((u, major));
+        }
+        u += half;
+    }
+    out
+}
+
+// ── Timeline view (zoom + pan) ──────────────────────────────────────────
+
+/// The visible window of the timeline: `zoom` = total / visible units,
+/// `start` = first visible unit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    pub start: f64,
+    pub zoom: f64,
+}
+
+impl View {
+    pub const FIT: View = View { start: 0.0, zoom: 1.0 };
+
+    pub fn visible(&self, n: usize) -> f64 {
+        n as f64 / self.zoom.max(1.0)
+    }
+
+    /// Keep the zoom in `[1, max]` and the window inside the timeline.
+    pub fn clamped(self, n: usize, max_zoom: f64) -> View {
+        let zoom = self.zoom.clamp(1.0, max_zoom.max(1.0));
+        let visible = n as f64 / zoom;
+        View { zoom, start: self.start.clamp(0.0, (n as f64 - visible).max(0.0)) }
+    }
+
+    /// Zoom to `zoom`, keeping `anchor` (a unit) at the same fraction `frac`
+    /// of the width.
+    pub fn zoomed(self, n: usize, zoom: f64, anchor: f64, frac: f64, max_zoom: f64) -> View {
+        let zoom = zoom.clamp(1.0, max_zoom.max(1.0));
+        View { zoom, start: anchor - frac * n as f64 / zoom }.clamped(n, max_zoom)
+    }
+}
+
+/// Deepest zoom: one unit at most `max_unit_px` wide.
+pub fn max_zoom(n: usize, track_w: f32, max_unit_px: f32) -> f64 {
+    if n == 0 || track_w <= 0.0 {
+        return 1.0;
+    }
+    (n as f64 * max_unit_px as f64 / track_w as f64).max(1.0)
+}
+
+// ── Masks (lookout PR #198) ─────────────────────────────────────────────
+
+/// Masks that may overlap in time; more need another lane but can't be
+/// added (the PR's `MAX_MASK_TRACKS`).
+pub const MAX_MASK_LANES: usize = 3;
+/// `MAX_MASK_REGIONS` in `packages/shared/src/masks.ts`.
+pub const MAX_MASKS: usize = 100;
+
+/// A pixelated box, timed in video seconds (= units, fractional) and placed
+/// in normalized `[0, 1]` frame coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mask {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Mask {
+    pub fn active_at(&self, t: f64) -> bool {
+        t >= self.start - 0.001 && t < self.end - 0.001
+    }
+}
+
+fn round4(v: f64) -> f64 {
+    (v * 10_000.0).round() / 10_000.0
+}
+
+/// `unitMasksToMasks`: wall-clock bounds from the covered units, plus the
+/// exact video seconds.
+pub fn masks_to_json(masks: &[Mask], units: &[VideoUnit]) -> serde_json::Value {
+    let n = units.len();
+    let out: Vec<serde_json::Value> = masks
+        .iter()
+        .filter(|m| n > 0 && m.end > m.start && m.w > 0.0 && m.h > 0.0)
+        .map(|m| {
+            let s_idx = (m.start.floor().max(0.0) as usize).min(n - 1);
+            let e_idx = (m.end.ceil() as usize).min(n).max(s_idx + 1);
+            let last = parse_ms(&units[e_idx - 1].captured_at);
+            let end = match units.get(e_idx) {
+                Some(next) => parse_ms(&next.captured_at).min(last + SCREENSHOT_INTERVAL_MS),
+                None => last + SCREENSHOT_INTERVAL_MS,
+            };
+            serde_json::json!({
+                "id": m.id,
+                "start": units[s_idx].captured_at,
+                "end": iso(end),
+                "startSec": round4(m.start),
+                "endSec": round4(m.end),
+                "x": round4(m.x as f64),
+                "y": round4(m.y as f64),
+                "width": round4(m.w as f64),
+                "height": round4(m.h as f64),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(out)
+}
+
+/// `masksToUnitMasks`: prefer the stored video seconds, else map the
+/// wall-clock bounds onto units.
+pub fn masks_from_json(v: &serde_json::Value, units: &[VideoUnit]) -> Vec<Mask> {
+    let Some(arr) = v.as_array() else { return Vec::new() };
+    let n = units.len();
+    arr.iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let f = |k: &str| m.get(k).and_then(|x| x.as_f64());
+            let (x, y, w, h) = (f("x")?, f("y")?, f("width")?, f("height")?);
+            let (start, end) = match (f("startSec"), f("endSec")) {
+                (Some(s), Some(e)) if e > s => (s, e),
+                _ => {
+                    let s_ms = parse_ms(m.get("start")?.as_str()?);
+                    let e_ms = parse_ms(m.get("end")?.as_str()?);
+                    let mut start = 0usize;
+                    let mut end = n;
+                    for (i, u) in units.iter().enumerate() {
+                        let t = parse_ms(&u.captured_at);
+                        if t <= s_ms {
+                            start = i;
+                        }
+                        if t < e_ms {
+                            end = i + 1;
+                        }
+                    }
+                    if end <= start {
+                        end = (start + 1).min(n);
+                    }
+                    (start as f64, end as f64)
+                }
+            };
+            let id = m.get("id").and_then(|x| x.as_str()).map(String::from).unwrap_or_else(|| format!("mask-{i}"));
+            Some(Mask { id, start, end, x: x as f32, y: y as f32, w: w as f32, h: h as f32 })
+        })
+        .collect()
+}
+
+/// `assignMaskTracks`: the lane for each mask (same order as `masks`),
+/// first lane without a time collision.
+pub fn assign_lanes(masks: &[Mask]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..masks.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&masks[a], &masks[b]);
+        a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal).then(a.end.partial_cmp(&b.end).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let mut lanes: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut out = vec![0; masks.len()];
+    for i in order {
+        let m = &masks[i];
+        let free = lanes.iter().position(|l| l.iter().all(|&(s, e)| m.end <= s + 0.001 || m.start >= e - 0.001));
+        let lane = free.unwrap_or_else(|| {
+            lanes.push(Vec::new());
+            lanes.len() - 1
+        });
+        lanes[lane].push((m.start, m.end));
+        out[i] = lane;
+    }
+    out
+}
+
+/// Masks overlapping `[start, end)`, other than `except`.
+pub fn masks_overlapping(masks: &[Mask], start: f64, end: f64, except: Option<&str>) -> usize {
+    masks.iter().filter(|m| Some(m.id.as_str()) != except && m.start < end - 0.001 && m.end > start + 0.001).count()
+}
+
 /// `compileEstimateMs` / `estimateBuildProgress` / `interpolateBuildProgress`.
 pub mod build_progress {
     pub const CAP: f32 = 0.95;
@@ -185,6 +389,45 @@ mod tests {
     fn normalize_merges_adjacent() {
         let r = normalize(&[Region { start: 5, end: 6 }, Region { start: 1, end: 3 }, Region { start: 3, end: 4 }]);
         assert_eq!(r, vec![Region { start: 1, end: 4 }, Region { start: 5, end: 6 }]);
+    }
+
+    #[test]
+    fn masks_round_trip() {
+        let u = units(10);
+        let m = vec![Mask { id: "a".into(), start: 2.5, end: 4.25, x: 0.1, y: 0.2, w: 0.3, h: 0.4 }];
+        let v = masks_to_json(&m, &u);
+        assert_eq!(v[0]["start"], u[2].captured_at);
+        assert_eq!(v[0]["end"], iso(parse_ms(&u[5].captured_at)));
+        assert_eq!(v[0]["startSec"], 2.5);
+        let back = masks_from_json(&v, &u);
+        assert_eq!(back.len(), 1);
+        assert_eq!((back[0].start, back[0].end), (2.5, 4.25));
+        // Without seconds, the wall-clock bounds map to whole units.
+        let mut v2 = v.clone();
+        v2[0].as_object_mut().unwrap().remove("startSec");
+        let back = masks_from_json(&v2, &u);
+        assert_eq!((back[0].start, back[0].end), (2.0, 5.0));
+    }
+
+    #[test]
+    fn lanes() {
+        let mk = |s: f64, e: f64| Mask { id: format!("{s}"), start: s, end: e, x: 0.0, y: 0.0, w: 0.1, h: 0.1 };
+        let m = vec![mk(0.0, 2.0), mk(1.0, 3.0), mk(2.0, 4.0), mk(1.5, 2.5)];
+        assert_eq!(assign_lanes(&m), vec![0, 1, 0, 2]);
+        assert_eq!(masks_overlapping(&m, 1.6, 1.8, None), 3);
+    }
+
+    #[test]
+    fn view_math() {
+        let v = View::FIT.zoomed(100, 4.0, 50.0, 0.5, 10.0);
+        assert_eq!(v, View { start: 37.5, zoom: 4.0 });
+        // Anchored near the end, the window stays inside the timeline.
+        let v = View::FIT.zoomed(100, 4.0, 99.0, 0.1, 10.0);
+        assert_eq!(v.start, 75.0);
+        assert_eq!(View { start: 0.0, zoom: 40.0 }.clamped(100, 10.0).zoom, 10.0);
+        assert_eq!(timecode(90.5), "01:30:30");
+        assert_eq!(span_label(65.0), "1h 5m");
+        assert_eq!(ruler_ticks_in(9.0, 21.0, 10), vec![(10.0, true), (15.0, false), (20.0, true)]);
     }
 
     #[test]

@@ -69,6 +69,12 @@ pub struct EdgeFade {
     pub top: ScaledPixels,
     /// Fade depth at the bottom edge; zero for none.
     pub bottom: ScaledPixels,
+    /// Fade depth at the left edge; zero for none. A fade is either
+    /// vertical (top/bottom) or horizontal (left/right): when top or bottom
+    /// is set, left and right are ignored.
+    pub left: ScaledPixels,
+    /// Fade depth at the right edge; zero for none.
+    pub right: ScaledPixels,
 }
 
 #[expect(missing_docs)]
@@ -126,6 +132,9 @@ impl Scene {
 
     /// Lookout patch: split `primitive` across `fade`'s zones (see [`EdgeFade`]).
     fn insert_faded(&mut self, primitive: Primitive, fade: EdgeFade) {
+        if fade.top.0 <= 0.0 && fade.bottom.0 <= 0.0 {
+            return self.insert_faded_x(primitive, fade);
+        }
         let mask = primitive.content_mask().bounds;
         let clipped = primitive.bounds().intersect(&mask);
         if clipped.is_empty() {
@@ -179,6 +188,63 @@ impl Scene {
         if touches_bottom {
             let h = fade.bottom.0;
             strips(bottom_start.max(f_top), f_bottom, &|y| (f_bottom - y) / h);
+        }
+    }
+
+    /// Lookout patch: [`Self::insert_faded`] across the left/right zones,
+    /// in one-device-pixel columns.
+    fn insert_faded_x(&mut self, primitive: Primitive, fade: EdgeFade) {
+        let mask = primitive.content_mask().bounds;
+        let clipped = primitive.bounds().intersect(&mask);
+        if clipped.is_empty() {
+            return;
+        }
+        let (fy, fh) = (fade.bounds.origin.y, fade.bounds.size.height);
+        let f_left = fade.bounds.origin.x.0;
+        let f_right = f_left + fade.bounds.size.width.0;
+        let left_end = f_left + fade.left.0.max(0.0);
+        let right_start = f_right - fade.right.0.max(0.0);
+        let (c_left, c_right) = (clipped.origin.x.0, clipped.origin.x.0 + clipped.size.width.0);
+        let touches_left = fade.left.0 > 0.0 && c_left < left_end && c_right > f_left;
+        let touches_right = fade.right.0 > 0.0 && c_right > right_start && c_left < f_right;
+        if !touches_left && !touches_right {
+            self.insert_unfaded(primitive);
+            return;
+        }
+        let band = |x0: f32, x1: f32| Bounds {
+            origin: point(ScaledPixels(x0), fy),
+            size: size(ScaledPixels((x1 - x0).max(0.0)), fh),
+        };
+        let mut middle = primitive.clone();
+        middle.set_content_mask_bounds(mask.intersect(&band(left_end.max(f_left), right_start.min(f_right))));
+        if !middle.bounds().intersect(&middle.content_mask().bounds).is_empty() {
+            self.insert_unfaded(middle);
+        }
+        let mut strips = |from: f32, to: f32, alpha_at: &dyn Fn(f32) -> f32| {
+            let mut x = from.floor();
+            while x < to {
+                let (x0, x1) = (x.max(from), (x + 1.0).min(to));
+                x += 1.0;
+                if x1 <= c_left || x0 >= c_right {
+                    continue;
+                }
+                let alpha = alpha_at((x0 + x1) / 2.0).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let mut strip = primitive.clone();
+                strip.set_content_mask_bounds(mask.intersect(&band(x0, x1)));
+                strip.scale_opacity(alpha);
+                self.insert_unfaded(strip);
+            }
+        };
+        if touches_left {
+            let w = fade.left.0;
+            strips(f_left, left_end.min(f_right), &|x| (x - f_left) / w);
+        }
+        if touches_right {
+            let w = fade.right.0;
+            strips(right_start.max(f_left), f_right, &|x| (f_right - x) / w);
         }
     }
 

@@ -32,6 +32,7 @@ pub struct EditorWindow {
     editor: Entity<TimelapseEditor>,
     name: Option<String>,
     removed: usize,
+    masks: usize,
     dirty: bool,
     finished: bool,
     confirm: Option<Entity<ConfirmDialog>>,
@@ -98,8 +99,9 @@ impl EditorWindow {
                 this.finished = true;
                 this.done(result.clone(), window, cx);
             }
-            EditorEvent::CutsChanged { removed, dirty } => {
+            EditorEvent::CutsChanged { removed, masks, dirty } => {
                 this.removed = *removed;
+                this.masks = *masks;
                 this.dirty = *dirty;
             }
             EditorEvent::SessionName(name) => {
@@ -123,6 +125,7 @@ impl EditorWindow {
             editor,
             name: None,
             removed: 0,
+            masks: 0,
             dirty: false,
             finished: false,
             confirm: None,
@@ -137,12 +140,15 @@ impl EditorWindow {
         if self.finished {
             return true;
         }
-        let message = if self.dirty && self.removed > 0 {
-            format!(
-                "Closing publishes this timelapse with {} cut{} applied. This can't be undone.",
-                self.removed,
-                if self.removed == 1 { "" } else { "s" }
-            )
+        let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+        let edits = match (self.removed, self.masks) {
+            (0, 0) => None,
+            (c, 0) => Some(plural(c, "cut")),
+            (0, m) => Some(plural(m, "mask")),
+            (c, m) => Some(format!("{} and {}", plural(c, "cut"), plural(m, "mask"))),
+        };
+        let message = if let Some(edits) = edits.filter(|_| self.dirty) {
+            format!("Closing publishes this timelapse with {edits} applied. This can't be undone.")
         } else {
             "Closing publishes this timelapse as recorded. This can't be undone.".to_string()
         };
@@ -185,11 +191,12 @@ impl EditorWindow {
     fn finish_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = None;
         let cuts = self.editor.read(cx).current_cuts();
+        let masks = self.editor.read(cx).current_masks();
         let core = app::state(cx).core.clone();
         let cfg = lookout_core::SessionConfig { token: self.token.clone(), api_base_url: api_base(cx) };
         let fut = app::tokio(cx, async move {
             let body = serde_json::to_value(&cuts).unwrap_or_default();
-            if let Err(e) = core.session_set_cuts(&cfg, body).await {
+            if let Err(e) = core.session_set_edits(&cfg, body, masks).await {
                 log::warn!("[editor] setCuts on close failed: {}", e.message);
             }
             core.session_apply_cuts(&cfg).await.ok()

@@ -77,17 +77,36 @@ impl Drop for PanelWebView {
     }
 }
 
+/// Everything needed to build a [`PanelWebView`] without touching GPUI.
+///
+/// Building is split from [`PanelWebView::prepare`] because on Windows
+/// WebView2 pumps the thread's message queue while it waits for its
+/// controller, and that pump runs queued GPUI tasks. If the App is borrowed
+/// at that moment (inside `render` or any `update`), the first task that
+/// touches it panics with "RefCell already borrowed". So call
+/// [`PendingWebView::build`] with no App borrow held: from a spawned task,
+/// between `update` calls.
+pub struct PendingWebView {
+    #[cfg(feature = "webview")]
+    url: String,
+    #[cfg(feature = "webview")]
+    origin: String,
+    #[cfg(feature = "webview")]
+    dark: bool,
+    #[cfg(feature = "webview")]
+    background: (u8, u8, u8),
+    #[cfg(feature = "webview")]
+    parent: Parent,
+    #[cfg(all(feature = "webview", target_os = "linux"))]
+    scale: f32,
+}
+
 impl PanelWebView {
-    /// Build a webview showing `url` (already carrying `lookout_theme`),
-    /// restricted to `origin`, as a child of `window`. Starts hidden.
+    /// Gather what building a webview showing `url` (already carrying
+    /// `lookout_theme`) as a child of `window` needs. Build it with
+    /// [`PendingWebView::build`], then [`PanelWebView::place`] it.
     #[allow(unused_variables)]
-    pub fn create(
-        url: &str,
-        dark: bool,
-        background: (u8, u8, u8),
-        window: &mut Window,
-        cx: &mut App,
-    ) -> anyhow::Result<(Self, flume::Receiver<WebEvent>)> {
+    pub fn prepare(url: &str, dark: bool, background: (u8, u8, u8), window: &Window, cx: &mut App) -> anyhow::Result<PendingWebView> {
         #[cfg(not(feature = "webview"))]
         {
             anyhow::bail!("built without the `webview` feature")
@@ -95,6 +114,59 @@ impl PanelWebView {
         #[cfg(feature = "webview")]
         {
             let origin = origin_of(url).ok_or_else(|| anyhow::anyhow!("panel URL has no origin"))?;
+            #[cfg(target_os = "linux")]
+            let parent = {
+                let parent = linux::X11Parent::new(window)?;
+                linux::ensure_gtk(cx)?;
+                parent
+            };
+            #[cfg(not(target_os = "linux"))]
+            let parent = {
+                use wry::raw_window_handle::HasWindowHandle;
+                Parent(HasWindowHandle::window_handle(window).map_err(|e| anyhow::anyhow!("{e}"))?.as_raw())
+            };
+            Ok(PendingWebView {
+                url: url.to_string(),
+                origin,
+                dark,
+                background,
+                parent,
+                #[cfg(target_os = "linux")]
+                scale: window.scale_factor(),
+            })
+        }
+    }
+}
+
+#[cfg(all(feature = "webview", target_os = "linux"))]
+type Parent = linux::X11Parent;
+
+/// The GPUI window's native handle, held past the borrow of the `Window`.
+#[cfg(all(feature = "webview", not(target_os = "linux")))]
+struct Parent(wry::raw_window_handle::RawWindowHandle);
+
+#[cfg(all(feature = "webview", not(target_os = "linux")))]
+impl wry::raw_window_handle::HasWindowHandle for Parent {
+    fn window_handle(&self) -> Result<wry::raw_window_handle::WindowHandle<'_>, wry::raw_window_handle::HandleError> {
+        // SAFETY: the GPUI window outlives the webview, which the panel (a
+        // view inside that window) owns. If the window closes before the
+        // build, the platform rejects the dead handle and the build fails.
+        Ok(unsafe { wry::raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
+impl PendingWebView {
+    /// Build the webview, restricted to the page's origin. Must run with no
+    /// App borrow held (see the type's docs). Starts at 1×1; `place` it.
+    pub fn build(self) -> anyhow::Result<(PanelWebView, flume::Receiver<WebEvent>)> {
+        #[cfg(not(feature = "webview"))]
+        {
+            anyhow::bail!("built without the `webview` feature")
+        }
+        #[cfg(feature = "webview")]
+        {
+            let Self { url, origin, dark, background, parent, .. } = self;
+            let url = url.as_str();
             let (tx, rx) = flume::unbounded();
 
             let ipc_tx = tx.clone();
@@ -163,14 +235,8 @@ impl PanelWebView {
             };
 
             #[cfg(target_os = "linux")]
-            let view = {
-                let parent = linux::X11Parent::new(window)?;
-                linux::ensure_gtk(cx)?;
-                linux::set_theme(dark);
-                builder.build_as_child(&parent)?
-            };
-            #[cfg(not(target_os = "linux"))]
-            let view = builder.build_as_child(&*window)?;
+            linux::set_theme(dark);
+            let view = builder.build_as_child(&parent)?;
 
             #[cfg(target_os = "linux")]
             {
@@ -183,20 +249,22 @@ impl PanelWebView {
                     false
                 });
                 LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                linux::match_scale_factor(&view, window.scale_factor());
+                linux::match_scale_factor(&view, self.scale);
             }
-            let this = Self {
+            let this = PanelWebView {
                 view,
                 shown: Cell::new(true),
                 placed: Cell::new(None),
                 #[cfg(target_os = "linux")]
-                scale: Cell::new(window.scale_factor()),
+                scale: Cell::new(self.scale),
             };
-            this.place(None, window);
             Ok((this, rx))
         }
     }
 
+}
+
+impl PanelWebView {
     /// Put the native view over `bounds` (window coordinates), or hide it.
     /// Cheap to call every frame: only changes reach the platform.
     #[allow(unused_variables)]
