@@ -52,6 +52,9 @@ const SPINNER_DELAY_MS: f64 = 350.0;
 const OUT: Ease = Ease::Bezier(0.23, 1.0, 0.32, 1.0);
 /// Frame step when paused (timelapses are 30 fps).
 const FRAME_STEP: f64 = 1.0 / 30.0;
+/// The settings menu's height (heading, six speeds, divider, Loop), used
+/// to keep it inside the window.
+const SPEED_MENU_H: f32 = 272.0;
 
 fn tnum() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
@@ -296,6 +299,7 @@ impl VideoPlayer {
             self.saw_window_fullscreen = window.is_fullscreen();
             self.owns_window_fullscreen = !window.is_fullscreen();
             if self.owns_window_fullscreen {
+                crate::platform::fullscreen::prepare(window);
                 window.toggle_fullscreen();
             }
             window.focus(&self.focus, cx);
@@ -713,7 +717,7 @@ impl VideoPlayer {
             }
         }
         if self.speed_o.get() > 0.001 {
-            root = root.children(self.render_speed_menu(cx));
+            root = root.child(self.render_speed_menu(window, cx));
         }
         // --media-frame-border: a hairline that keeps light video edges
         // from bleeding into the page.
@@ -994,13 +998,19 @@ impl VideoPlayer {
     }
 
     /// Settings popover above the gear: playback speed and loop.
-    fn render_speed_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    ///
+    /// Drawn in a window-level layer rather than inside the player, which
+    /// clips to its own bounds: on the session page the player is shorter
+    /// than the menu, so its top rows were cut off and unreachable.
+    fn render_speed_menu(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let o = self.speed_o.get();
-        let rb = self.root_bounds;
+        let vp = window.viewport_size();
         let sb = self.speed_bounds;
-        let right = f32::from(rb.origin.x + rb.size.width - (sb.origin.x + sb.size.width));
-        // --media-popover-side-offset (12px), rising 8px into place.
-        let bottom = f32::from(rb.origin.y + rb.size.height - sb.origin.y) + 12.0 - 8.0 * (1.0 - o);
+        let right = f32::from(vp.width - (sb.origin.x + sb.size.width));
+        // --media-popover-side-offset (12px), rising 8px into place; kept
+        // inside the window when there isn't room above the gear.
+        let max_bottom = (f32::from(vp.height) - SPEED_MENU_H - 8.0).max(8.0);
+        let bottom = (f32::from(vp.height - sb.origin.y) + 12.0).min(max_bottom) - 8.0 * (1.0 - o);
         let current = self.rate;
         let row = |id: SharedString, label: String, checked: bool| {
             div()
@@ -1057,7 +1067,7 @@ impl VideoPlayer {
                 cx.stop_propagation();
                 v.toggle_loop(cx);
             })));
-        // Click-away catcher behind the menu.
+        // Click-away catcher behind the menu, covering the whole window.
         let catcher = div().id("video-settings-catcher").absolute().inset_0().on_mouse_down(
             MouseButton::Left,
             cx.listener(|v, _: &MouseDownEvent, _, cx| {
@@ -1066,11 +1076,16 @@ impl VideoPlayer {
                 cx.notify();
             }),
         );
-        if self.speed_open {
-            vec![catcher.into_any_element(), menu.into_any_element()]
-        } else {
-            vec![menu.into_any_element()]
-        }
+        let layer = div()
+            .relative()
+            .w(vp.width)
+            .h(vp.height)
+            .when(self.speed_open, |d| d.child(catcher))
+            .child(menu);
+        // Above the full-screen layer (priority 100).
+        deferred(anchored().position(point(px(0.0), px(0.0))).child(layer))
+            .with_priority(200)
+            .into_any_element()
     }
 }
 

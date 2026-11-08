@@ -16,6 +16,7 @@ pub mod tray;
 pub mod vibrancy;
 pub mod webview;
 pub mod desktop_appearance;
+pub mod fullscreen;
 
 use std::sync::Arc;
 
