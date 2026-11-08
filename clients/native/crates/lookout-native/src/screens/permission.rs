@@ -1,7 +1,8 @@
 //! The macOS setup page: one row per privacy permission, each with its own
 //! "Allow" and macOS's own icon for it (after Codex Computer Use's). Screen
-//! Recording is required to get past it; Accessibility (the editor's file,
-//! line and column) and Camera are optional. "Allow" opens System Settings with the
+//! Recording and Accessibility (which window and file you're in) are
+//! required to continue, though "Skip for now" gets past the page until the
+//! next launch; Camera is optional. "Allow" opens System Settings with the
 //! permission guide, whose card flies out of the row itself
 //! (`platform::permission_guide`), so each row reports where it is on screen.
 //! Everywhere else permission is assumed (the page never shows).
@@ -114,7 +115,7 @@ fn read(kind: Kind) -> RowState {
 fn copy(kind: Kind) -> (&'static str, &'static str, bool, Icon) {
     match kind {
         Kind::Screen => ("Screen Recording", "Takes the screenshots your timelapse is made of", false, Icon::LkMonitor),
-        Kind::Accessibility => ("Accessibility", "Notes which file and line you're working on", true, Icon::LkPencil),
+        Kind::Accessibility => ("Accessibility", "Notes which window and file you're working in", false, Icon::LkPencil),
         Kind::Camera => ("Camera", "Adds photos of you working to your timelapse", true, Icon::LkCamera),
     }
 }
@@ -122,7 +123,8 @@ fn copy(kind: Kind) -> (&'static str, &'static str, bool, Icon) {
 impl Render for PermissionScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let screen_ok = self.rows[0].granted;
+        // Every permission that isn't optional, granted.
+        let required_ok = KINDS.iter().zip(&self.rows).all(|(k, r)| r.granted || copy(*k).2);
         // The first row still to do gets the filled button.
         let next = self.rows.iter().position(|r| !r.granted);
 
@@ -175,13 +177,13 @@ impl Render for PermissionScreen {
                                 Button::new("setup-continue", "Continue")
                                     .size(BtnSize::Lg)
                                     .full_width()
-                                    .disabled(!screen_ok)
+                                    .disabled(!required_ok)
                                     .on_click(move |_, _, cx| {
                                         permission_guide::close();
                                         me1.update(cx, |_, cx| cx.emit(PermissionEvent::Done { cache: true }))
                                     }),
                             )
-                            .when(!screen_ok, |d| {
+                            .when(!required_ok, |d| {
                                 d.child(
                                     Button::new("setup-skip", "Skip for now")
                                         .variant(Variant::Ghost)

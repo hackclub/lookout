@@ -464,7 +464,7 @@ impl MainWindow {
 
     /// macOS: the setup page (permissions), until it has been completed.
     fn next_gate(&mut self, cx: &mut Context<Self>) {
-        if !is_mac() || (store(cx).perm_screen && store(cx).perm_camera) {
+        if !is_mac() || (store(cx).perm_screen && store(cx).perm_camera && store(cx).perm_accessibility) {
             self.gate = None;
             return;
         }
@@ -479,6 +479,7 @@ impl MainWindow {
                 let st = store_mut(cx);
                 st.perm_screen = true;
                 st.perm_camera = true;
+                st.perm_accessibility = true;
                 st.save();
             }
             this.gate = None;

@@ -120,6 +120,10 @@ pub struct Persisted {
     /// `lookout-perm-screen` / `lookout-perm-camera`
     pub perm_screen: bool,
     pub perm_camera: bool,
+    /// The setup page was completed with Accessibility required. Native
+    /// only (no Tauri key): false for everyone who passed the older page,
+    /// so they see it once more.
+    pub perm_accessibility: bool,
     /// `lookout-program-links`
     pub program_links: HashMap<String, ProgramLink>,
     /// `lookout-pending-pairing`
