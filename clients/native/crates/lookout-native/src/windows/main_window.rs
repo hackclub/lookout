@@ -1064,6 +1064,10 @@ impl Focusable for MainWindow {
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if crate::smoke::enabled() {
+            crate::smoke::frame();
+            window.request_animation_frame();
+        }
         let t = theme(cx).clone();
         let csd = uses_header_bar(window);
         self.frame_offset = if csd { WINDOW_MARGIN } else { 0.0 };

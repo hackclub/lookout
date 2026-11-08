@@ -22,6 +22,7 @@ mod motion;
 mod platform;
 mod screens;
 mod services;
+mod smoke;
 mod store;
 mod theme;
 mod ui;
@@ -94,6 +95,7 @@ fn main() {
         platform::app_menu::init(cx);
         app::init(cx, rt.clone());
         let main = windows::main_window::open(cx);
+        smoke::start(cx);
         cx.set_global(windows::MainHandle(main));
         windows::wire_tray(rt.clone(), cx);
         if !initial_urls.is_empty() {

@@ -1,0 +1,145 @@
+name: Lookout Native CI
+
+# Fast feedback for clients/native (the GPUI app): build, test and a real
+# launch on macOS, Windows and Linux. No signing, no artifacts published,
+# nothing released; release.yml's `native-build` job does that on tags.
+#
+# The smoke step boots the actual app with LOOKOUT_SMOKE_SECS: it keeps the
+# main window animating and exits non-zero if fewer frames were painted than
+# expected, which catches startup crashes, GPU/presentation failures and the
+# macOS 26 "paints once, then frozen" display-link bug.
+
+on:
+  push:
+    branches: ["native/**"]
+    paths:
+      - "clients/native/**"
+      - "clients/desktop/src-tauri/crates/**"
+      - ".github/workflows/native-ci.yml"
+  pull_request:
+    paths:
+      - "clients/native/**"
+      - "clients/desktop/src-tauri/crates/**"
+      - ".github/workflows/native-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: native-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Fewer, smaller debug artefacts: faster links and cache restores.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  native:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Larger Apple-silicon runner: the GPUI tree is ~900 crates.
+          - name: macOS (arm64)
+            runner: macos-latest-xlarge
+            target: aarch64-apple-darwin
+            test: true
+          # The OS where GPUI's display link froze; smoke-only.
+          - name: macOS 26 smoke
+            runner: macos-26
+            target: aarch64-apple-darwin
+            test: false
+          - name: Windows (x64)
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            test: true
+          - name: Linux (x64)
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            test: true
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mold clang \
+            libwebkit2gtk-4.1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxrandr-dev \
+            libfontconfig-dev libfreetype-dev libvulkan-dev libegl-dev libgbm-dev \
+            libdbus-1-dev libpipewire-0.3-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            xvfb mesa-vulkan-drivers dbus-x11
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "./clients/native -> target"
+          shared-key: native-ci-${{ matrix.runner }}
+          # Only the default branch's caches are restorable everywhere; save
+          # from branch pushes too so iteration on a branch stays warm.
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Use mold (Linux)
+        if: runner.os == 'Linux'
+        run: echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
+      - name: Build
+        working-directory: clients/native
+        run: cargo build --workspace --locked
+
+      - name: Test
+        if: matrix.test
+        working-directory: clients/native
+        run: cargo test --workspace --locked
+
+      - name: Smoke (macOS / Windows)
+        if: runner.os != 'Linux'
+        working-directory: clients/native
+        shell: bash
+        env:
+          LOOKOUT_SMOKE_SECS: "8"
+          # Keep the run self-contained: no real server, no update checks.
+          LOOKOUT_API_BASE: http://127.0.0.1:9
+        run: |
+          # No GNU `timeout` on macOS runners; perl's alarm works on both.
+          perl -e 'alarm shift; exec @ARGV' 120 ./target/debug/lookout 2>&1 | tee smoke.log | grep -E 'LOOKOUT_SMOKE|panicked' || true
+          grep -q 'LOOKOUT_SMOKE .*result=pass' smoke.log
+
+      - name: Smoke (Linux, Xvfb + lavapipe)
+        if: runner.os == 'Linux'
+        working-directory: clients/native
+        env:
+          LOOKOUT_SMOKE_SECS: "8"
+          LOOKOUT_API_BASE: http://127.0.0.1:9
+        run: |
+          timeout 120 dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" \
+            ./target/debug/lookout 2>&1 | tee smoke.log | grep -E 'LOOKOUT_SMOKE|panicked' || true
+          grep -q 'LOOKOUT_SMOKE .*result=pass' smoke.log
+
+      - name: Upload smoke log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ matrix.runner }}
+          path: clients/native/smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
