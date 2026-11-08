@@ -71,6 +71,12 @@ pub enum HeaderChrome {
 }
 
 impl HeaderChrome {
+    /// Whether the bar's buttons take Windows caption cells (46px, full
+    /// height, side by side) instead of GNOME's round actions.
+    pub fn windows_captions() -> bool {
+        Self::current(true) == Self::Windows
+    }
+
     pub fn current(lookout_draws_frame: bool) -> Self {
         // Debug builds: `LOOKOUT_HEADER_CHROME=mac|windows` previews another
         // platform's controls (layout only; the buttons act on this window).
@@ -155,8 +161,8 @@ impl HeaderBtn {
         self.tooltip = Some(t.into());
         self
     }
-    /// Hover/press in the Windows 11 close colours (#C42B1C, a touch lighter
-    /// while pressed) with the glyph turning white.
+    /// Hover/press in close red (#F9271E, a touch lighter while pressed) with
+    /// the glyph turning white.
     pub fn danger(mut self) -> Self {
         self.danger = true;
         self
@@ -164,6 +170,11 @@ impl HeaderBtn {
     /// Draw as a Windows 11 caption button instead of a round action.
     pub fn caption(mut self) -> Self {
         self.caption = true;
+        self
+    }
+    /// [`Self::caption`] when `on`.
+    pub fn caption_if(mut self, on: bool) -> Self {
+        self.caption |= on;
         self
     }
 }
@@ -207,8 +218,8 @@ impl RenderOnce for HeaderBtn {
         };
         let (fg_idle, fg_hover) = if self.caption { (t.text_primary, t.text_primary) } else { (fg_idle, fg_hover) };
         let (hover, active, fg_hover) = if self.danger {
-            let red: Hsla = theme::rgba8(0xc4, 0x2b, 0x1c, 1.0).into();
-            (red, theme::rgba8(0xc4, 0x2b, 0x1c, 0.9).into(), theme::white(1.0))
+            let red: Hsla = theme::rgba8(0xf9, 0x27, 0x1e, 1.0).into();
+            (red, theme::rgba8(0xf9, 0x27, 0x1e, 0.9).into(), theme::white(1.0))
         } else {
             (hover, active, fg_hover)
         };
@@ -410,42 +421,38 @@ impl RenderOnce for HeaderBar {
             .children(back)
             .child(title_block)
             .child(div().flex_1().self_stretch())
-            .child(
+            .child({
+                let win = chrome == HeaderChrome::Windows;
+                let on_close = self.on_close.clone();
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    // Windows: caption cells sit side by side, flush right.
+                    .gap(px(if win { 0.0 } else { 4.0 }))
                     .flex_none()
                     .children(self.actions)
                     .map(|d| if gnome_close && controls_on_right { d.child(make_close("hb-close")) } else { d })
-                    .when(chrome == HeaderChrome::Windows, |d| d.child(div().w(px(1.0)).h(px(16.0)).ml(px(4.0)).bg(t.border_default))),
-            )
-            .when(chrome == HeaderChrome::Windows, |d| {
-                let on_close = self.on_close.clone();
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .self_stretch()
-                        .child(
-                            HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 10.0, |_, window, _| {
-                                window.minimize_window()
-                            })
-                            .tooltip("Minimize")
-                            .caption(),
-                        )
-                        .child(
-                            HeaderBtn::icon("hb-win-close", HeaderBtnKind::Action, Icon::LkWinClose, 10.0, move |_, window, cx| {
-                                match &on_close {
-                                    Some(f) => f(window, cx),
-                                    None => window.remove_window(),
-                                }
-                            })
-                            .tooltip("Close")
-                            .caption()
-                            .danger(),
-                        ),
-                )
+                    .when(win, |d| {
+                        d.child(div().w(px(1.0)).h(px(16.0)).mx(px(4.0)).bg(t.border_default))
+                            .child(
+                                HeaderBtn::icon("hb-win-min", HeaderBtnKind::Action, Icon::LkWinMinimize, 10.0, |_, window, _| {
+                                    window.minimize_window()
+                                })
+                                .tooltip("Minimize")
+                                .caption(),
+                            )
+                            .child(
+                                HeaderBtn::icon("hb-win-close", HeaderBtnKind::Action, Icon::LkWinClose, 10.0, move |_, window, cx| {
+                                    match &on_close {
+                                        Some(f) => f(window, cx),
+                                        None => window.remove_window(),
+                                    }
+                                })
+                                .tooltip("Close")
+                                .caption()
+                                .danger(),
+                            )
+                    })
             })
     }
 }
