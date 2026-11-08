@@ -11,7 +11,7 @@ export default defineConfig({
   // tsup stops injecting it.
   dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
   splitting: false,
-  sourcemap: false,
+  sourcemap: true,
   clean: true,
   // The wasm package stays external: its JS locates the .wasm next to
   // itself with import.meta.url, which the consumer's bundler resolves.

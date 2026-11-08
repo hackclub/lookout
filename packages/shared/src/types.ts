@@ -1,5 +1,6 @@
 import type { CaptureFormat, SessionStatus } from "./constants.js";
 import type { CutInterval, VideoUnit } from "./cuts.js";
+import type { MaskRegion } from "./masks.js";
 
 export interface Session {
   id: string;
@@ -158,15 +159,27 @@ export interface TimingsResponse {
   cutTimestamps?: string[];
 }
 
-// -- Edits (cuts) --
+// -- Edits (cuts & masks) --
+
+export interface VideoShot {
+  id: string;
+  unitIndex: number; // Minute/unit index
+  frameIndex: number;// Frame index within unit
+  startSec: number;  // Offset in seconds
+  endSec: number;    // Offset in seconds
+  duration: number;  // Shot length in seconds
+}
 
 export interface UnitsResponse {
   /** Units of the compiled ORIGINAL video, in output order: array index =
    *  video second = real-world minute. Empty for sessions compiled before
    *  edit support (not editable). */
   units: VideoUnit[];
-  /** Current cut list ([] = no edits). */
+  /** Video shots with sub-second timestamps. */
+  shots?: VideoShot[];
   cuts: CutInterval[];
+  /** Active mask regions. */
+  masks?: MaskRegion[];
   /** Whether the session is currently editable: an edit hold is active,
    *  the original video is built, and recompile budget remains. Editing is
    *  only possible during the hold — never after `complete`. */
@@ -197,11 +210,13 @@ export interface UnitsResponse {
 
 export interface SetCutsRequest {
   cuts: CutInterval[];
+  masks?: MaskRegion[];
 }
 
 export interface SetCutsResponse {
-  /** Normalized (sorted, merged, clamped) cut list as persisted. */
   cuts: CutInterval[];
+  /** Persisted mask regions. */
+  masks?: MaskRegion[];
   /** Units in the original video. */
   unitsTotal: number;
   /** Units removed by the normalized list. */

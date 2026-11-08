@@ -28,6 +28,16 @@ export function injectEditorStyles(): void {
     }
     .lk-ed-region:hover { background-color: var(--color-cut-fill-hover); }
 
+    .lk-ed-mask-span,
+    .lk-ed-blur-span {
+      transition: background-color 140ms ${EASE_OUT_QUART},
+                  box-shadow 140ms ${EASE_OUT_QUART};
+    }
+    .lk-ed-mask-span:hover,
+    .lk-ed-blur-span:hover {
+      background-color: rgba(59, 130, 246, 0.45);
+    }
+
     /* The grab target is deliberately wider than the visible grip: 12px of
        hit area, a 3px bar. Fitts's law on a 1-second-per-minute timeline. */
     .lk-ed-grip { transition: transform 140ms ${EASE_OUT_QUART}; }
@@ -57,6 +67,14 @@ export function injectEditorStyles(): void {
     .lk-ed-iconbtn:focus-visible {
       outline: none;
       box-shadow: 0 0 0 2px var(--color-bg-body), 0 0 0 4px var(--color-accent);
+    }
+
+    .lk-ed-scroll-track {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .lk-ed-scroll-track::-webkit-scrollbar {
+      display: none;
     }
 
     .lk-ed-fade-in { animation: lk-ed-fade 160ms ${EASE_OUT_QUART} both; }

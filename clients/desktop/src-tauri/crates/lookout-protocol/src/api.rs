@@ -186,14 +186,18 @@ pub async fn session_units(t: &dyn Transport, s: &SessionConfig) -> ApiResult<Va
     get(t, session_url(s, "/units")).await
 }
 
-/// `PUT /api/sessions/:token/cuts` — replace the cut list. `cuts` is the
-/// JSON array of `CutInterval`s; `[]` clears all edits.
-pub async fn session_set_cuts(t: &dyn Transport, s: &SessionConfig, cuts: Value) -> ApiResult<Value> {
+/// `PUT /api/sessions/:token/cuts` — replace the cut and mask lists. `cuts`
+/// is the JSON array of `CutInterval`s, `masks` of `MaskRegion`s (`None`
+/// sends `[]`); `[]` for both clears all edits.
+pub async fn session_set_cuts(t: &dyn Transport, s: &SessionConfig, cuts: Value, masks: Option<Value>) -> ApiResult<Value> {
     request_json(
         t,
         Method::Put,
         session_url(s, "/cuts"),
-        Some(serde_json::json!({ "cuts": cuts })),
+        Some(serde_json::json!({
+            "cuts": cuts,
+            "masks": masks.unwrap_or_else(|| serde_json::json!([])),
+        })),
         API_TIMEOUT,
     )
     .await

@@ -12,6 +12,7 @@ import {
   radii,
   spacing,
   type CutInterval,
+  type MaskRegion,
 } from "@lookout/react";
 
 /**
@@ -37,7 +38,10 @@ interface Settings {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw) as Settings;
+    if (raw) {
+      const parsed = JSON.parse(raw) as Settings;
+      if (parsed.token) return parsed;
+    }
   } catch {
     // Fall through to defaults.
   }
@@ -56,6 +60,7 @@ export function App() {
   });
   const [tab, setTab] = useState<Tab>("editor");
   const [cuts, setCuts] = useState<CutInterval[]>([]);
+  const [masks, setMasks] = useState<MaskRegion[]>([]);
 
   // Mirrors what <LookoutProvider accentColor> does, so the editor and
   // both dialogs can be checked against a brand colour without wiring a
@@ -95,6 +100,7 @@ export function App() {
                 key={applied.token}
                 settings={applied}
                 onCuts={setCuts}
+                onMasks={setMasks}
               />
             )}
             {tab === "detail" && (
@@ -105,7 +111,7 @@ export function App() {
               />
             )}
           </div>
-          <ServerTruth settings={applied} cuts={cuts} />
+          <ServerTruth settings={applied} cuts={cuts} masks={masks} />
         </div>
       )}
     </div>
@@ -255,9 +261,11 @@ function Empty() {
 function ResizableEditor({
   settings,
   onCuts,
+  onMasks,
 }: {
   settings: Settings;
   onCuts: (cuts: CutInterval[]) => void;
+  onMasks: (masks: MaskRegion[]) => void;
 }) {
   const [size, setSize] = useState({ w: 900, h: 620 });
   const presets: Array<[string, number, number]> = [
@@ -315,6 +323,10 @@ function ResizableEditor({
             onCuts(cuts);
             console.log("[playground] cuts", { dirty, cuts });
           }}
+          onMasksChange={(masks, dirty) => {
+            onMasks(masks);
+            console.log("[playground] masks", { dirty, masks });
+          }}
         />
       </div>
     </div>
@@ -332,9 +344,11 @@ function ResizableEditor({
 function ServerTruth({
   settings,
   cuts,
+  masks,
 }: {
   settings: Settings;
   cuts: CutInterval[];
+  masks: MaskRegion[];
 }) {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [units, setUnits] = useState<Record<string, unknown> | null>(null);
@@ -405,11 +419,11 @@ function ServerTruth({
     };
   }, [settings.apiBaseUrl, settings.token, loadUnits]);
 
-  // Dry-run the cut list the editor most recently reported, so the
+  // Dry-run the cut and mask list the editor most recently reported, so the
   // server's own arithmetic sits next to the editor's footer.
-  const dryRun = useCallback(async (cuts: CutInterval[]) => {
+  const dryRun = useCallback(async (cuts: CutInterval[], masks: MaskRegion[]) => {
     try {
-      setPreview({ ...(await clientRef.current.setCuts(cuts)) });
+      setPreview({ ...(await clientRef.current.setCuts(cuts, masks)) });
     } catch (e) {
       setPreview({ error: e instanceof Error ? e.message : String(e) });
     }
@@ -478,7 +492,7 @@ function ServerTruth({
 
       <Label>PUT /cuts</Label>
       <button
-        onClick={() => void dryRun(cuts)}
+        onClick={() => void dryRun(cuts, masks)}
         style={{
           background: "transparent",
           border: `1px solid ${colors.border.hover}`,
@@ -490,7 +504,7 @@ function ServerTruth({
           cursor: "pointer",
         }}
       >
-        Verify {cuts.length} interval{cuts.length === 1 ? "" : "s"} against server
+        Verify {cuts.length} cut{cuts.length === 1 ? "" : "s"}, {masks.length} mask{masks.length === 1 ? "" : "s"} against server
       </button>
       <div style={{ fontSize: fontSize.xs, color: colors.text.tertiary, lineHeight: 1.5 }}>
         Sends the editor's current list and shows what the server counts.

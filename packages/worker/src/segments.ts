@@ -8,7 +8,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { KeptRange } from "@lookout/shared";
+import {
+    type KeptRange,
+    type VideoUnit,
+    type MaskRegion,
+    SCREENSHOT_INTERVAL_MS,
+} from "@lookout/shared";
 
 const execFileAsync = promisify(execFile);
 
@@ -351,6 +356,150 @@ export async function buildSegment(
   return segmentPath;
 }
 
+// Mask region in video seconds with normalized coordinates.
+export interface VideoMask {
+    startSec: number;
+    endSec: number;
+    x: number;      // 0..1
+    y: number;      // 0..1
+    width: number;  // 0..1
+    height: number; // 0..1
+}
+
+export function maskToVideoMask(
+    m: MaskRegion,
+    videoUnits: VideoUnit[],
+): VideoMask | null {
+    if (videoUnits.length === 0)
+        return null;
+
+    const unitTimesMs = videoUnits.map((u) => Date.parse(u.capturedAt));
+    const videoStartMs = unitTimesMs[0];
+    const videoEndMs = unitTimesMs[unitTimesMs.length - 1] + SCREENSHOT_INTERVAL_MS;
+
+    const startMs = Date.parse(m.start);
+    const endMs = Date.parse(m.end);
+    const hasSec =
+        typeof m.startSec === "number" &&
+        typeof m.endSec === "number" &&
+        m.endSec > m.startSec;
+
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
+        if (endMs <= videoStartMs || startMs >= videoEndMs || endMs <= startMs)
+            return null;
+
+        let firstUnitIdx = -1;
+        let lastUnitIdx = -1;
+        for (let i = 0; i < videoUnits.length; i++) {
+            const uStart = unitTimesMs[i];
+            const uEnd = i + 1 < unitTimesMs.length ? unitTimesMs[i + 1] : uStart + SCREENSHOT_INTERVAL_MS;
+            if (uStart < endMs && uEnd > startMs) {
+                if (firstUnitIdx === -1)
+                    firstUnitIdx = i;
+                lastUnitIdx = i;
+            }
+        }
+
+        if (firstUnitIdx === -1)
+            return null;
+
+        let startSec: number;
+        let endSec: number;
+
+        if (hasSec) {
+            const subSec = Math.max(0, (m.startSec as number) - Math.floor(m.startSec as number));
+            const duration = (m.endSec as number) - (m.startSec as number);
+            startSec = firstUnitIdx + subSec;
+            endSec = startSec + duration;
+        }
+        else {
+            startSec = firstUnitIdx;
+            endSec = lastUnitIdx + 1;
+        }
+
+        startSec = Math.max(0, Math.min(videoUnits.length, startSec));
+        endSec = Math.max(startSec + 0.001, Math.min(videoUnits.length, endSec));
+
+        return {
+            startSec,
+            endSec,
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        };
+    }
+
+    if (hasSec) {
+        if ((m.startSec as number) >= videoUnits.length || (m.endSec as number) <= 0)
+            return null;
+
+        const startSec = Math.max(0, Math.min(videoUnits.length, m.startSec as number));
+        const endSec = Math.max(startSec + 0.001, Math.min(videoUnits.length, m.endSec as number));
+        return {
+            startSec,
+            endSec,
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        };
+    }
+
+    return null;
+}
+
+export function masksToVideoMasks(
+    masks: MaskRegion[],
+    videoUnits: VideoUnit[],
+): VideoMask[] {
+    if (masks.length === 0 || videoUnits.length === 0)
+        return [];
+    return masks
+        .map((m) => maskToVideoMask(m, videoUnits))
+        .filter((m): m is VideoMask => m !== null);
+}
+
+// Read video dimensions using ffprobe.
+export async function probeDimensions(
+    filePath: string,
+): Promise<{ width: number; height: number }> {
+    try {
+        const { stdout } = await execFileAsync(
+            "ffprobe",
+            [
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                filePath,
+            ],
+            { timeout: 10_000 },
+        );
+        const data = JSON.parse(stdout) as {
+            streams?: Array<{ width?: number; height?: number }>;
+        };
+        const stream = data.streams?.[0];
+        if (
+            typeof stream?.width !== "number" ||
+            typeof stream?.height !== "number" ||
+            stream.width <= 0 ||
+            stream.height <= 0
+        )
+            throw new Error(`probeDimensions: could not determine video dimensions for ${filePath}`);
+
+        return {
+            width: stream.width,
+            height: stream.height,
+        };
+    }
+    catch (err) {
+        throw new Error(
+            `probeDimensions failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
+}
+
 /**
  * The edit feature's cut step: produce a video containing only the kept
  * ranges of a compiled original.
@@ -376,6 +525,7 @@ export async function cutVideoToKeptRanges(
   originalPath: string,
   keptRanges: KeptRange[],
   aligned: boolean,
+  masks?: VideoMask[],
 ): Promise<string> {
   if (keptRanges.length === 0) {
     throw new Error("cutVideoToKeptRanges: no kept ranges");
@@ -406,7 +556,9 @@ export async function cutVideoToKeptRanges(
     }
   };
 
-  if (aligned) {
+  const hasMasks = masks != null && masks.length > 0;
+
+  if (aligned && !hasMasks) {
     try {
       // 1. Extract each kept range losslessly into a TS intermediate.
       const rangePaths: string[] = [];
@@ -473,26 +625,87 @@ export async function cutVideoToKeptRanges(
   const keepExpr = keptRanges
     .map((r) => `(gte(t\\,${r.start})*lt(t\\,${r.end}))`)
     .join("+");
-  await execFileAsync(
-    "ffmpeg",
-    [
-      "-i", originalPath,
-      "-vf", `select='${keepExpr}',setpts=N/(${fps}*TB)`,
-      "-r", String(fps),
-      "-c:v", "libx264",
-      "-preset", "fast",
-      "-crf", "18",
-      "-pix_fmt", "yuv420p",
-      "-g", String(fps),
-      "-keyint_min", String(fps),
-      "-sc_threshold", "0",
-      "-x264-params", "open-gop=0",
-      "-movflags", "+faststart",
-      "-y",
-      editedPath,
-    ],
-    { timeout: ASSEMBLE_TIMEOUT_MS },
-  );
+  if (!hasMasks) {
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-i", originalPath,
+        "-vf", `select='${keepExpr}',setpts=N/(${fps}*TB)`,
+        "-r", String(fps),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-g", String(fps),
+        "-keyint_min", String(fps),
+        "-sc_threshold", "0",
+        "-x264-params", "open-gop=0",
+        "-movflags", "+faststart",
+        "-y",
+        editedPath,
+      ],
+      { timeout: ASSEMBLE_TIMEOUT_MS },
+    );
+  } else {
+    // Probe video dimensions to compute pixel coordinates
+    const { width: vidW, height: vidH } = await probeDimensions(originalPath);
+
+    // Build FFmpeg filter graph to overlay pixelated boxes
+    const filterParts: string[] = [];
+    let currentIn = "0:v";
+
+    for (let i = 0; i < masks.length; i++) {
+      const m = masks[i];
+      const rawX = Math.round(m.x * vidW);
+      const rawY = Math.round(m.y * vidH);
+      const rawW = Math.round(m.width * vidW);
+      const rawH = Math.round(m.height * vidH);
+
+      const X = Math.max(0, Math.min((vidW - 2) & ~1, rawX & ~1));
+      const Y = Math.max(0, Math.min((vidH - 2) & ~1, rawY & ~1));
+      const W = Math.max(2, Math.min((vidW - X) & ~1, rawW & ~1));
+      const H = Math.max(2, Math.min((vidH - Y) & ~1, rawH & ~1));
+
+      // Scale down 16x and scale back up with nearest-neighbor to pixelate
+      const downW = Math.max(2, Math.floor(W / 16 / 2) * 2);
+      const downH = Math.max(2, Math.floor(H / 16 / 2) * 2);
+
+      const outTag = `v_mask_${i}`;
+      filterParts.push(
+        `[${currentIn}]split=2[m_base_${i}][m_crop_${i}]`,
+        `[m_crop_${i}]crop=${W}:${H}:${X}:${Y},scale=${downW}:${downH}:flags=neighbor,scale=${W}:${H}:flags=neighbor[m_pix_${i}]`,
+        `[m_base_${i}][m_pix_${i}]overlay=${X}:${Y}:enable='gte(t\\,${m.startSec - 0.005})*lte(t\\,${m.endSec + 0.005})'[${outTag}]`,
+      );
+      currentIn = outTag;
+    }
+
+    filterParts.push(
+      `[${currentIn}]select='${keepExpr}',setpts=N/(${fps}*TB)[vout]`,
+    );
+
+    await execFileAsync(
+      "ffmpeg",
+      [
+        "-threads", "0",
+        "-i", originalPath,
+        "-filter_complex", filterParts.join(";"),
+        "-map", "[vout]",
+        "-r", String(fps),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-g", String(fps),
+        "-keyint_min", String(fps),
+        "-sc_threshold", "0",
+        "-x264-params", "open-gop=0",
+        "-movflags", "+faststart",
+        "-y",
+        editedPath,
+      ],
+      { timeout: ASSEMBLE_TIMEOUT_MS },
+    );
+  }
   await verify("Edited MP4 (re-encoded)", 1);
   return editedPath;
 }

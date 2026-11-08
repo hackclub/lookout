@@ -36,9 +36,12 @@ import {
   EDIT_LEASE_SECONDS,
   EDIT_HOLD_MAX_MINUTES,
   normalizeCuts,
+  normalizeMasks,
   isCutAt,
   countCutUnits,
   computeCutSeconds,
+  MAX_MASK_REGIONS,
+  type MaskRegion,
   type CaptureFormat,
   type CaptureRowForCuts,
   type CutInterval,
@@ -89,6 +92,11 @@ function reportedTrackedSeconds(
 /** The session's cut list, always as an array. */
 function sessionCuts(session: { cuts: unknown }): CutInterval[] {
   return Array.isArray(session.cuts) ? (session.cuts as CutInterval[]) : [];
+}
+
+// Extract the session's mask list, falling back to an empty array.
+function sessionMasks(session: { masks?: unknown }): MaskRegion[] {
+  return Array.isArray(session.masks) ? (session.masks as MaskRegion[]) : [];
 }
 
 /** Is the session's edit hold currently active? */
@@ -290,6 +298,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         status: session.status,
         trackedSeconds,
         cuts: sessionCuts(session),
+        masks: sessionMasks(session),
         cutSeconds: session.cutSeconds ?? 0,
         uncutTrackedSeconds: rawTrackedSeconds,
         editable: sessionEditability(session).editable,
@@ -1442,6 +1451,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       return {
         units: (session.videoUnits as VideoUnit[] | null) ?? [],
         cuts: sessionCuts(session),
+        masks: sessionMasks(session),
         editable,
         ...(editable ? {} : { editableReason: reason }),
         editHoldUntil: holdActive(session)
@@ -1535,7 +1545,10 @@ export async function sessionRoutes(app: FastifyInstance) {
   // publishes the session.
   app.put<{
     Params: { token: string };
-    Body: { cuts: Array<{ start: string; end: string }> };
+    Body: {
+      cuts: Array<{ start: string; end: string }>;
+      masks?: MaskRegion[];
+    };
   }>(
     "/api/sessions/:token/cuts",
     {
@@ -1554,6 +1567,34 @@ export async function sessionRoutes(app: FastifyInstance) {
                 properties: {
                   start: { type: "string" as const },
                   end: { type: "string" as const },
+                },
+                additionalProperties: false,
+              },
+            },
+            masks: {
+              type: "array" as const,
+              maxItems: MAX_MASK_REGIONS,
+              items: {
+                type: "object" as const,
+                required: [
+                  "id",
+                  "start",
+                  "end",
+                  "x",
+                  "y",
+                  "width",
+                  "height",
+                ] as const,
+                properties: {
+                  id: { type: "string" as const },
+                  start: { type: "string" as const },
+                  end: { type: "string" as const },
+                  startSec: { type: "number" as const },
+                  endSec: { type: "number" as const },
+                  x: { type: "number" as const },
+                  y: { type: "number" as const },
+                  width: { type: "number" as const },
+                  height: { type: "number" as const },
                 },
                 additionalProperties: false,
               },
@@ -1596,8 +1637,18 @@ export async function sessionRoutes(app: FastifyInstance) {
           ? { minMs: boundsMin, maxMs: boundsMax }
           : undefined,
       );
-      if (!normalized.ok) {
-        return reply.code(400).send({ error: normalized.error });
+      if (!normalized.ok) return reply.code(400).send({ error: normalized.error });
+
+      let normalizedMasks: MaskRegion[] = sessionMasks(session);
+      if (request.body.masks !== undefined) {
+        const maskResult = normalizeMasks(
+          request.body.masks,
+          boundsMin !== undefined && boundsMax !== undefined
+            ? { minMs: boundsMin, maxMs: boundsMax }
+            : undefined,
+        );
+        if (!maskResult.ok) return reply.code(400).send({ error: maskResult.error });
+        normalizedMasks = maskResult.masks;
       }
 
       const videoUnits = session.videoUnits as VideoUnit[];
@@ -1630,6 +1681,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         .update(schema.sessions)
         .set({
           cuts: normalized.cuts,
+          masks: normalizedMasks,
           cutSeconds,
           updatedAt: new Date(),
         })
@@ -1649,6 +1701,7 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       return {
         cuts: normalized.cuts,
+        masks: normalizedMasks,
         unitsTotal: videoUnits.length,
         unitsCut,
         trackedSeconds: Math.max(0, rawTrackedSeconds - cutSeconds),
@@ -1751,9 +1804,10 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
 
       const cuts = sessionCuts(session);
+      const masks = sessionMasks(session);
 
-      if (cuts.length === 0) {
-        // No cuts: publish the already-built original directly. No worker
+      if (cuts.length === 0 && masks.length === 0) {
+        // No cuts or masks: publish the already-built original directly. No worker
         // round-trip, so "Save without edits" is instant.
         const published = await publishHeldSession(session.id);
         if (!published) {
