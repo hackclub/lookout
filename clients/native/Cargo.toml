@@ -25,3 +25,11 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# Vendored GPUI crates, patched so video frames can be drawn as GPU surfaces
+# on every platform (upstream only implements `PaintSurface` on macOS). See
+# vendor/PATCHES.md for exactly what changed against the crates.io release.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

@@ -1072,8 +1072,16 @@ impl MainWindow {
                     }
                 })),
             },
-            Route::Add => HeaderNav { title: "New Timelapse".into(), subtitle: None, on_back: back(self) },
-            Route::Record(_) => HeaderNav { title: "Recording".into(), subtitle: None, on_back: back(self) },
+            Route::Add => HeaderNav { title: "Start a recording".into(), subtitle: None, on_back: back(self) },
+            Route::Record(_) => {
+                // The record page names its step: the source question, or
+                // "Recording" once capture runs.
+                let title = match current.map(|s| &s.page) {
+                    Some(PageView::Record(r)) => r.read(cx).header_title(),
+                    _ => "Recording",
+                };
+                HeaderNav { title: title.into(), subtitle: None, on_back: back(self) }
+            }
             Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self) },
             Route::EditorOpen(_) => HeaderNav { title: "Lookout".into(), subtitle: Some("Editing in another window".into()), on_back: None },
         }

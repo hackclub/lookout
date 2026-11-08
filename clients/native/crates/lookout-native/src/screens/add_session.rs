@@ -206,7 +206,8 @@ impl Render for AddSessionPage {
             &t,
             Some(Rc::new(move |_: &mut Window, cx: &mut App| me_back.update(cx, |_, cx| cx.emit(AddEvent::Back)))),
             None,
-            Some("Start a recording".into()),
+            // The header bar already says "Start a recording".
+            (!crate::theme::header_bar_shown()).then(|| "Start a recording".into()),
             Some("Pick a program to start a timelapse".into()),
             None,
             vec![body.into_any_element()],

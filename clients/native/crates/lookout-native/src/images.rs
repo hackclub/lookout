@@ -69,6 +69,8 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
     });
     let url_owned = url.to_string();
     let http = crate::app::state(cx).http.clone();
+    log::debug!("[image] fetching {url}");
+    let started = std::time::Instant::now();
     let fut = crate::app::tokio(cx, async move {
         let bytes = if let Some(rest) = url_owned.strip_prefix("data:") {
             // data:image/png;base64,....
@@ -107,9 +109,12 @@ pub fn get(url: &str, cx: &mut App) -> Remote {
         let result = fut.await;
         cache.update(cx, |c, cx| {
             let entry = match result {
-                Ok((img, aspect)) => Remote::Ready(img, aspect),
+                Ok((img, aspect)) => {
+                    log::debug!("[image] ready in {:?}: {url_key}", started.elapsed());
+                    Remote::Ready(img, aspect)
+                }
                 Err(e) => {
-                    log::warn!("[image] {url_key}: {e}");
+                    log::warn!("[image] failed after {:?}: {url_key}: {e:#}", started.elapsed());
                     Remote::Failed
                 }
             };

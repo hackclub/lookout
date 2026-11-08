@@ -126,6 +126,10 @@ jobs:
           LOOKOUT_SEED_TOKENS=$(grep -o 'token=[0-9a-f]*' devserver.log | cut -d= -f2 | paste -sd, -)
           export LOOKOUT_SEED_TOKENS
           export LOOKOUT_API_BASE=http://127.0.0.1:8787
+          export RUST_LOG=lookout=debug,reqwest=debug,hyper_util=debug
+          # Is the dev server answering on its own? (thumbnail timing check)
+          curl -s -o /dev/null -w 'dev server thumb: %{http_code} in %{time_total}s\n' --max-time 20 \
+            "http://127.0.0.1:8787/media/thumb/$(echo "$LOOKOUT_SEED_TOKENS" | cut -d, -f1).jpg" || echo "curl failed"
           # The app steps through screens (smoke::TOUR) and waits for each
           # screenshot: gallery, settings, menu-bar/tray item, program panel
           # (embedded webview), + menu, native confirm dialog.

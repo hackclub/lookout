@@ -272,8 +272,19 @@ impl RecordPage {
         cx.notify();
     }
 
-    /// Stop Session in the header bar: the bar already says "Recording", so
-    /// the picker doesn't need a title row of its own just to hold it.
+    /// The header bar's title for this page's current step.
+    pub fn header_title(&self) -> &'static str {
+        if !matches!(self.check, Check::Ok) || self.is_recording_view() {
+            "Recording"
+        } else if self.session_status.as_deref() == Some("pending") {
+            "What should Lookout capture?"
+        } else {
+            "Select source"
+        }
+    }
+
+    /// Stop Session in the header bar, beside the step title, rather than on
+    /// a title row of its own under the bar.
     pub fn header_actions(&self, me: Entity<Self>) -> Vec<AnyElement> {
         if !self.can_stop() {
             return Vec::new();
@@ -292,23 +303,8 @@ impl RecordPage {
         let t = theme(cx).clone();
         let pending = self.session_status.as_deref() == Some("pending");
         if crate::theme::header_bar_shown() {
-            // A fresh session asks its question; otherwise the bar's
-            // "Recording" title and Stop Session cover it.
-            return pending.then(|| {
-                div()
-                    .max_w(px(480.0))
-                    .mx_auto()
-                    .w_full()
-                    .flex_none()
-                    .px(px(16.0))
-                    .pt(px(16.0))
-                    .ts(14.0)
-                    .w700()
-                    .text_color(t.text_primary)
-                    .text_center()
-                    .child("What should Lookout capture?")
-                    .into_any_element()
-            });
+            // The bar carries the title (`header_title`) and Stop Session.
+            return None;
         }
         // No header bar: the old in-page row with Back, title and Stop.
         let e_back = cx.entity();
