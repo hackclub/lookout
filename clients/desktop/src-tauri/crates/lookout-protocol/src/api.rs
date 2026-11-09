@@ -40,13 +40,26 @@ pub fn session_url(s: &SessionConfig, path: &str) -> String {
 }
 
 /// `base` with `query` form-encoded onto it, in order.
+///
+/// `base` may be origin-relative (`/api/...`): the hosted recorder page
+/// talks to its own origin with an empty `apiBaseUrl`, and `fetch` resolves
+/// the path against the page. `Url` can't parse that, so a relative base
+/// gets the same form encoding appended by hand.
 pub fn url_with_query(base: &str, query: &[(&str, &str)]) -> Result<String, String> {
     if query.is_empty() {
         return Ok(base.to_string());
     }
-    url::Url::parse_with_params(base, query)
-        .map(|u| u.to_string())
-        .map_err(|e| e.to_string())
+    match url::Url::parse_with_params(base, query) {
+        Ok(u) => Ok(u.to_string()),
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let encoded = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(query)
+                .finish();
+            let sep = if base.contains('?') { '&' } else { '?' };
+            Ok(format!("{base}{sep}{encoded}"))
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// One JSON round trip with the shared client's error shaping. A JSON body
@@ -427,6 +440,23 @@ mod tests {
         };
         assert_eq!(session_url(&s, ""), "https://x.test/api/sessions/abc");
         assert_eq!(session_url(&s, "/pause"), "https://x.test/api/sessions/abc/pause");
+    }
+
+    #[test]
+    fn query_on_an_origin_relative_base() {
+        // The hosted page's apiBaseUrl is "", so every session URL is a
+        // path. This used to fail with "relative URL without a base", and
+        // every browser upload with it.
+        let query = [("capturedAt", "2025-06-01T12:00:00.000Z"), ("format", "mp4")];
+        let relative = url_with_query("/api/sessions/abc/upload-url", &query).unwrap();
+        assert_eq!(
+            relative,
+            "/api/sessions/abc/upload-url?capturedAt=2025-06-01T12%3A00%3A00.000Z&format=mp4"
+        );
+        // Same encoding as an absolute base gets.
+        let absolute = url_with_query("https://x.test/api/sessions/abc/upload-url", &query).unwrap();
+        assert_eq!(absolute, format!("https://x.test{relative}"));
+        assert_eq!(url_with_query("/a?b=1", &[("c", "d e")]).unwrap(), "/a?b=1&c=d+e");
     }
 
     #[test]
