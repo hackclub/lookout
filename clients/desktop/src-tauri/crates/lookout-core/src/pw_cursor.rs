@@ -341,13 +341,24 @@ fn live_cursor_metadata() {
 /// (or, when `None`, a cursor marked not over the stream).
 #[cfg(test)]
 fn producer(socket: &str, at: Arc<Mutex<Option<(i32, i32)>>>, node_tx: std::sync::mpsc::Sender<u32>) {
+    producer_with_formats(socket, at, node_tx, vec![::pipewire::spa::param::video::VideoFormat::BGRx], None);
+}
+
+#[cfg(test)]
+fn producer_with_formats(
+    socket: &str,
+    at: Arc<Mutex<Option<(i32, i32)>>>,
+    node_tx: std::sync::mpsc::Sender<u32>,
+    formats: Vec<::pipewire::spa::param::video::VideoFormat>,
+    negotiated_tx: Option<std::sync::mpsc::Sender<::pipewire::spa::param::video::VideoFormat>>,
+) {
     use ::pipewire::context::ContextRc;
     use ::pipewire::main_loop::MainLoopRc;
     use ::pipewire::properties::properties;
     use ::pipewire::spa;
     use ::pipewire::spa::buffer::meta::MetaCursor;
     use ::pipewire::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
-    use ::pipewire::spa::param::video::VideoFormat;
+    use ::pipewire::spa::param::video::VideoInfoRaw;
     use ::pipewire::spa::param::ParamType;
     use ::pipewire::spa::pod::{self, ChoiceValue, Pod, Property, PropertyFlags, Value};
     use ::pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes};
@@ -405,7 +416,13 @@ fn producer(socket: &str, at: Arc<Mutex<Option<(i32, i32)>>>, node_tx: std::sync
             }
         })
         .param_changed(move |s, _, id, param| {
-            if param.is_some() && id == ParamType::Format.as_raw() {
+            if let Some(param) = param.filter(|_| id == ParamType::Format.as_raw()) {
+                let mut info = VideoInfoRaw::default();
+                if info.parse(param).is_ok() {
+                    if let Some(tx) = &negotiated_tx {
+                        let _ = tx.send(info.format());
+                    }
+                }
                 let _ = s.update_params(&mut [Pod::from_bytes(&params).unwrap(), Pod::from_bytes(&meta).unwrap()]);
             }
         })
@@ -417,7 +434,14 @@ fn producer(socket: &str, at: Arc<Mutex<Option<(i32, i32)>>>, node_tx: std::sync
         ParamType::EnumFormat,
         pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
         pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        pod::property!(FormatProperties::VideoFormat, Id, VideoFormat::BGRx),
+        Property {
+            key: FormatProperties::VideoFormat.as_raw(),
+            flags: PropertyFlags::empty(),
+            value: Value::Choice(ChoiceValue::Id(Choice(ChoiceFlags::empty(), ChoiceEnum::Enum {
+                default: Id(formats[0].as_raw()),
+                alternatives: formats.iter().map(|f| Id(f.as_raw())).collect(),
+            }))),
+        },
         pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width: 320, height: 240 }),
         pod::property!(FormatProperties::VideoFramerate, Fraction, Fraction { num: 0, denom: 1 }),
         pod::property!(
@@ -465,4 +489,78 @@ fn producer(socket: &str, at: Arc<Mutex<Option<(i32, i32)>>>, node_tx: std::sync
     });
     timer.update_timer(Some(Duration::from_millis(100)), Some(Duration::from_millis(100))).into_result().unwrap();
     main_loop.run();
+}
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn live_concurrent_grabs_repro() {
+    use std::os::fd::IntoRawFd;
+    let socket = std::env::var("LOOKOUT_PW_SOCKET").expect("LOOKOUT_PW_SOCKET");
+    let mut nodes = vec![];
+    for _ in 0..2 {
+        let (tx, rx) = std::sync::mpsc::channel::<u32>();
+        let s = socket.clone();
+        std::thread::spawn(move || producer(&s, Arc::new(Mutex::new(Some((1, 1)))), tx));
+        nodes.push(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+    let grab_fd = std::os::unix::net::UnixStream::connect(&socket).unwrap().into_raw_fd();
+    // Include the idle gap between picker polls.
+    for i in 0..3 {
+        std::thread::sleep(Duration::from_secs(2));
+        for &n in &nodes {
+            let t = Instant::now();
+            let r = crate::pipewire::capture_pipewire_node(n, grab_fd).map(|_| ());
+            eprintln!("seq {i} node {n}: {r:?} in {:?}", t.elapsed());
+            r.expect("sequential frame after idle gap");
+        }
+    }
+    // concurrent
+    for round in 0..3 {
+        let hs: Vec<_> = nodes.iter().chain(nodes.iter()).map(|&n| std::thread::spawn(move || {
+            let t = Instant::now();
+            let r = crate::pipewire::capture_pipewire_node(n, grab_fd).map(|_| ());
+            (n, r, t.elapsed())
+        })).collect();
+        for h in hs {
+            let result = h.join().unwrap();
+            eprintln!("conc {round}: {result:?}");
+            result.1.expect("concurrent frame on shared remote");
+        }
+    }
+}
+
+/// The old downstream RGBA caps favor BGRA upstream. Reproduce that choice,
+/// then check that capture explicitly asks for BGRx while still handling a
+/// BGRA-only portal through the fallback. Requires a private PipeWire daemon
+/// and session manager, like live_concurrent_grabs_repro.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn live_capture_format_negotiation() {
+    use ::pipewire::spa::param::video::VideoFormat;
+    use std::os::fd::AsRawFd;
+    let socket = std::env::var("LOOKOUT_PW_SOCKET").expect("LOOKOUT_PW_SOCKET");
+    let (node_tx, node_rx) = std::sync::mpsc::channel();
+    let (format_tx, format_rx) = std::sync::mpsc::channel();
+    let producer_socket = socket.clone();
+    std::thread::spawn(move || producer_with_formats(
+        &producer_socket, Arc::new(Mutex::new(None)), node_tx,
+        vec![VideoFormat::BGRA, VideoFormat::BGRx], Some(format_tx),
+    ));
+    let node = node_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let remote = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    crate::pipewire::capture_pipewire_node_with_caps(node, remote.as_raw_fd(), "video/x-raw").unwrap();
+    assert_eq!(format_rx.recv_timeout(Duration::from_secs(5)).unwrap(), VideoFormat::BGRA);
+    let image = crate::pipewire::capture_pipewire_node(node, remote.as_raw_fd()).unwrap();
+    assert_eq!((image.width(), image.height()), (320, 240));
+    assert_eq!(format_rx.recv_timeout(Duration::from_secs(5)).unwrap(), VideoFormat::BGRx);
+
+    let (node_tx, node_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || producer_with_formats(
+        &socket, Arc::new(Mutex::new(None)), node_tx, vec![VideoFormat::BGRA], None,
+    ));
+    let node = node_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let image = crate::pipewire::capture_pipewire_node(node, remote.as_raw_fd()).unwrap();
+    assert_eq!((image.width(), image.height()), (320, 240));
 }
