@@ -211,7 +211,7 @@ pub(crate) async fn capture_loop_task(
     // Mutable: latches off after MAX_CLIP_ENCODER_FAILURES consecutive
     // encoder failures, so a machine with a broken encoder settles into
     // plain JPEG mode instead of retrying forever.
-    let mut clips_mode = caps.clips_enabled;
+    let mut clips_mode = caps.clips_enabled && recorder.host.supports_clips();
     let mut clip_encoder_failures: u32 = 0;
     // Server-authoritative cadence, clamped defensively against a
     // misbehaving server so the loop can't spin or stall.

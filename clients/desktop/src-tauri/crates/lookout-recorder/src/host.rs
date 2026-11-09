@@ -181,6 +181,13 @@ pub trait Host: MaybeSend + MaybeSync + 'static {
     fn on_capturing(&self, capturing: bool) {
         let _ = capturing;
     }
+
+    /// Whether this host can encode clips. A host without a video encoder
+    /// (a microcontroller camera) returns `false` to stay in legacy JPEG
+    /// mode, one JPEG per interval, even when the server enables clips.
+    fn supports_clips(&self) -> bool {
+        true
+    }
 }
 
 /// Capture bounds for a run.
