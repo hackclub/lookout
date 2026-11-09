@@ -286,6 +286,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parked_open_on_a_pending_session_waits_and_resume_starts_it_without_a_resume_post() {
+        let (server, shell, core, cfg) = setup("pending").await;
+        let state = core.recorder_open_parked(cfg, camera()).await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Paused);
+        assert_eq!(state.session_status.as_deref(), Some("pending"));
+        assert_eq!(state.capture_error, None, "no tick ran with nothing to capture");
+        assert!(!core.has_capture_loop());
+        assert!(shell.camera_starts.lock().unwrap().is_empty());
+        assert_eq!(server.count("POST", "/api/sessions/tok/pause"), 0);
+
+        // The share arrives: resume starts the loop, and the seed upload
+        // is what activates the session — no POST /resume (a 409).
+        let state = core.recorder_resume().await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Recording);
+        wait_for(&core, 10, |s| s.capture_count == 1).await;
+        assert_eq!(server.count("POST", "/api/sessions/tok/resume"), 0);
+        core.recorder_close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_parked_open_on_an_active_session_pauses_it() {
+        let (server, shell, core, cfg) = setup("active").await;
+        let state = core.recorder_open_parked(cfg, camera()).await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Paused);
+        assert_eq!(state.session_status.as_deref(), Some("paused"));
+        assert_eq!(state.capture_error, None);
+        assert!(!core.has_capture_loop());
+        assert!(shell.camera_starts.lock().unwrap().is_empty());
+        assert_eq!(server.count("POST", "/api/sessions/tok/pause"), 1);
+        core.recorder_close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn open_on_a_finished_session_is_finished() {
         let (server, _shell, core, cfg) = setup("complete").await;
         server.set_tracked_seconds(600);

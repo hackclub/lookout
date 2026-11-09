@@ -154,20 +154,13 @@ export function useLookout(): { state: LookoutState; actions: LookoutActions } {
           captureMode === "camera"
             ? { type: "camera", deviceId: cameraCapture.selectedDeviceId ?? config.capture.camera.deviceId ?? "" }
             : { type: "screen", sources: [] };
-        const state = (await recorder.open(token, config.apiBaseUrl, source)) as RecorderState;
+        // A page has no stream until the user shares one, so open parked:
+        // no capture loop (its ticks would only fail), an active session
+        // paused so the server doesn't accrue dead time, and a pending one
+        // left pending until the share starts it.
+        const state = (await recorder.openParked(token, config.apiBaseUrl, source)) as RecorderState;
         if (cancelled) return;
         setRecorderState(state);
-        // The recorder starts capturing on an active session, but a page
-        // has no stream until the user shares one: park the session
-        // paused (flushing nothing) so the server doesn't accrue dead
-        // time, exactly as the page always did on reload.
-        if (state.phase === "recording") {
-          try {
-            await recorder.pause();
-          } catch {
-            // Refused or failed: the state event says what happened.
-          }
-        }
       } catch (err) {
         if (!cancelled) {
           const message = recorderErrorMessage(err);

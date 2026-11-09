@@ -315,6 +315,15 @@ impl Core {
         self.recorder.recorder_open(cfg, source).await
     }
 
+    /// See [`Recorder::recorder_open_parked`].
+    pub async fn recorder_open_parked(
+        self: &Arc<Self>,
+        cfg: SessionConfig,
+        source: RecordingSource,
+    ) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_open_parked(cfg, source).await
+    }
+
     pub async fn recorder_pause(self: &Arc<Self>) -> Result<RecorderState, RecorderError> {
         self.recorder.recorder_pause().await
     }

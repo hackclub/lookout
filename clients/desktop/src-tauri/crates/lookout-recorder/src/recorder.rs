@@ -511,6 +511,28 @@ impl Recorder {
         cfg: SessionConfig,
         source: RecordingSource,
     ) -> Result<RecorderState, RecorderError> {
+        self.open_inner(cfg, source, true).await
+    }
+
+    /// Open a recording without capturing yet, for a host that has nothing
+    /// to capture until the user acts (a web page before the screen share).
+    /// A pending session stays pending, parked, until `recorder_resume`
+    /// starts it — its first upload is what activates it. An active one is
+    /// paused server-side so it doesn't accrue time no one is recording.
+    pub async fn recorder_open_parked(
+        self: &Arc<Self>,
+        cfg: SessionConfig,
+        source: RecordingSource,
+    ) -> Result<RecorderState, RecorderError> {
+        self.open_inner(cfg, source, false).await
+    }
+
+    async fn open_inner(
+        self: &Arc<Self>,
+        cfg: SessionConfig,
+        source: RecordingSource,
+        autostart: bool,
+    ) -> Result<RecorderState, RecorderError> {
         let _action = self.action_lock.lock().await;
         self.close_inner().await;
 
@@ -557,8 +579,20 @@ impl Recorder {
                 .unwrap_or(false),
         };
 
-        if start {
+        if start && autostart {
             self.start_capturing().await;
+        } else if start {
+            let pending = self
+                .with_recording(|rec| rec.session_status.as_deref() == Some("pending"))
+                .unwrap_or(false);
+            if pending {
+                self.with_recording(|rec| rec.phase = RecorderPhase::Paused);
+            } else {
+                // A failed pause is in the state's actionError; the
+                // recording is left paused here either way, since nothing
+                // is capturing.
+                let _ = self.pause_inner(RecorderPhase::Pausing).await;
+            }
         }
         self.recorder_publish();
         self.recorder_state().ok_or(RecorderError::NoRecording)
@@ -794,7 +828,17 @@ impl Recorder {
         };
         self.recorder_publish();
 
-        match self.resume_session(&cfg).await {
+        // A pending session has nothing to resume: the first upload
+        // activates it, and the server refuses a resume of it with a 409.
+        let pending = self
+            .with_recording(|rec| rec.session_status.as_deref() == Some("pending"))
+            .unwrap_or(false);
+        let resumed = if pending {
+            Ok("pending".to_string())
+        } else {
+            self.resume_session(&cfg).await
+        };
+        match resumed {
             Ok(status) => {
                 let finished = self
                     .with_recording(|rec| {

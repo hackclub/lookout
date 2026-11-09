@@ -464,6 +464,24 @@ impl LookoutRecorder {
         })
     }
 
+    /// `open`, without capturing: for a page that has no stream until the
+    /// user shares one. A pending session waits for `resume`; an active
+    /// one is paused so it doesn't accrue time.
+    #[wasm_bindgen(js_name = openParked)]
+    pub fn open_parked(&self, token: String, api_base_url: String, source: JsValue) -> Promise {
+        let recorder = Arc::clone(&self.recorder);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let source: RecordingSource =
+                serde_wasm_bindgen::from_value(source).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let cfg = lookout_session::config::SessionConfig { token, api_base_url };
+            recorder
+                .recorder_open_parked(cfg, source)
+                .await
+                .map(|s| to_js(&s))
+                .map_err(recorder_error)
+        })
+    }
+
     pub fn pause(&self) -> Promise {
         let recorder = Arc::clone(&self.recorder);
         wasm_bindgen_futures::future_to_promise(async move {
