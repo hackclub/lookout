@@ -168,9 +168,13 @@ impl Persisted {
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
         if !p.imported_tauri {
-            crate::store::import::from_tauri(&mut p);
-            p.imported_tauri = true;
-            p.save();
+            match crate::store::import::from_tauri(&mut p) {
+                Ok(()) => {
+                    p.imported_tauri = true;
+                    p.save();
+                }
+                Err(e) => log::warn!("[store] legacy import will retry on next launch: {e}"),
+            }
         }
         p
     }
@@ -311,6 +315,8 @@ pub mod secrets {
 
 // ── One-time import from the Tauri app's webview storage ────────────────
 
+mod webkit;
+
 pub mod import {
     use super::*;
 
@@ -320,10 +326,10 @@ pub mod import {
     /// WebKit (macOS, Linux) keeps localStorage in a SQLite `ItemTable` with
     /// UTF-16LE values; WebView2 (Windows) uses LevelDB, which we scan for
     /// the JSON values directly.
-    pub fn from_tauri(p: &mut Persisted) {
-        let items = read_webview_local_storage();
+    pub fn from_tauri(p: &mut Persisted) -> Result<(), String> {
+        let items = read_webview_local_storage()?;
         if items.is_empty() {
-            return;
+            return Ok(());
         }
         log::info!("[store] importing {} localStorage keys from the Tauri app", items.len());
         let get = |k: &str| items.get(k).cloned();
@@ -359,6 +365,7 @@ pub mod import {
             p.tip_moments = v;
         }
         p.update_nag_dismissed = get("lookout_update_nag_dismissed");
+        Ok(())
     }
 
     fn candidate_dirs() -> Vec<PathBuf> {
@@ -382,37 +389,36 @@ pub mod import {
         out
     }
 
-    fn read_webview_local_storage() -> HashMap<String, String> {
+    fn read_webview_local_storage() -> Result<HashMap<String, String>, String> {
         let mut out = HashMap::new();
         for dir in candidate_dirs() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+            };
+            for e in entries {
+                let e = e.map_err(|e| e.to_string())?;
                 let path = e.path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name.ends_with(".localstorage") {
-                    read_sqlite_items(&path, &mut out);
+                    read_sqlite_items(&path, &mut out)?;
                 } else if name.ends_with(".ldb") || name.ends_with(".log") {
-                    scan_leveldb(&path, &mut out);
+                    scan_leveldb(&path, &mut out)?;
                 }
             }
         }
-        out
+        Ok(out)
     }
 
-    /// Minimal read-only SQLite page walker is overkill; WebKit's
-    /// localstorage files are small, so we scan for `key` UTF-16 strings
-    /// followed by their value blobs.
-    fn read_sqlite_items(path: &PathBuf, out: &mut HashMap<String, String>) {
-        let Ok(bytes) = fs::read(path) else { return };
-        for key in KEYS {
-            if let Some(v) = find_utf16_value(&bytes, key) {
-                out.entry(key.to_string()).or_insert(v);
-            }
-        }
+    fn read_sqlite_items(path: &PathBuf, out: &mut HashMap<String, String>) -> Result<(), String> {
+        let items = super::webkit::read(path, KEYS).map_err(|e| format!("{}: {e}", path.display()))?;
+        out.extend(items);
+        Ok(())
     }
 
-    fn scan_leveldb(path: &PathBuf, out: &mut HashMap<String, String>) {
-        let Ok(bytes) = fs::read(path) else { return };
+    fn scan_leveldb(path: &PathBuf, out: &mut HashMap<String, String>) -> Result<(), String> {
+        let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         for key in KEYS {
             let needle = key.as_bytes();
             let mut i = 0;
@@ -431,43 +437,11 @@ pub mod import {
                 i = start;
             }
         }
+        Ok(())
     }
 
     fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
         hay.windows(needle.len()).position(|w| w == needle)
-    }
-
-    /// WebKit `ItemTable(key TEXT, value BLOB)`: keys are stored as text in
-    /// the record, values as UTF-16LE blobs right after. Look for the UTF-8
-    /// key and decode the UTF-16 run that follows it.
-    fn find_utf16_value(bytes: &[u8], key: &str) -> Option<String> {
-        let needle = key.as_bytes();
-        let mut best: Option<String> = None;
-        let mut i = 0;
-        while let Some(pos) = find(&bytes[i..], needle) {
-            let start = i + pos + needle.len();
-            let mut units = Vec::new();
-            let mut j = start;
-            while j + 1 < bytes.len() {
-                let u = u16::from_le_bytes([bytes[j], bytes[j + 1]]);
-                if u == 0 || (u < 0x09) {
-                    break;
-                }
-                units.push(u);
-                j += 2;
-                if units.len() > 4_000_000 {
-                    break;
-                }
-            }
-            if let Ok(s) = String::from_utf16(&units) {
-                let plausible = s.starts_with('[') || s.starts_with('{') || s.starts_with('"') || s.starts_with("http") || s == "1" || s.chars().all(|c| c.is_ascii_graphic());
-                if plausible && !s.is_empty() && best.as_ref().map(|b| s.len() > b.len()).unwrap_or(true) {
-                    best = Some(s);
-                }
-            }
-            i = start;
-        }
-        best
     }
 
     const KEYS: &[&str] = &[

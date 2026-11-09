@@ -25,12 +25,28 @@ mod imp {
     use parking_lot::Mutex;
 
     pub struct Camera {
-        pipeline: Mutex<Option<(String, gst::Pipeline, gst_app::AppSink)>>,
+        pipeline: Mutex<Option<Pipeline>>,
+    }
+
+    // A playing GStreamer pipeline must explicitly enter Null before its
+    // last reference is dropped. Own that cleanup even when a preview task
+    // is canceled or a spawn_blocking result is never consumed.
+    struct Pipeline {
+        pipeline: gst::Pipeline,
+        sink: gst_app::AppSink,
+    }
+
+    impl Drop for Pipeline {
+        fn drop(&mut self) {
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
     }
 
     impl Camera {
         pub fn new() -> Self {
-            Self { pipeline: Mutex::new(None) }
+            Self {
+                pipeline: Mutex::new(None),
+            }
         }
 
         pub async fn start(&self, device_id: &str) -> Result<(), String> {
@@ -47,15 +63,17 @@ mod imp {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
+            self.stop();
             Err("the camera didn't produce a frame".into())
         }
 
         fn grab_now(&self) -> Result<CameraFrame, String> {
             let guard = self.pipeline.lock();
-            let Some((_, _, sink)) = guard.as_ref() else {
+            let Some(pipeline) = guard.as_ref() else {
                 return Err("no camera frame — the stream isn't ready or has ended".into());
             };
-            let sample = sink
+            let sample = pipeline
+                .sink
                 .try_pull_sample(gst::ClockTime::from_mseconds(500))
                 .ok_or_else(|| "no camera frame — the stream isn't ready or has ended".to_string())?;
             let caps = sample.caps().ok_or("no caps")?;
@@ -64,7 +82,11 @@ mod imp {
             let height = s.get::<i32>("height").map_err(|e| e.to_string())? as u32;
             let buffer = sample.buffer().ok_or("no buffer")?;
             let map = buffer.map_readable().map_err(|e| e.to_string())?;
-            Ok(CameraFrame { jpeg: map.as_slice().to_vec(), width, height })
+            Ok(CameraFrame {
+                jpeg: map.as_slice().to_vec(),
+                width,
+                height,
+            })
         }
 
         pub async fn grab(&self, _device_id: &str) -> Result<CameraFrame, String> {
@@ -72,13 +94,11 @@ mod imp {
         }
 
         pub fn stop(&self) {
-            if let Some((_, p, _)) = self.pipeline.lock().take() {
-                let _ = p.set_state(gst::State::Null);
-            }
+            self.pipeline.lock().take();
         }
     }
 
-    fn build_pipeline(device_id: &str) -> Result<(String, gst::Pipeline, gst_app::AppSink), String> {
+    fn build_pipeline(device_id: &str) -> Result<Pipeline, String> {
         gst::init().map_err(|e| e.to_string())?;
         // Fit within the engine's 1920×1080 capture bounds; JPEG like the webview did.
         let src = if device_id.starts_with("/dev/") {
@@ -99,8 +119,36 @@ mod imp {
             .ok_or("no sink")?
             .downcast::<gst_app::AppSink>()
             .map_err(|_| "sink is not an appsink".to_string())?;
-        pipeline.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
-        Ok((device_id.to_string(), pipeline, sink))
+        let pipeline = Pipeline { pipeline, sink };
+        pipeline.pipeline.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
+        Ok(pipeline)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn dropping_camera_releases_pipeline() {
+            gst::init().unwrap();
+            // No physical camera required: retain a reference so we can check
+            // the state after the camera owner (or an unconsumed result) drops.
+            let pipeline = gst::parse::launch("videotestsrc is-live=true ! appsink name=sink max-buffers=1 drop=true sync=false")
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap();
+            let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+            let owned = Pipeline {
+                pipeline: pipeline.clone(),
+                sink,
+            };
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let camera = Camera {
+                pipeline: Mutex::new(Some(owned)),
+            };
+            drop(camera);
+            assert_eq!(pipeline.current_state(), gst::State::Null);
+        }
     }
 
     /// Video sources known to the system (GStreamer device monitor).
@@ -118,7 +166,11 @@ mod imp {
             let props = d.properties();
             let path = props
                 .as_ref()
-                .and_then(|p| p.get::<String>("device.path").ok().or_else(|| p.get::<String>("api.v4l2.path").ok()))
+                .and_then(|p| {
+                    p.get::<String>("device.path")
+                        .ok()
+                        .or_else(|| p.get::<String>("api.v4l2.path").ok())
+                })
                 .or_else(|| props.as_ref().and_then(|p| p.get::<String>("object.path").ok()))
                 .unwrap_or_else(|| d.display_name().to_string());
             let label = d.display_name().to_string();

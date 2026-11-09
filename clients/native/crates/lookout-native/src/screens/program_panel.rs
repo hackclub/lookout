@@ -3,39 +3,39 @@
 //!
 //! The Tauri app framed the page in a sandboxed iframe; here it is a native
 //! webview (`platform::webview`) laid over the sheet's body and moved with it
-//! every frame. The protocol is `programPanel.ts`'s: the page posts
+//! every frame, or composited into the sheet on native Wayland. The protocol is `programPanel.ts`'s: the page posts
 //! `lookout:ready` / `lookout:resize {height}` / `lookout:done` /
 //! `lookout:cancel` to `window.parent`, origin-checked. A panel that doesn't
-//! load within 12s, or a webview that can't be created (no WebKitGTK, a
-//! Wayland window), shows the "finish in your browser" fallback instead.
+//! load within 12s, or a webview that can't be created, shows an in-app error.
 //!
 //! Differences forced by a native view: it always draws above GPUI, so it is
 //! hidden (not merely covered) until the panel is revealed and as soon as the
 //! sheet starts to close; and a panel taller than the window scrolls inside
 //! its own page rather than in the sheet.
 
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    App, Bounds, Context, Element, ElementId, EventEmitter, GlobalElementId, Hitbox, HitboxBehavior,
-    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Render, Rgba, StatefulInteractiveElement,
-    Style, Styled, WeakEntity, Window, div, img, px, relative,
+    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    GlobalElementId, Hitbox, HitboxBehavior, InteractiveElement, IntoElement, LayoutId, MouseButton, ParentElement, Pixels, Point, Render,
+    RenderImage, Rgba, StatefulInteractiveElement, Style, Styled, UTF16Selection, WeakEntity, Window, div, img, px, relative,
 };
 
 use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::platform::webview::{PanelWebView, WebEvent};
 use crate::theme::theme;
-use crate::ui::button::{BtnSize, Button};
 use crate::ui::icon::Icon;
 use crate::ui::sheet::Sheet;
 use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
 
 pub enum PanelEvent {
-    /// Closed without finishing (X, cancel, fallback to the browser).
+    /// Closed without finishing (X or cancel).
     Dismiss,
     /// The program said `lookout:done`.
     Done,
@@ -95,6 +95,10 @@ pub struct ProgramPanel {
     /// The sheet hosting this panel; the webview hides once it is closing.
     pub sheet: Option<WeakEntity<Sheet>>,
     web: Option<Rc<PanelWebView>>,
+    frame: Option<Arc<RenderImage>>,
+    focus: FocusHandle,
+    input: Option<WebInput>,
+    marked: Option<Range<usize>>,
     tried_web: bool,
     loaded: bool,
     ready: bool,
@@ -111,6 +115,12 @@ impl EventEmitter<PanelEvent> for ProgramPanel {}
 impl ProgramPanel {
     pub fn new(token: String, url: String, label: String, icon_url: Option<String>, cx: &mut Context<Self>) -> Self {
         cx.observe(&images::cache(cx), |_, _, cx| cx.notify()).detach();
+        cx.on_release(|p, cx| {
+            if let Some(image) = p.frame.take() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
         // Both timed from mount, as in the original.
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PANEL_READY_GRACE).await;
@@ -141,6 +151,10 @@ impl ProgramPanel {
             icon_url,
             sheet: None,
             web: None,
+            frame: None,
+            focus: cx.focus_handle(),
+            input: None,
+            marked: None,
             tried_web: false,
             loaded: false,
             ready: false,
@@ -166,6 +180,9 @@ impl ProgramPanel {
         self.broken = true;
         // Drop the native view: the fallback is GPUI content in its place.
         self.web = None;
+        if let Some(image) = self.frame.take() {
+            cx.drop_image(image, None);
+        }
         cx.notify();
     }
 
@@ -180,6 +197,15 @@ impl ProgramPanel {
 
     fn on_web(&mut self, ev: WebEvent, cx: &mut Context<Self>) {
         match ev {
+            #[cfg(all(feature = "webview", target_os = "linux"))]
+            WebEvent::Frame(image) => {
+                if self.frame.is_none() {
+                    log::info!("[panel] {} native Wayland webview rendered its first frame", self.label);
+                }
+                if let Some(old) = self.frame.replace(image) {
+                    cx.drop_image(old, None);
+                }
+            }
             WebEvent::Loaded => self.loaded = true,
             WebEvent::Failed => {
                 if !self.broken {
@@ -187,6 +213,18 @@ impl ProgramPanel {
                 }
             }
             WebEvent::OpenExternal(u) => cx.open_url(&u),
+            WebEvent::Message(v) if v.get("type").and_then(|v| v.as_str()) == Some("lookout:input-state") => {
+                // GTK/WebKit editing is asynchronous. An older selection
+                // notification must not roll back optimistic IME/text state.
+                let revision = v.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
+                if revision < self.web.as_ref().map_or(0, |web| web.edit_revision()) {
+                    return;
+                }
+                self.input = WebInput::parse(&v);
+                if self.input.is_none() {
+                    self.marked = None;
+                }
+            }
             WebEvent::Message(v) => match parse_message(&v) {
                 Some(PanelMessage::Ready) => {
                     self.ready = true;
@@ -283,14 +321,13 @@ impl Render for ProgramPanel {
             _ => None,
         });
         let me = cx.entity();
-        let me2 = cx.entity();
-        let url = self.url.clone();
         let max_h = (f32::from(window.viewport_size().height) - CHROME_HEIGHT).max(PANEL_MIN_HEIGHT);
         let body_h = if self.broken { PANEL_MIN_HEIGHT } else { (self.height.get() + PANEL_HEIGHT_SLACK).min(max_h) };
         let cover = self.cover.get();
 
         let body = if self.broken {
             div()
+                .id("panel-web-error")
                 .size_full()
                 .flex()
                 .flex_col()
@@ -304,17 +341,105 @@ impl Render for ProgramPanel {
                     div()
                         .ts_lh(12.0, 1.5)
                         .text_color(t.text_secondary)
-                        .child(format!("{} couldn't load here. You can finish up in your browser instead.", self.label)),
+                        .child(format!("{} couldn't load here. Please close this panel and try again.", self.label)),
                 )
-                .child(Button::new("panel-browser", "Open in browser").size(BtnSize::Sm).on_click(move |_, _, cx| {
-                    cx.open_url(&url);
-                    me2.update(cx, |p, cx| p.close(PanelEvent::Dismiss, cx));
-                }))
         } else {
             div()
                 .size_full()
                 .relative()
-                .child(WebSlot { web: self.web.clone(), show: show_web })
+                .id("panel-web-content")
+                .track_focus(&self.focus)
+                .when(self.web.as_ref().is_some_and(|web| web.composited()) && show_web, |mut d| {
+                    for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+                        d = d
+                            .on_mouse_down(
+                                button,
+                                cx.listener(|p, ev: &gpui_kit::gpui::MouseDownEvent, window, cx| {
+                                    p.focus.focus(window, cx);
+                                    if let Some(web) = &p.web {
+                                        web.pointer(ev.position, Some(ev.button), Some(true), ev.modifiers);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_mouse_up(
+                                button,
+                                cx.listener(|p, ev: &gpui_kit::gpui::MouseUpEvent, _, cx| {
+                                    if let Some(web) = &p.web {
+                                        web.pointer(ev.position, Some(ev.button), Some(false), ev.modifiers);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                button,
+                                cx.listener(|p, ev: &gpui_kit::gpui::MouseUpEvent, _, _| {
+                                    if let Some(web) = &p.web {
+                                        web.pointer(ev.position, Some(ev.button), Some(false), ev.modifiers);
+                                    }
+                                }),
+                            );
+                    }
+                    d.on_mouse_move(cx.listener(|p, ev: &gpui_kit::gpui::MouseMoveEvent, _, _| {
+                        if let Some(web) = &p.web {
+                            web.pointer(ev.position, ev.pressed_button, None, ev.modifiers);
+                        }
+                    }))
+                    .on_scroll(cx.listener(|p, ev: &gpui_kit::gpui::ScrollEvent, _, cx| {
+                        if let Some(web) = &p.web {
+                            web.scroll(ev);
+                        }
+                        cx.stop_propagation();
+                    }))
+                    .on_key_down(cx.listener(|p, ev: &gpui_kit::gpui::KeyDownEvent, window, cx| {
+                        let key = &ev.keystroke;
+                        if (key.modifiers.control || key.modifiers.platform) && !key.modifiers.alt {
+                            match key.key.as_str() {
+                                "v" => {
+                                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                                        p.replace_text_in_range(None, &text, window, cx);
+                                    }
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "c" | "x" => {
+                                    if let Some(input) = &p.input {
+                                        let text = input.substring(input.selection.clone());
+                                        if !text.is_empty() {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        }
+                                        if key.key == "x" {
+                                            p.replace_text_in_range(None, "", window, cx);
+                                        }
+                                    }
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                        // GPUI's text input path delivers committed and IME text.
+                        // Keep browser navigation/editing keys as real GDK events.
+                        if p.input.is_some()
+                            && key.key_char.as_ref().is_some_and(|text| !text.chars().any(char::is_control))
+                            && !key.modifiers.control
+                            && !key.modifiers.platform
+                        {
+                            return;
+                        }
+                        if let Some(web) = &p.web {
+                            web.key(key, true);
+                        }
+                        cx.stop_propagation();
+                    }))
+                    .on_key_up(cx.listener(|p, ev: &gpui_kit::gpui::KeyUpEvent, _, cx| {
+                        if let Some(web) = &p.web {
+                            web.key(&ev.keystroke, false);
+                        }
+                        cx.stop_propagation();
+                    }))
+                })
+                .child(WebSlot { web: self.web.clone(), frame: self.frame.clone(), panel: cx.entity(), show: show_web })
                 .when(cover > 0.001, |d| {
                     d.child(
                         div()
@@ -378,10 +503,125 @@ impl Render for ProgramPanel {
     }
 }
 
+/// UTF-16 offsets match DOM selection and GPUI's platform input protocol.
+struct WebInput {
+    text: String,
+    selection: Range<usize>,
+    rect: [f32; 4],
+}
+
+impl WebInput {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        let text = value.get("text")?.as_str()?.to_string();
+        let len = text.encode_utf16().count();
+        let start = (value.get("start")?.as_u64()? as usize).min(len);
+        let end = (value.get("end")?.as_u64()? as usize).clamp(start, len);
+        let rect: [f32; 4] = serde_json::from_value(value.get("rect")?.clone()).ok()?;
+        if rect.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        Some(Self { text, selection: start..end, rect })
+    }
+
+    fn substring(&self, range: Range<usize>) -> String {
+        let units: Vec<u16> = self.text.encode_utf16().collect();
+        let start = range.start.min(units.len());
+        let end = range.end.clamp(start, units.len());
+        String::from_utf16_lossy(&units[start..end])
+    }
+}
+
+impl EntityInputHandler for ProgramPanel {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        actual: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let input = self.input.as_ref()?;
+        let len = input.text.encode_utf16().count();
+        let start = range.start.min(len);
+        let range = start..range.end.clamp(start, len);
+        *actual = Some(range.clone());
+        Some(input.substring(range))
+    }
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: self.input.as_ref()?.selection.clone(), reversed: false })
+    }
+    fn set_selected_text_range(&mut self, range: Range<usize>, _: &mut Window, _: &mut Context<Self>) {
+        if let Some(input) = &mut self.input {
+            let len = input.text.encode_utf16().count();
+            let start = range.start.min(len);
+            input.selection = start..range.end.clamp(start, len);
+            if let Some(web) = &self.web {
+                web.edit("select", Some(input.selection.clone()), "", None);
+            }
+        }
+    }
+    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        Some(self.input.as_ref()?.text.encode_utf16().count())
+    }
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.clone()
+    }
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked = None;
+    }
+    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.replace_input(range, text, None);
+        self.marked = None;
+        cx.notify();
+    }
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selection: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = self.replace_input(range, text, selection).filter(|r| !r.is_empty());
+        cx.notify();
+    }
+    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let input = self.input.as_ref()?;
+        let bounds = self.web.as_ref()?.bounds()?;
+        Some(Bounds::new(
+            bounds.origin + gpui_kit::gpui::point(px(input.rect[0]), px(input.rect[1])),
+            gpui_kit::gpui::size(px(input.rect[2]), px(input.rect[3])),
+        ))
+    }
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+}
+
+impl ProgramPanel {
+    fn replace_input(&mut self, range: Option<Range<usize>>, text: &str, selection: Option<Range<usize>>) -> Option<Range<usize>> {
+        let Some(input) = &mut self.input else { return None };
+        let len = input.text.encode_utf16().count();
+        let range = range.or(self.marked.clone()).unwrap_or(input.selection.clone());
+        let start = range.start.min(len);
+        let range = start..range.end.clamp(start, len);
+        let inserted = text.encode_utf16().count();
+        let marked = range.start..range.start + inserted;
+        let selected = selection.as_ref().map(|s| marked.start + s.start.min(inserted)..marked.start + s.end.min(inserted));
+        if let Some(web) = &self.web {
+            web.edit("replace", Some(range.clone()), text, selected.clone());
+        }
+        input.text = input.substring(0..range.start) + text + &input.substring(range.end..len);
+        input.selection = selected.unwrap_or(marked.end..marked.end);
+        Some(marked)
+    }
+}
+
 /// Where the native webview goes: it takes this element's bounds each frame
 /// (so it rides the sheet's slide and drag), or hides when `show` is off.
 struct WebSlot {
     web: Option<Rc<PanelWebView>>,
+    frame: Option<Arc<RenderImage>>,
+    panel: Entity<ProgramPanel>,
     show: bool,
 }
 
@@ -434,19 +674,32 @@ impl Element for WebSlot {
         let show = self.show && on_screen;
         web.place(show.then_some(bounds), window);
         // GPUI content under the native view must not react to the pointer.
-        show.then(|| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse))
+        (show && !web.composited()).then(|| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse))
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui_kit::gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
-        _: &mut Window,
-        _: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
+        if self.show && self.web.as_ref().is_some_and(|web| web.composited()) {
+            let panel = self.panel.read(cx);
+            if panel.input.is_some() {
+                window.handle_input(&panel.focus, ElementInputHandler::new(bounds, self.panel.clone()), cx);
+            }
+        }
+        if self.show {
+            if let Some(frame) = &self.frame {
+                if let Err(e) = window.paint_image(bounds, bounds, Default::default(), frame.clone(), 0, false) {
+                    log::warn!("[panel] painting webview frame failed: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -454,6 +707,23 @@ impl Element for WebSlot {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_input_uses_utf16_and_clamps_dom_selection() {
+        let input = WebInput::parse(&serde_json::json!({
+            "text": "A🦀B", "start": 1, "end": 3, "rect": [1, 2, 100, 30]
+        }))
+        .unwrap();
+        assert_eq!(input.substring(input.selection.clone()), "🦀");
+        assert_eq!(input.substring(3..99), "B");
+        assert_eq!(input.substring(99..100), "");
+        let input = WebInput::parse(&serde_json::json!({
+            "text": "abc", "start": 99, "end": 0, "rect": [1, 2, 100, 30]
+        }))
+        .unwrap();
+        assert_eq!(input.selection, 3..3);
+        assert!(WebInput::parse(&serde_json::json!({"text": null})).is_none());
+    }
 
     #[test]
     fn parses_protocol() {

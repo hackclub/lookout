@@ -174,6 +174,11 @@ impl SettingsPage {
     }
 
     /// Back: subpage → menu; menu → gallery.
+    /// On the top-level menu rather than a sub-page.
+    pub fn at_menu(&self) -> bool {
+        self.sub == Sub::Menu
+    }
+
     pub fn back(&mut self, cx: &mut Context<Self>) {
         if self.sub == Sub::Menu {
             cx.emit(SettingsEvent::Back);

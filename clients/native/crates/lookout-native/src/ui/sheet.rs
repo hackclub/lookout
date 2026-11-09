@@ -157,6 +157,7 @@ impl Render for Sheet {
         let up = if self.drag_offset < 0.0 { -(8.0 * ((-self.drag_offset) + 1.0).ln() - 16.0).max(0.0) } else { 0.0 };
         let translate = (1.0 - p) * self.height + up;
         let backdrop = t.bg_backdrop;
+        let window_radius = crate::windows::main_window::window_corner_radius(window);
         let me_bg = cx.entity();
         let me_x = cx.entity();
         let probe = cx.entity();
@@ -172,6 +173,7 @@ impl Render for Sheet {
                 .border_1()
                 .border_color(t.border_default)
                 .rounded_t(px(14.0))
+                .rounded_b(px(window_radius))
                 .overflow_hidden()
                 .child(self.body.clone())
                 .child(div().h(px(10.0)).flex_none())
@@ -226,6 +228,7 @@ impl Render for Sheet {
             .child(
                 div()
                     .id("sheet-backdrop")
+                    .rounded(px(window_radius))
                     .absolute()
                     .inset_0()
                     .opacity(p)

@@ -95,7 +95,7 @@ impl ModalSlot {
 
 /// Render the modal stack (topmost last). Backdrop fades with the panel on
 /// exit; on entry it appears instantly, as before.
-pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32) -> Vec<AnyElement> {
+pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radius: f32) -> Vec<AnyElement> {
     slots
         .iter()
         .map(|slot| {
@@ -106,6 +106,7 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32) -> Vec<AnyEl
             let gradient = matches!(slot.entrance, Entrance::Naming) && is_windows();
             let mut backdrop = div()
                 .id(("modal-backdrop", slot.id))
+                .rounded(px(window_radius))
                 .absolute()
                 .inset_0()
                 .flex()

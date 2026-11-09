@@ -351,7 +351,7 @@ impl Render for EditorWindow {
                 .child(self.editor.clone()),
         );
         let win_w = f32::from(window.bounds().size.width) - if csd { 2.0 * WINDOW_MARGIN } else { 0.0 };
-        body = body.children(render_modals(&self.modals, &t, win_w));
+        body = body.children(render_modals(&self.modals, &t, win_w, super::main_window::window_corner_radius(window)));
         let active = self.active.get();
         if csd {
             let tiled = matches!(window.window_decorations(), Decorations::Client { tiling } if tiling.top || tiling.bottom || tiling.left || tiling.right);

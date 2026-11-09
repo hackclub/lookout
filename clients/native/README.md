@@ -152,6 +152,9 @@ cargo run -p lookout-update --example simulate -- "$LOOKOUT_UPDATE_URL" "$LOOKOU
 
 ## Packaging
 
+See [upgrade-verification.md](docs/upgrade-verification.md) for tested migration
+behavior and the remaining blockers before an automatic Tauri → native rollout.
+
 The scripts in `packaging/` are what CI runs; each writes to `target/bundle/`
 by default (`--out` to change, `--no-build` to reuse `target/release`).
 Release builds stamp the tag's version first (`packaging/version.sh --set`).
@@ -160,7 +163,8 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
 |---|---|---|
 | macOS (Xcode) | `packaging/macos/bundle.sh --target aarch64-apple-darwin` | `Lookout-native_<v>_darwin-<arch>.app.tar.gz` (updater) + `.dmg` |
 | Windows | `cargo build --release`, sign `target/release/lookout.exe`, copy it to the artifact name (the exe is its own installer) | `Lookout-native_<v>_windows-x86_64-setup.exe` |
-| Linux | `packaging/linux/appimage.sh` | `Lookout-native_<v>_linux-x86_64.AppImage` |
+| Linux packages (x86_64 + arm64) | `packaging/linux/packages.sh` | `Lookout_linux-<v>_<arch>.deb`, `.rpm`, `.pkg.tar.zst` |
+| Linux AppImage | `packaging/linux/appimage.sh` | `Lookout-native_<v>_linux-x86_64.AppImage` |
 
 - **macOS**: `Lookout.app` reuses the Tauri app's bundle identifier
   (`com.hackclub.lookout`), so with the same Developer ID team the Screen
@@ -190,7 +194,19 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   the AppImage, because WebKitGTK's helper path is patched to a relative one.
   The AppImage doesn't register `lookout://` itself (use an AppImage
   integrator, or `packaging/linux/install-local.sh` for a plain build).
-  No .deb: deb/rpm installs stay on the Tauri package repo for now.
+- **Linux packages**: `packages.sh` builds on Ubuntu 24.04 for x86_64 and
+  arm64, using host libraries and runtime GStreamer dependencies. It needs
+  `dpkg-dev`, `rpm`, and `zstd` in addition to the native build dependencies.
+  The package names remain `lookout` (apt/dnf/zypper) and `lookout-bin`
+  (pacman), so existing Tauri installs upgrade in place through the same
+  repositories and `install.sh`. The repository key and apt/rpm enrollment
+  hooks are shared with the desktop packaging. The desktop entry retains
+  `Lookout.desktop` and registers `lookout://`; `lookout-desktop` remains an
+  alias for deb/rpm installs. User data is left in place: the native app shares
+  `secrets.json` and imports Tauri settings on first launch.
+  Tagged releases require both architectures before publishing packages.
+  Package update notices use the common release version in `latest.json`;
+  only AppImages use the native self-updater.
 
 ## How the animations were kept identical
 
@@ -274,7 +290,12 @@ to check on real hardware first:
   run on Linux, with a fake AppImage. The release `native-build` job now
   produces the artifacts, but none of them has been through CI yet.
 - **Program Panel** embeds the page with wry (WebKitGTK / WKWebView / WebView2).
-  On native Wayland it can't embed and shows the "Open in browser" fallback.
+  Native Wayland composites software-rendered WebKitGTK snapshots into GPUI,
+  with pointer, keyboard, clipboard and IME forwarding; it does not require XWayland.
+  The Wayland renderer runs at up to 30 fps and disables WebKit GPU acceleration.
+  The native Wayland integration test needs a running compositor and no X11 display:
+  `env -u DISPLAY cargo test -p lookout-native native_wayland_webview -- --ignored --test-threads=1`.
+  Embed errors stay in the app without a browser fallback.
   The Linux binary now needs WebKitGTK 4.1; `--no-default-features` drops it.
 - **macOS menu-bar item** reuses the Tauri app's Swift package
   (`swift/lookout-tray`) through `swift-rs` for the click-to-open popup and

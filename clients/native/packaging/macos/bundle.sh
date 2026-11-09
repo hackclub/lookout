@@ -28,7 +28,6 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"            # clients/native
-repo="$(cd "$root/../.." && pwd)"
 target="$(rustc -vV | sed -n 's/^host: //p')"
 out="$root/target/bundle"
 build=1
@@ -91,22 +90,19 @@ sed -e "s/@VERSION@/$version/g" -e "s/@BUNDLE_VERSION@/$bundle_version/g" "$here
 plutil -lint "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 
-# Same artwork as assets/app-icon.png (a 128px copy of it); the Tauri icon set
-# has every size up to 1024 already. Rebuild from the 512px PNG otherwise.
-icns="$repo/clients/desktop/src-tauri/icons/icon.icns"
-if [ -f "$icns" ]; then
-  cp "$icns" "$app/Contents/Resources/icon.icns"
-else
-  src="$repo/clients/desktop/src-tauri/icons/icon.png"
-  [ -f "$src" ] || src="$root/assets/app-icon.png"
-  set_dir="$work/icon.iconset"
-  mkdir -p "$set_dir"
-  for s in 16 32 128 256 512; do
-    sips -z "$s" "$s" "$src" --out "$set_dir/icon_${s}x${s}.png" >/dev/null
-    sips -z $((s * 2)) $((s * 2)) "$src" --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
-  done
-  iconutil -c icns "$set_dir" -o "$app/Contents/Resources/icon.icns"
-fi
+# assets/app-icon-macos.png is the app artwork on Apple's icon grid: an 824px
+# rounded square inset 100px in a 1024 canvas, with the template's drop
+# shadow. macOS before 26 draws an .icns exactly as given, so the old
+# full-bleed square artwork showed up as a hard square there (26 masks legacy
+# icons itself, which hid it). It is generated from the Tauri icon.icns.
+src="$root/assets/app-icon-macos.png"
+set_dir="$work/icon.iconset"
+mkdir -p "$set_dir"
+for s in 16 32 128 256 512; do
+  sips -z "$s" "$s" "$src" --out "$set_dir/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s * 2)) $((s * 2)) "$src" --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$set_dir" -o "$app/Contents/Resources/icon.icns"
 
 if [ -n "${APPLE_CERTIFICATE:-}" ]; then
   echo "==> Importing the signing certificate"
@@ -171,11 +167,21 @@ bad=$(tar -tzf "$out/$name.app.tar.gz" | grep -v '^Lookout\.app/' || true)
 [ -z "$bad" ] || { echo "bundle.sh: unexpected entries in the tarball: $bad" >&2; exit 1; }
 
 echo "==> Writing $name.dmg"
-stage="$work/dmg"
-mkdir -p "$stage"
-ditto "$app" "$stage/Lookout.app"
-ln -s /Applications "$stage/Applications"
-hdiutil create -volname Lookout -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$out/$name.dmg"
+# dmgbuild writes the Finder layout (background, icon positions, window
+# size) straight into .DS_Store, so it needs no Finder/AppleScript and works
+# headless on CI. The background ships as a multi-resolution TIFF so Retina
+# screens get the full 2000px artwork and others the 1000px copy.
+python3 -m venv "$work/venv"
+"$work/venv/bin/pip" install --quiet --disable-pip-version-check dmgbuild==1.6.5
+bg_src="$root/assets/installer/dmg-background.png"
+sips -z 520 1000 "$bg_src" --out "$work/bg.png" >/dev/null
+sips -z 1040 2000 "$bg_src" --out "$work/bg@2x.png" >/dev/null
+tiffutil -cathidpicheck "$work/bg.png" "$work/bg@2x.png" -out "$work/dmg-background.tiff"
+rm -f "$out/$name.dmg"
+"$work/venv/bin/dmgbuild" -s "$here/dmg-settings.py" \
+  -D app="$app" -D background="$work/dmg-background.tiff" \
+  -D volume_icon="$app/Contents/Resources/icon.icns" \
+  Lookout "$out/$name.dmg"
 if [ "$identity" != - ]; then
   codesign --force --timestamp --sign "$identity" "$out/$name.dmg"
 fi

@@ -32,7 +32,7 @@ use lookout_core::SessionConfig;
 use crate::app::{self, api_base};
 use crate::editor_math::{self as em, CutInterval, Mask, Region, VideoUnit, View};
 use crate::filmstrip::{self, Filmstrip};
-use crate::motion::{Anim, Curve, Ease};
+use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, Theme, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing, minutes_flow};
@@ -139,6 +139,8 @@ struct ViewAnim {
     to: View,
     anchor: Option<(f64, f64)>,
     p: Anim,
+    /// Wheel springs animate log zoom × 100 directly to preserve velocity.
+    wheel: bool,
 }
 
 pub struct TimelapseEditor {
@@ -643,6 +645,10 @@ impl TimelapseEditor {
         if n == 0 {
             return;
         }
+        // Sample before re-anchoring so a new notch starts at the current view.
+        if animate && at.is_some() {
+            self.tick_view();
+        }
         let base = self.view_anim.as_ref().map(|a| a.to).unwrap_or(self.view);
         let target_zoom = (base.zoom * factor).clamp(1.0, self.max_zoom());
         let (anchor, frac) = match at {
@@ -660,8 +666,21 @@ impl TimelapseEditor {
             }
         };
         let to = self.view.zoomed(n, target_zoom, anchor, frac, self.max_zoom());
-        if animate && !crate::motion::reduce_motion() {
-            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: Some((anchor, frac)), p: Anim::from_to(0.0, 1.0, Curve::tween(260.0, QUART)) });
+        if animate && !crate::motion::reduce_motion() && at.is_some() {
+            // Fast, critically damped response: smooth notches without bounce.
+            let curve = Curve::Spring(Spring::new(1600.0, 80.0));
+            if let Some(a) = self.view_anim.as_mut().filter(|a| a.wheel) {
+                a.to = to;
+                a.anchor = Some((anchor, frac));
+                a.p.set((target_zoom.ln() * 100.0) as f32, curve);
+            } else {
+                self.view_anim = Some(ViewAnim {
+                    from: self.view, to, anchor: Some((anchor, frac)), wheel: true,
+                    p: Anim::from_to((self.view.zoom.ln() * 100.0) as f32, (target_zoom.ln() * 100.0) as f32, curve),
+                });
+            }
+        } else if animate && !crate::motion::reduce_motion() {
+            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: Some((anchor, frac)), wheel: false, p: Anim::from_to(0.0, 1.0, Curve::tween(260.0, QUART)) });
         } else {
             self.view_anim = None;
             self.view = to;
@@ -674,7 +693,7 @@ impl TimelapseEditor {
         if crate::motion::reduce_motion() {
             self.view = to;
         } else {
-            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: None, p: Anim::from_to(0.0, 1.0, Curve::tween(300.0, QUART)) });
+            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: None, wheel: false, p: Anim::from_to(0.0, 1.0, Curve::tween(300.0, QUART)) });
         }
         cx.notify();
     }
@@ -688,7 +707,7 @@ impl TimelapseEditor {
         if crate::motion::reduce_motion() {
             self.view = to;
         } else {
-            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: None, p: Anim::from_to(0.0, 1.0, Curve::tween(320.0, QUART)) });
+            self.view_anim = Some(ViewAnim { from: self.view, to, anchor: None, wheel: false, p: Anim::from_to(0.0, 1.0, Curve::tween(320.0, QUART)) });
         }
     }
 
@@ -727,12 +746,12 @@ impl TimelapseEditor {
         let moving = a.p.tick();
         let p = a.p.get() as f64;
         let (fz, tz) = (a.from.zoom.ln(), a.to.zoom.ln());
-        let zoom = (fz + (tz - fz) * p).exp();
+        let zoom = if a.wheel { (p / 100.0).exp() } else { (fz + (tz - fz) * p).exp() };
         let v = match a.anchor {
             Some((anchor, frac)) => View { zoom, start: anchor - frac * n as f64 / zoom },
             None => View { zoom, start: a.from.start + (a.to.start - a.from.start) * p },
         };
-        let done = !moving || p >= 1.0;
+        let done = !moving || (!a.wheel && p >= 1.0);
         let to = a.to;
         self.view = if done { to } else { v }.clamped(n, max_zoom);
         if done {
@@ -765,7 +784,7 @@ impl TimelapseEditor {
                     self.pan_px(d * 48.0, cx);
                 } else {
                     // ~1.1× a line: X11 and Windows send 3 lines a notch.
-                    self.zoom_by(1.1f64.powf(l.y as f64), Some(ev.position.x), false, cx);
+                    self.zoom_by(1.1f64.powf(l.y as f64), Some(ev.position.x), true, cx);
                 }
             }
         }

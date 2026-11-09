@@ -17,5 +17,6 @@ pacman -Qi lookout-bin >/dev/null
 
 # And the shipped executable must have all its shared libraries.
 test -x /usr/bin/lookout
-ldd /usr/bin/lookout | (grep -i "not found" && exit 1 || true)
+links=$(ldd /usr/bin/lookout)
+if echo "$links" | grep -qi "not found"; then echo "$links"; exit 1; fi
 echo "OK: $PKGFILE installs from the official repositories and /usr/bin/lookout links"

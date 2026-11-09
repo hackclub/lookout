@@ -16,7 +16,8 @@ dpkg -s "$PKG" >/dev/null
 # And the shipped executable must have all its shared libraries.
 bin=$(dpkg -L "$PKG" | grep "^/usr/bin/" | head -1)
 test -n "$bin"
-ldd "$bin" | (grep -i "not found" && exit 1 || true)
+links=$(ldd "$bin")
+if echo "$links" | grep -qi "not found"; then echo "$links"; exit 1; fi
 
 # mainBinaryName renames the cargo output, and nothing in the
 # build fails if it silently doesn't -- you just get a package

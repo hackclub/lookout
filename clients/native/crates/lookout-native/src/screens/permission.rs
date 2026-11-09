@@ -1,7 +1,7 @@
 //! The macOS setup page: one row per privacy permission, each with its own
 //! "Allow" and macOS's own icon for it (after Codex Computer Use's). Screen
 //! Recording and Accessibility (which window and file you're in) are
-//! required to continue, though "Skip for now" gets past the page until the
+//! required to continue; three Continue clicks bypass the page until the
 //! next launch; Camera is optional. "Allow" opens System Settings with the
 //! permission guide, whose card flies out of the row itself
 //! (`platform::permission_guide`), so each row reports where it is on screen.
@@ -25,7 +25,7 @@ use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
 
 pub enum PermissionEvent {
-    /// Past the page. `cache: false` ("Skip for now") shows it again next launch.
+    /// Past the page. `cache: false` shows it again next launch.
     Done { cache: bool },
 }
 
@@ -57,6 +57,7 @@ struct RowState {
 
 pub struct PermissionScreen {
     rows: [RowState; 3],
+    continue_clicks: u8,
     /// Each row's bounds as last painted (window coordinates).
     bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 3],
     _poll: Task<()>,
@@ -90,7 +91,7 @@ impl PermissionScreen {
                 }
             }
         });
-        Self { rows, bounds: Default::default(), _poll: poll }
+        Self { rows, continue_clicks: 0, bounds: Default::default(), _poll: poll }
     }
 
     fn allow(&mut self, i: usize, window: &Window, cx: &mut Context<Self>) {
@@ -114,9 +115,9 @@ fn read(kind: Kind) -> RowState {
 /// Title, description, whether it's optional, fallback glyph.
 fn copy(kind: Kind) -> (&'static str, &'static str, bool, Icon) {
     match kind {
-        Kind::Screen => ("Screen Recording", "Takes the screenshots your timelapse is made of", false, Icon::LkMonitor),
-        Kind::Accessibility => ("Accessibility", "Notes which window and file you're working in", false, Icon::LkPencil),
-        Kind::Camera => ("Camera", "Adds photos of you working to your timelapse", true, Icon::LkCamera),
+        Kind::Screen => ("Screenshot", "Permission to take periodical screenshots for the timelapse", false, Icon::LkMonitor),
+        Kind::Accessibility => ("Accessibility", "Lookout needs metadata on windows that you're active on", false, Icon::LkPencil),
+        Kind::Camera => ("Camera", "Use your camera to record Lookout timelapses", true, Icon::LkCamera),
     }
 }
 
@@ -131,14 +132,13 @@ impl Render for PermissionScreen {
         let rows: Vec<AnyElement> = (0..KINDS.len()).map(|i| self.row(i, next == Some(i), &t, cx)).collect();
 
         let me1 = cx.entity();
-        let me2 = cx.entity();
         div()
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .p(px(24.0))
+            .p(px(20.0))
             .child(
                 div()
                     .w_full()
@@ -149,12 +149,12 @@ impl Render for PermissionScreen {
                     .children(APP_ICON.with(|i| i.clone()).map(|i| {
                         // The icon art is a macOS squircle with its own margin.
                         div()
-                            .size(px(88.0))
+                            .size(px(64.0))
                             .mb(px(14.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(img(i).size(px(88.0)))
+                            .child(img(i).size(px(64.0)))
                     }))
                     .child(div().ts(24.0).w700().text_color(t.text_primary).mb(px(8.0)).child("Set up Lookout"))
                     .child(
@@ -162,14 +162,14 @@ impl Render for PermissionScreen {
                             .ts_lh(13.0, 1.55)
                             .text_color(t.text_secondary)
                             .text_center()
-                            .mb(px(24.0))
+                            .mb(px(16.0))
                             .child("Lookout needs to see your screen to record your work. Everything is captured on your Mac, and only periodic snapshots are uploaded."),
                     )
                     .child(div().w_full().flex().flex_col().gap(px(12.0)).children(rows))
                     .child(
                         div()
                             .w_full()
-                            .mt(px(24.0))
+                            .mt(px(16.0))
                             .flex()
                             .flex_col()
                             .gap(px(10.0))
@@ -177,24 +177,16 @@ impl Render for PermissionScreen {
                                 Button::new("setup-continue", "Continue")
                                     .size(BtnSize::Lg)
                                     .full_width()
-                                    .disabled(!required_ok)
                                     .on_click(move |_, _, cx| {
-                                        permission_guide::close();
-                                        me1.update(cx, |_, cx| cx.emit(PermissionEvent::Done { cache: true }))
+                                        me1.update(cx, |s, cx| {
+                                            s.continue_clicks = s.continue_clicks.saturating_add(1);
+                                            if required_ok || s.continue_clicks > 2 {
+                                                permission_guide::close();
+                                                cx.emit(PermissionEvent::Done { cache: required_ok });
+                                            }
+                                        })
                                     }),
-                            )
-                            .when(!required_ok, |d| {
-                                d.child(
-                                    Button::new("setup-skip", "Skip for now")
-                                        .variant(Variant::Ghost)
-                                        .size(BtnSize::Lg)
-                                        .full_width()
-                                        .on_click(move |_, _, cx| {
-                                            permission_guide::close();
-                                            me2.update(cx, |_, cx| cx.emit(PermissionEvent::Done { cache: false }))
-                                        }),
-                                )
-                            }),
+                            ),
                     ),
             )
     }

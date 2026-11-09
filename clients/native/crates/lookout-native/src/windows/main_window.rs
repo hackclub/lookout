@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use gpui_kit::gpui::{
     AnyElement, AnyView, App, AppContext, Bounds, Context, Decorations, Entity, FocusHandle,
-    Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels,
+    Focusable, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    NavigationDirection, ParentElement, Pixels,
     Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowKind, WindowOptions,
     div, point, px, size,
@@ -170,6 +171,9 @@ pub struct MainWindow {
     /// window background is left unpainted.
     vibrant: bool,
     history: Vec<Route>,
+    /// Pages left by going back, for Forward (mouse button / Alt+→ / ⌘]).
+    /// Top of the stack is the next page.
+    forward: Vec<Route>,
     slots: Vec<Slot>,
     focus: FocusHandle,
     controls_on_right: bool,
@@ -249,6 +253,18 @@ impl gpui_kit::gpui::Global for CurrentAnnouncement {}
 /// Whether this window draws the Linux header bar (client-side decorations).
 pub fn uses_header_bar(window: &Window) -> bool {
     is_linux() && matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
+/// Radius for fills that reach the visible window edge. GPUI's overflow
+/// mask is rectangular, so overlay backgrounds must round themselves.
+pub fn window_corner_radius(window: &Window) -> f32 {
+    if !uses_header_bar(window) {
+        return 0.0;
+    }
+    match window.window_decorations() {
+        Decorations::Client { tiling } if !(tiling.top || tiling.bottom || tiling.left || tiling.right) => WINDOW_RADIUS,
+        _ => 0.0,
+    }
 }
 
 pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
@@ -344,6 +360,7 @@ impl MainWindow {
             vibrant: crate::platform::vibrancy::apply(window),
             route: Route::Gallery,
             history: Vec::new(),
+            forward: Vec::new(),
             slots: Vec::new(),
             focus,
             controls_on_right,
@@ -476,7 +493,7 @@ impl MainWindow {
         let g = cx.new(PermissionScreen::new);
         self._subs.push(cx.subscribe(&g, move |this, _, ev: &PermissionEvent, cx| {
             let PermissionEvent::Done { cache } = ev;
-            // "Skip for now" passes without saving, so the page returns next launch.
+            // Bypassing setup passes without saving, so the page returns next launch.
             if *cache {
                 let st = store_mut(cx);
                 st.perm_screen = true;
@@ -498,6 +515,7 @@ impl MainWindow {
                 // `window.location.reload()`: start over on the new server.
                 self.slots.clear();
                 self.history.clear();
+                self.forward.clear();
                 self.route = Route::Settings;
                 self.go(Route::Gallery, cx);
             }
@@ -996,6 +1014,7 @@ impl MainWindow {
             return;
         }
         self.history.push(self.route.clone());
+        self.forward.clear();
         self.go(route, cx);
     }
 
@@ -1029,7 +1048,58 @@ impl MainWindow {
     /// `history.back()` — Escape / Backspace / back buttons.
     pub fn back(&mut self, cx: &mut Context<Self>) {
         let prev = self.history.pop().unwrap_or(Route::Gallery);
+        if prev != self.route {
+            self.push_forward(self.route.clone());
+        }
         self.go(prev, cx);
+    }
+
+    /// `history.forward()`: undo the last Back.
+    pub fn forward(&mut self, cx: &mut Context<Self>) {
+        let Some(next) = self.forward.pop() else { return };
+        self.history.push(self.route.clone());
+        self.go(next, cx);
+    }
+
+    /// The editor placeholder only means something while its window is
+    /// open, so it never becomes a Forward target.
+    fn push_forward(&mut self, route: Route) {
+        if !matches!(route, Route::EditorOpen(_)) {
+            self.forward.push(route);
+        }
+    }
+
+    /// Back / Forward from the mouse side buttons and keyboard shortcuts.
+    /// Back steps out of a Settings sub-page before leaving Settings.
+    fn history_nav(&mut self, dir: NavigationDirection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gate.is_some() || !self.modals.is_empty() || self.in_recorder(cx) {
+            return;
+        }
+        if crate::ui::input::any_input_focused(window, cx) {
+            return;
+        }
+        match dir {
+            NavigationDirection::Back => {
+                if self.route.is_gallery() {
+                    return;
+                }
+                let settings_sub = self.slots.iter().rev().find(|s| !s.leaving).and_then(|s| match &s.page {
+                    PageView::Settings(p) if !p.read(cx).at_menu() => Some(p.clone()),
+                    _ => None,
+                });
+                match settings_sub {
+                    Some(p) => p.update(cx, |p, cx| p.back(cx)),
+                    None => self.back(cx),
+                }
+            }
+            NavigationDirection::Forward => self.forward(cx),
+        }
+    }
+
+    fn on_nav_button(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let MouseButton::Navigate(dir) = ev.button {
+            self.history_nav(dir, window, cx);
+        }
     }
 
     fn go(&mut self, route: Route, cx: &mut Context<Self>) {
@@ -1088,6 +1158,9 @@ impl MainWindow {
     }
 
     fn header_nav(&self, cx: &App) -> HeaderNav {
+        if self.gate.is_some() {
+            return HeaderNav { title: "".into(), subtitle: None, on_back: None, app_icon: false };
+        }
         let current = self.slots.iter().rev().find(|s| !s.leaving);
         if let Some(nav) = current.and_then(|s| s.page.header(cx)) {
             return nav;
@@ -1161,7 +1234,19 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// The pages' own Back buttons: straight home. Forward can retrace
+    /// the way back to where the user was, like a browser.
     pub fn go_gallery(&mut self, cx: &mut Context<Self>) {
+        if !self.route.is_gallery() {
+            self.forward.clear();
+            self.push_forward(self.route.clone());
+            while let Some(r) = self.history.pop() {
+                if r.is_gallery() {
+                    break;
+                }
+                self.push_forward(r);
+            }
+        }
         self.history.clear();
         self.go(Route::Gallery, cx);
         self.refresh_gallery(cx);
@@ -1221,6 +1306,27 @@ impl MainWindow {
                 return;
             }
             self.back(cx);
+            return;
+        }
+        // Alt+←/→ (Windows, Linux), ⌘[ / ⌘] (macOS): browser history keys.
+        let m = &ev.keystroke.modifiers;
+        let dir = if cfg!(target_os = "macos") {
+            match key {
+                "[" if m.platform && !m.alt && !m.control && !m.shift => Some(NavigationDirection::Back),
+                "]" if m.platform && !m.alt && !m.control && !m.shift => Some(NavigationDirection::Forward),
+                _ => None,
+            }
+        } else {
+            match key {
+                "left" if m.alt && !m.platform && !m.control && !m.shift => Some(NavigationDirection::Back),
+                "right" if m.alt && !m.platform && !m.control && !m.shift => Some(NavigationDirection::Forward),
+                _ => None,
+            }
+        };
+        if let Some(dir) = dir {
+            if !window.default_prevented() {
+                self.history_nav(dir, window, cx);
+            }
         }
     }
 }
@@ -1455,6 +1561,9 @@ impl Render for MainWindow {
             .key_context("MainWindow")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            // Mouse Back/Forward side buttons, caught on the way down so no
+            // page element can swallow them.
+            .capture_any_mouse_down(cx.listener(Self::on_nav_button))
             .size_full()
             .flex()
             .flex_col()
@@ -1527,7 +1636,7 @@ impl Render for MainWindow {
         if let Some((m, _)) = &self.menu {
             body = body.child(m.clone());
         }
-        body = body.children(render_modals(&self.modals, &t, win_w));
+        body = body.children(render_modals(&self.modals, &t, win_w, window_corner_radius(window)));
 
         if csd {
             linux_frame(body.into_any_element(), &t, active, window)
@@ -1550,7 +1659,7 @@ pub fn linux_frame(content: AnyElement, t: &Theme, active: f32, window: &mut Win
     let tiled = tiling.top || tiling.bottom || tiling.left || tiling.right;
     let margin = if tiled { 0.0 } else { WINDOW_MARGIN };
     window.set_client_inset(px(margin));
-    let radius = if tiled { 0.0 } else { WINDOW_RADIUS };
+    let radius = window_corner_radius(window);
     let lerp = |a: f32, b: f32| a + (b - a) * active;
     let shadows = if tiled {
         vec![]
@@ -1639,6 +1748,7 @@ pub fn on_edited(token: String, result: crate::screens::editor::ApplyResult, cx:
         h.update(cx, |mw, _, cx| {
             mw.slots.retain(|s| s.key != Route::Session(token.clone()).key());
             mw.history.retain(|r| *r != Route::EditorOpen(token.clone()));
+            mw.forward.clear();
             mw.go(Route::Session(token.clone()), cx);
             mw.refresh_gallery(cx);
             if result.status.as_deref() == Some("complete") {

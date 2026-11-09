@@ -23,6 +23,7 @@ pub fn key(src: &CaptureSource) -> String {
 struct Entry {
     image: Option<(Arc<RenderImage>, f32)>,
     fetching: bool,
+    requested_at: Instant,
     last_fetch: Option<Instant>,
     /// Wanted again at this time (the next poll).
     wanted_interval: Duration,
@@ -68,20 +69,27 @@ pub fn get(src: &CaptureSource, interval: Duration, live: bool, cx: &mut App) ->
     image
 }
 
+/// Last failed grab, for views that would otherwise show a spinner forever.
+pub fn error(src: &CaptureSource, cx: &App) -> Option<String> {
+    entity(cx).read(cx).entries.get(&key(src)).and_then(|e| e.error.clone())
+}
+
 fn start_fetch(previews: Entity<Previews>, k: String, src: CaptureSource, interval: Duration, cx: &mut App) {
+    let started = Instant::now();
     previews.update(cx, |p, _| {
         let e = p.entries.entry(k.clone()).or_insert(Entry {
             image: None,
             fetching: false,
+            requested_at: started,
             last_fetch: None,
             wanted_interval: interval,
             error: None,
         });
         e.fetching = true;
+        e.requested_at = started;
         e.wanted_interval = interval;
     });
     let core = crate::app::state(cx).core.clone();
-    let started = Instant::now();
     let fut = crate::app::tokio(cx, async move {
         tokio::task::spawn_blocking(move || {
             let shot = core.take_screenshot(src, 854, 480, 65)?;
@@ -95,7 +103,11 @@ fn start_fetch(previews: Entity<Previews>, k: String, src: CaptureSource, interv
     cx.spawn(async move |cx| {
         let result = fut.await;
         let interval = previews.update(cx, |p, cx| {
-            let e = p.entries.get_mut(&k).expect("entry");
+            // Refresh may have cleared the cache while this grab was running.
+            let Some(e) = p.entries.get_mut(&k) else { return interval };
+            if e.requested_at != started {
+                return e.wanted_interval;
+            }
             e.fetching = false;
             e.last_fetch = Some(Instant::now());
             match result {
@@ -106,7 +118,7 @@ fn start_fetch(previews: Entity<Previews>, k: String, src: CaptureSource, interv
                     e.error = None;
                 }
                 Err(err) => {
-                    log::debug!("[preview] {k}: {err}");
+                    log::warn!("[preview] {k}: {err}");
                     e.error = Some(err);
                 }
             }

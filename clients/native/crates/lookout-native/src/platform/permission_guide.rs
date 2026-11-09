@@ -10,12 +10,10 @@
 //! list accepts). Lookout comes to the front for the flight so its start can
 //! be seen, and System Settings goes back to the front as the card lands.
 //!
-//! The flight is one Core Animation layer tree in a click-through overlay
-//! window, so it runs on the render server at the display's refresh rate:
-//! the row's pixels (captured at the click) cross-fade into the card's
-//! around the apex of a quadratic arc while the size grows from row to
-//! card, under a single ease that starts gently and spends its back half
-//! slowing down, so the card glides into place instead of arriving at speed.
+//! The flight moves and resizes the live glass panel along a quadratic arc.
+//! The captured row fades out over that material around the apex, revealing
+//! the live card content. The same panel remains docked, with no material or
+//! geometry handoff at arrival.
 //!
 //! The card follows the Settings window (polled at 60 Hz while it moves,
 //! 10 Hz otherwise), fades out when neither Settings nor Lookout is in front,
@@ -82,9 +80,9 @@ mod imp {
     use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
     use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
     use objc2_app_kit::{
-        NSAppearanceCustomization, NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSBezierPath, NSBitmapImageRep, NSColor,
+        NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSBezierPath, NSBitmapImageRep, NSColor,
         NSCursor, NSDraggingContext, NSDraggingFormation, NSDraggingItem, NSDraggingSession, NSDraggingSource,
-        NSDragOperation, NSEvent, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSImage, NSImageView, NSPanel,
+        NSDragOperation, NSEvent, NSGraphicsContext, NSLineJoinStyle, NSShadow, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSImage, NSImageScaling, NSImageView, NSPanel,
         NSResponder, NSRunningApplication, NSScreen, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
         NSVisualEffectView, NSWindow, NSWorkspaceOpenConfiguration, NSWindowCollectionBehavior,
         NSWindowStyleMask, NSWorkspace,
@@ -94,19 +92,16 @@ mod imp {
     };
     use objc2_foundation::{
         NSArray, NSBundle, NSDictionary, NSFileManager, NSNumber, NSObject, NSPoint, NSRect,
-        NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL, NSValue, ns_string,
+        NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL, ns_string,
     };
-    use objc2_quartz_core::{
-        CABasicAnimation, CACurrentMediaTime, CAKeyframeAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction,
-        CATransaction, kCAFillModeBoth, kCAGravityResize,
-    };
+    use objc2_quartz_core::CACurrentMediaTime;
 
     const SETTINGS_ID: &str = "com.apple.systempreferences";
 
     // Card layout (AppKit points, origin bottom-left).
     const PANEL_W: f64 = 380.0;
-    const PANEL_H_DRAG: f64 = 116.0;
-    const PANEL_H_SWITCH: f64 = 60.0;
+    const PANEL_H_DRAG: f64 = 132.0;
+    const PANEL_H_SWITCH: f64 = 84.0;
     const PAD: f64 = 16.0;
     const TILE_H: f64 = 48.0;
     const CARD_RADIUS: f64 = 18.0;
@@ -119,14 +114,8 @@ mod imp {
     const FLIGHT_SECS: f64 = 0.8;
     /// Gentle out of the row, then a long, soft arrival.
     const FLIGHT_EASE: crate::motion::Ease = crate::motion::Ease::Bezier(0.33, 0.0, 0.12, 1.0);
-    /// The glass card takes over from the flying image this far in (the
-    /// last stretch is sub-pixel creep) over `HANDOFF_SECS`.
-    const HANDOFF_AT: f64 = 0.84;
-    const HANDOFF_SECS: f64 = 0.24;
     /// Peak of the arc above the higher end (points), at most.
     const ARC_MAX: f64 = 150.0;
-    /// Motion blur at the fastest point (points).
-    const BLUR_PEAK: f64 = 5.0;
     /// A warm Settings window counts as settled once its frame has held
     /// still this long; a cold launch also re-sends the pane URL (see
     /// `open_pane`), so that waits until after the last re-send.
@@ -137,37 +126,114 @@ mod imp {
     /// ...and no guide at all after this.
     const SETTINGS_PATIENCE: f64 = 12.0;
 
-    // ---------------------------------------------------------------- card
+    // ---------------------------------------------------------------- arrow
 
     define_class!(
-        // The flight's stand-in for the glass card (a material can't be
-        // rendered to an image). SAFETY: NSView subclass, no Drop, no state.
+        // SAFETY: stateless main-thread NSView subclass.
         #[unsafe(super(NSView, NSResponder, NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "LookoutPermissionCard"]
-        struct Card;
+        #[name = "LookoutPermissionArrow"]
+        struct Arrow;
 
-        impl Card {
+        impl Arrow {
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
-                let b = self.bounds();
-                let r = NSRect::new(NSPoint::new(b.origin.x + 0.5, b.origin.y + 0.5), NSSize::new(b.size.width - 1.0, b.size.height - 1.0));
-                let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, CARD_RADIUS - 0.5, CARD_RADIUS - 0.5);
-                NSColor::windowBackgroundColor().colorWithAlphaComponent(0.92).setFill();
-                path.fill();
-                NSColor::separatorColor().setStroke();
-                path.setLineWidth(1.0);
+                // A filled arrow with a rounded white rim, matching the guide
+                // reference. Draw as a path so it stays crisp while stretching.
+                let path = NSBezierPath::bezierPath();
+                path.moveToPoint(NSPoint::new(16.0, 6.0));
+                for (x, y) in [(26.0, 6.0), (26.0, 27.0), (36.0, 27.0),
+                    (21.0, 44.0), (6.0, 27.0), (16.0, 27.0)] {
+                    path.lineToPoint(NSPoint::new(x, y));
+                }
+                path.closePath();
+                path.setLineJoinStyle(NSLineJoinStyle::Round);
+                path.setLineWidth(3.0);
+                NSGraphicsContext::saveGraphicsState_class();
+                let shadow = NSShadow::new();
+                shadow.setShadowColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.48, 1.0, 0.35)));
+                shadow.setShadowBlurRadius(4.0);
+                shadow.setShadowOffset(NSSize::new(0.0, -1.0));
+                shadow.set();
+                NSColor::whiteColor().setStroke();
                 path.stroke();
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.60, 1.0, 1.0).setFill();
+                path.fill();
+                NSGraphicsContext::restoreGraphicsState_class();
             }
         }
-
-        unsafe impl NSObjectProtocol for Card {}
+        unsafe impl NSObjectProtocol for Arrow {}
     );
 
-    impl Card {
-        fn new(frame: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(());
-            unsafe { msg_send![super(this), initWithFrame: frame] }
+    struct ArrowMotion {
+        view: Retained<Arrow>,
+        frame: NSRect,
+        started: Option<f64>,
+        last_tick: f64,
+        last_kick: f64,
+        recoil_target: f64,
+        scale: f64,
+        scale_velocity: f64,
+        recoil: f64,
+        recoil_velocity: f64,
+    }
+
+    impl ArrowMotion {
+        fn new(frame: NSRect, mtm: MainThreadMarker) -> Self {
+            let view = Arrow::alloc(mtm).set_ivars(());
+            let view: Retained<Arrow> = unsafe { msg_send![super(view), initWithFrame: frame] };
+            view.setAlphaValue(if crate::motion::reduce_motion() { 1.0 } else { 0.0 });
+            Self { view, frame, started: None, last_tick: now(), last_kick: 0.0,
+                recoil_target: 1.0, scale: 0.2, scale_velocity: 18.0,
+                recoil: 1.0, recoil_velocity: 0.0 }
+        }
+
+        fn active(&self, t: f64) -> bool {
+            !crate::motion::reduce_motion() && self.started.is_some() &&
+                (t - self.last_kick < secs(4.0) || (self.scale - 1.0).abs() > 0.001)
+        }
+
+        fn kick(&mut self, dy: f64, dt: f64, t: f64) {
+            self.recoil_target = (1.0 - dy / dt.max(1.0 / 120.0) / 2200.0).clamp(0.3, 2.0);
+            self.last_kick = t;
+        }
+
+        fn step(&mut self, t: f64) {
+            if crate::motion::reduce_motion() {
+                self.view.setFrame(self.frame);
+                self.view.setAlphaValue(1.0);
+                return;
+            }
+            if self.started.is_none() {
+                self.started = Some(t);
+                self.last_tick = t;
+                self.last_kick = t;
+            }
+            let elapsed = (t - self.last_kick) / secs(1.0);
+            let target = if elapsed < 0.15 { self.recoil_target }
+                else if (2.15..2.37).contains(&elapsed) { 2.0 } else { 1.0 };
+            let dt = ((t - self.last_tick) / secs(1.0)).clamp(0.0, 0.05);
+            self.last_tick = t;
+            // Small integration steps keep the underdamped spring stable even
+            // when a Settings move makes the main run loop miss a frame.
+            let steps = (dt * 240.0).ceil().max(1.0) as usize;
+            let h = dt / steps as f64;
+            for _ in 0..steps {
+                self.scale_velocity += (200.0 * (1.0 - self.scale) - 11.0 * self.scale_velocity) * h;
+                self.scale += self.scale_velocity * h;
+                self.recoil_velocity += (180.0 * (target - self.recoil) - 14.0 * self.recoil_velocity) * h;
+                self.recoil += self.recoil_velocity * h;
+            }
+            let scale = self.scale.max(0.05);
+            let width = self.frame.size.width * scale;
+            let height = self.frame.size.height * scale * self.recoil.max(0.2);
+            let offset = -18.0 * (1.0 - self.scale);
+            self.view.setFrame(NSRect::new(NSPoint::new(
+                self.frame.origin.x + (self.frame.size.width - width) / 2.0,
+                self.frame.origin.y + offset,
+            ), NSSize::new(width, height)));
+            self.view.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), self.frame.size));
+            self.view.setAlphaValue(((t - self.started.unwrap()) / secs(0.15)).clamp(0.0, 1.0));
         }
     }
 
@@ -292,7 +358,7 @@ mod imp {
     struct Shot {
         /// Screen coordinates.
         rect: NSRect,
-        /// Its pixels; `None` falls back to the card's own image.
+        /// Its pixels; without them the live glass flies on its own.
         image: Option<Retained<NSImage>>,
         window: Retained<NSWindow>,
     }
@@ -306,17 +372,17 @@ mod imp {
     }
 
     struct Guide {
-        /// Tells a stale landing timer from this guide's own.
+        /// Keeps delayed Settings activation tied to this guide.
         id: u64,
         kind: Kind,
         panel: Retained<NSPanel>,
-        /// The card drawn without glass, for the flight's image.
-        face: Retained<Card>,
+        content: Retained<NSView>,
+        arrow: ArrowMotion,
         /// System Settings wasn't running at the click.
         cold: bool,
         source: Option<Shot>,
         stage: Stage,
-        overlay: Option<Retained<NSPanel>>,
+        flight: Option<Flight>,
         timer: Retained<NSTimer>,
         opened_at: f64,
         saw_settings: bool,
@@ -405,7 +471,7 @@ mod imp {
         // Camera's list only holds apps that asked, so it's switched on, not dragged in.
         let draggable = kind != Kind::Camera;
         let name = app_name(&bundle);
-        let (panel, face) = build_panel(kind, draggable, &bundle, &name, mtm);
+        let (panel, content, arrow) = build_panel(kind, draggable, &bundle, &name, mtm);
 
         let timer = unsafe {
             NSTimer::timerWithTimeInterval_repeats_block(
@@ -425,11 +491,12 @@ mod imp {
                 }),
                 kind,
                 panel,
-                face,
+                content,
+                arrow,
                 cold,
                 source: shot,
                 stage: Stage::Waiting { first_seen: None, last: None, still_since: t },
-                overlay: None,
+                flight: None,
                 timer,
                 opened_at: t,
                 saw_settings: false,
@@ -476,15 +543,15 @@ mod imp {
         Some(NSImage::initWithCGImage_size(NSImage::alloc(), &image, rect.size))
     }
 
-    /// The docked card (Liquid Glass on macOS 26+, a popover material
-    /// before) and its glass-less twin for the flight.
+    /// One live card for both flight and docking: Liquid Glass on macOS 26+,
+    /// a popover material before.
     fn build_panel(
         kind: Kind,
         draggable: bool,
         bundle: &NSURL,
         name: &NSString,
         mtm: MainThreadMarker,
-    ) -> (Retained<NSPanel>, Retained<Card>) {
+    ) -> (Retained<NSPanel>, Retained<NSView>, ArrowMotion) {
         let h = if draggable { PANEL_H_DRAG } else { PANEL_H_SWITCH };
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_W, h));
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
@@ -509,13 +576,10 @@ mod imp {
         panel.setAlphaValue(0.0);
 
         let (glass, content) = glass_view(frame, mtm);
-        populate(&content, kind, draggable, bundle, name, mtm);
+        let arrow = populate(&content, kind, draggable, bundle, name, mtm);
         panel.setContentView(Some(&glass));
 
-        let face = Card::new(frame, mtm);
-        face.setAppearance(Some(&NSApplication::sharedApplication(mtm).effectiveAppearance()));
-        populate(&face, kind, draggable, bundle, name, mtm);
-        (panel, face)
+        (panel, content, arrow)
     }
 
     /// `(outer view, view to put the content in)`.
@@ -542,10 +606,12 @@ mod imp {
             layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
         }
         let view: Retained<NSView> = Retained::into_super(material);
-        (view.clone(), view)
+        let content = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        view.addSubview(&content);
+        (view, content)
     }
 
-    fn populate(into: &NSView, kind: Kind, draggable: bool, bundle: &NSURL, name: &NSString, mtm: MainThreadMarker) {
+    fn populate(into: &NSView, kind: Kind, draggable: bool, bundle: &NSURL, name: &NSString, mtm: MainThreadMarker) -> ArrowMotion {
         let h = into.frame().size.height;
         let list = list_name(kind);
         let text = if draggable {
@@ -553,17 +619,13 @@ mod imp {
         } else {
             format!("Switch on {name} in the {list} list above")
         };
-        let text_y = if draggable { h - PAD - 22.0 } else { (h - 20.0) / 2.0 };
-        if let Some(arrow) = symbol(ns_string!("arrow.up")) {
-            let v = NSImageView::imageViewWithImage(&arrow, mtm);
-            v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
-            v.setFrame(NSRect::new(NSPoint::new(PAD, text_y + 2.0), NSSize::new(14.0, 16.0)));
-            into.addSubview(&v);
-        }
+        let text_y = if draggable { h - PAD - 30.0 } else { (h - 20.0) / 2.0 };
+        let arrow = ArrowMotion::new(NSRect::new(NSPoint::new(PAD - 5.0, text_y - 14.0), NSSize::new(42.0, 50.0)), mtm);
+        into.addSubview(&arrow.view);
         let label = NSTextField::labelWithString(&NSString::from_str(&text), mtm);
         label.setFont(Some(&NSFont::systemFontOfSize_weight(13.0, unsafe { NSFontWeightMedium })));
         label.setTextColor(Some(&NSColor::labelColor()));
-        label.setFrame(NSRect::new(NSPoint::new(PAD + 22.0, text_y), NSSize::new(PANEL_W - 2.0 * PAD - 22.0, 20.0)));
+        label.setFrame(NSRect::new(NSPoint::new(PAD + 42.0, text_y), NSSize::new(PANEL_W - 2.0 * PAD - 42.0, 20.0)));
         into.addSubview(&label);
 
         if draggable {
@@ -574,6 +636,7 @@ mod imp {
             let tile = Tile::new(tile_frame, bundle.retain(), &icon, name, mtm);
             into.addSubview(&tile);
         }
+        arrow
     }
 
     // ---------------------------------------------------------------- pane
@@ -691,7 +754,7 @@ mod imp {
                 log::info!("[permission-guide] {:?} granted", self.kind);
                 self.closing = true;
             }
-            let animating = (self.alpha - self.target).abs() > 0.004 || self.stage != Stage::Docked || t - self.last_move < 0.5;
+            let animating = (self.alpha - self.target).abs() > 0.004 || self.stage != Stage::Docked || t - self.last_move < 0.5 || self.arrow.active(t);
             // Idle: ~10 Hz is plenty to notice the Settings window starting to move.
             if !animating && !self.closing && self.ticks % 6 != 0 {
                 return false;
@@ -713,7 +776,10 @@ mod imp {
                             if settled || t - self.opened_at > FLIGHT_PATIENCE {
                                 self.enter(origin, mtm);
                             }
-                        } else if self.last_origin.is_none_or(|o| o.x != origin.x || o.y != origin.y) {
+                        } else if self.stage == Stage::Docked && self.last_origin.is_none_or(|o| o.x != origin.x || o.y != origin.y) {
+                            if let Some(previous) = self.last_origin {
+                                self.arrow.kick(origin.y - previous.y, t - self.last_move, t);
+                            }
                             self.panel.setFrameOrigin(origin);
                             self.last_origin = Some(origin);
                             self.last_move = t;
@@ -732,17 +798,21 @@ mod imp {
             }
             if self.closing {
                 self.target = 0.0;
-                self.drop_overlay();
+                self.finish_flight();
                 if self.stage == Stage::Flying {
                     self.stage = Stage::Docked;
                 }
+            }
+            if self.stage == Stage::Flying {
+                self.advance_flight(t);
             }
             if self.stage != Stage::Docked {
                 return false;
             }
 
-            // Ease the card's opacity (~150 ms either way at 60 Hz; a bit
-            // quicker in, so the hand-off from the flight doesn't dip).
+            self.arrow.step(t);
+
+            // Ease visibility changes and the no-flight entrance (~150 ms).
             let k = if self.target > self.alpha { 0.26 } else { 0.25 };
             self.alpha += (self.target - self.alpha) * k;
             if (self.alpha - self.target).abs() < 0.004 {
@@ -761,71 +831,86 @@ mod imp {
             set_phase(Some(self.kind), Phase::InSettings);
 
             let source = self.source.take();
-            let overlay = source.as_ref().and_then(|s| fly(s, self.panel.frame(), &self.face, mtm));
-            match overlay {
-                Some(overlay) => {
-                    log::info!("[permission-guide] flying the card in");
-                    self.overlay = Some(overlay);
-                    self.stage = Stage::Flying;
-                    // Settings comes forward around the apex, while the eye
-                    // is on the card, rather than jumping up as it lands.
-                    later(secs(FLIGHT_SECS * 0.45), activate_settings);
-                    let id = self.id;
-                    later(secs(FLIGHT_SECS * HANDOFF_AT), move || land(id));
+            self.flight = source.as_ref().and_then(|s| Flight::new(s, self.panel.frame(), mtm));
+            if self.flight.is_some() {
+                log::info!("[permission-guide] flying the live glass card in");
+                self.stage = Stage::Flying;
+                self.panel.setLevel(101); // above Settings throughout the flight
+                self.panel.setIgnoresMouseEvents(true);
+                self.alpha = 1.0;
+                self.target = 1.0;
+                self.panel.setAlphaValue(1.0);
+                if let Some(row) = self.flight.as_ref().and_then(|f| f.row.as_ref()) {
+                    self.panel.contentView().unwrap().addSubview(row);
                 }
-                None => {
-                    log::info!("[permission-guide] showing the card (no flight)");
-                    self.stage = Stage::Docked;
-                    activate_settings();
-                }
-            }
-        }
-
-        /// Nearly there: the glass card fades in where the flying image is
-        /// settling, and the image fades out over it.
-        fn land(&mut self) {
-            if self.stage != Stage::Flying {
-                return;
-            }
-            self.stage = Stage::Docked;
-            self.target = 1.0;
-            self.panel.orderFrontRegardless();
-            if let Some(overlay) = self.overlay.take() {
-                if let Some(layer) = overlay.contentView().and_then(|v| v.layer()) {
-                    let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
-                    unsafe {
-                        fade.setFromValue(Some(&number(1.0)));
-                        fade.setToValue(Some(&number(0.0)));
+                self.advance_flight(now());
+                let id = self.id;
+                later(secs(FLIGHT_SECS * 0.45), move || {
+                    let current = GUIDE.with_borrow(|g| g.as_ref().is_some_and(|g| g.id == id && !g.closing));
+                    if current {
+                        activate_settings();
                     }
-                    fade.setDuration(secs(HANDOFF_SECS));
-                    fade.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(0.4, 0.0, 0.6, 1.0)));
-                    without_actions(|| layer.setOpacity(0.0));
-                    layer.addAnimation_forKey(&fade, Some(ns_string!("handoff")));
-                }
-                later(secs(HANDOFF_SECS) + 0.05, move || overlay.orderOut(None));
+                });
+            } else {
+                log::info!("[permission-guide] showing the card (no flight)");
+                self.stage = Stage::Docked;
+                activate_settings();
             }
         }
 
-        fn drop_overlay(&mut self) {
-            if let Some(overlay) = self.overlay.take() {
-                overlay.orderOut(None);
+        fn advance_flight(&mut self, t: f64) {
+            let Some(f) = &self.flight else { return };
+            let elapsed = ((t - f.started) / secs(FLIGHT_SECS)).clamp(0.0, 1.0);
+            let p = FLIGHT_EASE.apply(elapsed as f32) as f64;
+            let frame = f.frame(p);
+            self.panel.setFrame_display(frame, true);
+            // Scale the original content coordinates with the panel, rather
+            // than relaying out labels and the draggable tile on every frame.
+            self.content.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+            self.content.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), f.target.size));
+            let swap = ((p - 0.28) / (0.62 - 0.28)).clamp(0.0, 1.0);
+            let swap = swap * swap * (3.0 - 2.0 * swap);
+            self.content.setAlphaValue(swap);
+            let radius = ROW_RADIUS + (CARD_RADIUS - ROW_RADIUS) * p;
+            let glass = self.panel.contentView().unwrap();
+            set_glass_radius(&glass, radius);
+            if let Some(row) = &f.row {
+                row.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+                row.setAlphaValue(1.0 - swap);
+                if let Some(layer) = row.layer() {
+                    layer.setCornerRadius(radius);
+                }
+            }
+            if elapsed == 1.0 {
+                self.finish_flight();
+                self.stage = Stage::Docked;
+            }
+        }
+
+        fn finish_flight(&mut self) {
+            if let Some(f) = self.flight.take() {
+                if let Some(row) = f.row {
+                    row.removeFromSuperview();
+                }
+                self.panel.setFrame_display(f.target, true);
+                let bounds = NSRect::new(NSPoint::new(0.0, 0.0), f.target.size);
+                self.content.setFrame(bounds);
+                self.content.setBounds(bounds);
+                self.content.setAlphaValue(1.0);
+                if let Some(glass) = self.panel.contentView() {
+                    set_glass_radius(&glass, CARD_RADIUS);
+                }
+                self.panel.setLevel(3);
+                self.panel.setIgnoresMouseEvents(false);
             }
         }
 
         fn teardown(mut self) {
             self.timer.invalidate();
-            self.drop_overlay();
+            self.finish_flight();
             self.panel.orderOut(None);
             set_phase(None, Phase::Idle);
         }
-    }
-
-    fn land(id: u64) {
-        GUIDE.with_borrow_mut(|g| {
-            if let Some(g) = g.as_mut().filter(|g| g.id == id) {
-                g.land();
-            }
-        });
     }
 
     fn activate_settings() {
@@ -866,198 +951,70 @@ mod imp {
 
     // ---------------------------------------------------------------- flight
 
-    /// Fly the row's image from `src` to the card at `target` (screen
-    /// coordinates), morphing into the card's image on the way. Returns the
-    /// overlay window it runs in; `None` (nothing shown) when the two ends
-    /// are on different screens.
-    fn fly(src: &Shot, target: NSRect, face: &Card, mtm: MainThreadMarker) -> Option<Retained<NSPanel>> {
-        let center = |r: NSRect| NSPoint::new(r.origin.x + r.size.width / 2.0, r.origin.y + r.size.height / 2.0);
-        let (sc, tc) = (center(src.rect), center(target));
-        let screens = NSScreen::screens(mtm);
-        let Some(screen) = screens.iter().find(|s| contains(s.frame(), sc)) else {
-            log::info!("[permission-guide] the row isn't on a screen; no flight");
-            return None;
-        };
-        let sf = screen.frame();
-        if !contains(sf, tc) {
-            log::info!("[permission-guide] System Settings is on another screen; no flight");
-            return None;
+    struct Flight {
+        source: NSRect,
+        target: NSRect,
+        control: NSPoint,
+        started: f64,
+        row: Option<Retained<NSImageView>>,
+    }
+
+    impl Flight {
+        fn new(src: &Shot, target: NSRect, mtm: MainThreadMarker) -> Option<Self> {
+            let from = rect_center(src.rect);
+            let to = rect_center(target);
+            // Keep the existing no-flight behavior across displays.
+            if !NSScreen::screens(mtm).iter().any(|s| contains(s.frame(), from) && contains(s.frame(), to)) {
+                return None;
+            }
+            let dist = (to.x - from.x).hypot(to.y - from.y);
+            let row = src.image.as_ref().map(|image| {
+                let row = NSImageView::imageViewWithImage(image, mtm);
+                row.setImageScaling(NSImageScaling::ScaleAxesIndependently);
+                row.setWantsLayer(true);
+                if let Some(layer) = row.layer() {
+                    layer.setMasksToBounds(true);
+                    layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+                }
+                row
+            });
+            Some(Self {
+                source: src.rect,
+                target,
+                control: NSPoint::new((from.x + to.x) / 2.0, from.y.max(to.y) + (dist * 0.3).clamp(40.0, ARC_MAX)),
+                started: now(),
+                row,
+            })
         }
-        let Some(card_img) = snapshot(face) else {
-            log::warn!("[permission-guide] couldn't render the card; no flight");
-            return None;
-        };
-        let scale = screen.backingScaleFactor();
 
-        let overlay = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            sf,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
-        overlay.setLevel(101); // NSPopUpMenuWindowLevel: above the card's panel
-        overlay.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        overlay.setOpaque(false);
-        overlay.setBackgroundColor(Some(&NSColor::clearColor()));
-        overlay.setHasShadow(false);
-        overlay.setIgnoresMouseEvents(true);
-        overlay.setHidesOnDeactivate(false);
-        unsafe { overlay.setReleasedWhenClosed(false) };
-        overlay.setFrame_display(sf, false);
-
-        // A layer-hosting view: our own root layer, which AppKit leaves alone.
-        let host = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), sf.size));
-        let root = CALayer::new();
-        host.setLayer(Some(&root));
-        host.setWantsLayer(true);
-        host.setLayerUsesCoreImageFilters(true);
-
-        let local = |p: NSPoint| NSPoint::new((p.x - sf.origin.x).round(), (p.y - sf.origin.y).round());
-        let (from, to) = (local(sc), local(tc));
-        let (from_size, to_size) = (src.rect.size, target.size);
-        let mid = |s: NSSize| NSPoint::new(s.width / 2.0, s.height / 2.0);
-
-        // The container travels and carries the shadow and blur; its two
-        // faces (row, card) are clipped to the morphing rounded rect.
-        let container = CALayer::new();
-        let face = |image: &NSImage| {
-            let l = CALayer::new();
-            unsafe { l.setContents(Some(image)) };
-            l.setContentsGravity(unsafe { kCAGravityResize });
-            l.setContentsScale(scale);
-            l.setMasksToBounds(true);
-            l.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
-            l
-        };
-        let row_face = face(src.image.as_deref().unwrap_or(&card_img));
-        let card_face = face(&card_img);
-        without_actions(|| {
-            container.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), to_size));
-            container.setPosition(to);
-            container.setShadowOpacity(0.24);
-            container.setShadowRadius(16.0);
-            container.setShadowOffset(NSSize::new(0.0, -8.0));
-            for (l, opacity) in [(&row_face, 0.0), (&card_face, 1.0)] {
-                l.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), to_size));
-                l.setPosition(mid(to_size));
-                l.setCornerRadius(CARD_RADIUS);
-                l.setOpacity(opacity);
-                container.addSublayer(l);
-            }
-            if let Some(blur) = blur_filter() {
-                unsafe { container.setFilters(Some(&NSArray::from_retained_slice(&[blur]))) };
-            }
-            root.addSublayer(&container);
-        });
-        overlay.setContentView(Some(&host));
-
-        // Every property is sampled from one eased progress curve, so the
-        // path, the growth and the cross-fade arrive together and the
-        // arrival really does slow to a stop (a paced path animation ignores
-        // the ease and coasts in at full speed).
-        let d = secs(FLIGHT_SECS);
-        let dist = (to.x - from.x).hypot(to.y - from.y);
-        let control = NSPoint::new((from.x + to.x) / 2.0, from.y.max(to.y) + (dist * 0.3).clamp(40.0, ARC_MAX));
-        let n = ((FLIGHT_SECS * 120.0) as usize).max(24);
-        let smooth = |a: f64, b: f64, x: f64| {
-            let u = ((x - a) / (b - a)).clamp(0.0, 1.0);
-            u * u * (3.0 - 2.0 * u)
-        };
-        let mut times = Vec::with_capacity(n + 1);
-        let (mut pos, mut size, mut center, mut radius) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut row_a, mut card_a, mut blur, mut shadow) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for i in 0..=n {
-            let t = i as f64 / n as f64;
-            let p = FLIGHT_EASE.apply(t as f32) as f64;
+        fn frame(&self, p: f64) -> NSRect {
+            let from = rect_center(self.source);
+            let to = rect_center(self.target);
             let u = 1.0 - p;
-            times.push(NSNumber::new_f64(t));
-            pos.push(point_value(NSPoint::new(
-                u * u * from.x + 2.0 * u * p * control.x + p * p * to.x,
-                u * u * from.y + 2.0 * u * p * control.y + p * p * to.y,
-            )));
-            let sz = NSSize::new(
-                from_size.width + (to_size.width - from_size.width) * p,
-                from_size.height + (to_size.height - from_size.height) * p,
+            let size = NSSize::new(
+                self.source.size.width + (self.target.size.width - self.source.size.width) * p,
+                self.source.size.height + (self.target.size.height - self.source.size.height) * p,
             );
-            size.push(size_value(sz));
-            center.push(point_value(mid(sz)));
-            radius.push(number(ROW_RADIUS + (CARD_RADIUS - ROW_RADIUS) * p));
-            // The swap happens around the apex, where the eye is on the motion.
-            let swap = smooth(0.28, 0.62, p);
-            row_a.push(number(1.0 - swap));
-            card_a.push(number(swap));
-            blur.push(number(BLUR_PEAK * (4.0 * p * u).powf(1.5)));
-            shadow.push(number(0.24 * smooth(0.0, 0.25, p)));
+            NSRect::new(NSPoint::new(
+                u * u * from.x + 2.0 * u * p * self.control.x + p * p * to.x - size.width / 2.0,
+                u * u * from.y + 2.0 * u * p * self.control.y + p * p * to.y - size.height / 2.0,
+            ), size)
         }
-        let times = NSArray::from_retained_slice(&times);
-        let frames = |key: &NSString, values: &[Retained<AnyObject>]| {
-            let x = CAKeyframeAnimation::animationWithKeyPath(Some(key));
-            unsafe {
-                x.setValues(Some(&NSArray::from_slice(&values.iter().map(|v| &**v).collect::<Vec<_>>())));
-                x.setKeyTimes(Some(&times));
-            }
-            x.setDuration(d);
-            x.setFillMode(unsafe { kCAFillModeBoth });
-            x.setRemovedOnCompletion(false);
-            x
-        };
-        container.addAnimation_forKey(&frames(ns_string!("position"), &pos), Some(ns_string!("travel")));
-        container.addAnimation_forKey(&frames(ns_string!("bounds.size"), &size), Some(ns_string!("grow")));
-        container.addAnimation_forKey(&frames(ns_string!("shadowOpacity"), &shadow), Some(ns_string!("lift")));
-        if blur_filter_class().is_some() {
-            container.addAnimation_forKey(&frames(ns_string!("filters.blur.inputRadius"), &blur), Some(ns_string!("blur")));
+    }
+
+    fn rect_center(r: NSRect) -> NSPoint {
+        NSPoint::new(r.origin.x + r.size.width / 2.0, r.origin.y + r.size.height / 2.0)
+    }
+
+    fn set_glass_radius(glass: &NSView, radius: f64) {
+        if AnyClass::get(c"NSGlassEffectView").is_some() {
+            unsafe { let _: () = msg_send![glass, setCornerRadius: radius]; }
+        } else if let Some(layer) = glass.layer() {
+            layer.setCornerRadius(radius);
         }
-        for (l, fade) in [(&row_face, &row_a), (&card_face, &card_a)] {
-            l.addAnimation_forKey(&frames(ns_string!("bounds.size"), &size), Some(ns_string!("grow")));
-            l.addAnimation_forKey(&frames(ns_string!("position"), &center), Some(ns_string!("recenter")));
-            l.addAnimation_forKey(&frames(ns_string!("cornerRadius"), &radius), Some(ns_string!("round")));
-            l.addAnimation_forKey(&frames(ns_string!("opacity"), fade), Some(ns_string!("swap")));
-        }
-        overlay.orderFrontRegardless();
-        Some(overlay)
     }
 
     // ---------------------------------------------------------------- helpers
-
-    fn without_actions(f: impl FnOnce()) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        f();
-        CATransaction::commit();
-    }
-
-    fn number(v: f64) -> Retained<AnyObject> {
-        Retained::into_super(Retained::into_super(NSNumber::new_f64(v))).into()
-    }
-
-    fn size_value(s: NSSize) -> Retained<AnyObject> {
-        Retained::into_super(unsafe { NSValue::valueWithSize(s) }).into()
-    }
-
-    fn point_value(p: NSPoint) -> Retained<AnyObject> {
-        Retained::into_super(unsafe { NSValue::valueWithPoint(p) }).into()
-    }
-
-    fn blur_filter_class() -> Option<&'static AnyClass> {
-        AnyClass::get(c"CIFilter")
-    }
-
-    /// A zero-radius Gaussian blur named `blur` (animated during the flight).
-    fn blur_filter() -> Option<Retained<AnyObject>> {
-        let cls = blur_filter_class()?;
-        unsafe {
-            let f: Option<Retained<AnyObject>> = msg_send![cls, filterWithName: ns_string!("CIGaussianBlur")];
-            let f = f?;
-            let _: () = msg_send![&*f, setName: ns_string!("blur")];
-            let _: () = msg_send![&*f, setValue: &*number(0.0), forKey: ns_string!("inputRadius")];
-            Some(f)
-        }
-    }
 
     fn os_major() -> isize {
         objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion().majorVersion

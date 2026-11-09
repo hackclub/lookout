@@ -45,11 +45,12 @@ sentry = { version = "0.49.5", default-features = false, features = ["backtrace"
 # reqwest 0.12 already uses) rather than build aws-lc-sys.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tar = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [features]
 default = ["webview"]
 # Embed ProgramPanel pages. Without it (or without WebKitGTK at build time) the
-# panel always offers "Open in browser".
+# panel shows an in-app error.
 webview = ["dep:wry", "dep:gtk", "dep:webkit2gtk"]
 
 [build-dependencies]

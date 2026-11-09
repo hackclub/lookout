@@ -752,6 +752,7 @@ impl SourcePicker {
             let Some(src) = tile.sel.capture() else { continue };
             any_tile = true;
             let img = previews::get(&src, Duration::from_millis(1000), true, cx);
+            let error = previews::error(&src, cx);
             let (o, s) = (tile.opacity.get(), tile.scale.get());
             let (cover, rect) = (tile.cover, tile.rect);
             // Drawn into the animated box with object-fit re-applied each
@@ -776,7 +777,24 @@ impl SourcePicker {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(Spinner::new(SpinnerSize::Sm))
+                        .child(match error {
+                            Some(error) => div()
+                                .p(px(16.0))
+                                .ts(12.0)
+                                .text_center()
+                                .text_color(t.text_error)
+                                .child("Preview unavailable. Retrying…")
+                                .child(Button::new(eid("preview-error", tile.sel.key()), "Details")
+                                    .variant(Variant::Ghost)
+                                    .size(BtnSize::Sm)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(PickerEvent::CaptureError {
+                                            error: error.clone(), detecting: false,
+                                        });
+                                    })))
+                                .into_any_element(),
+                            None => Spinner::new(SpinnerSize::Sm).into_any_element(),
+                        })
                         .into_any_element()
                 }
             };

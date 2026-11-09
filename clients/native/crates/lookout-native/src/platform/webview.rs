@@ -10,15 +10,19 @@
 //! within the panel's origin, and anything that would open a new window goes
 //! to the system browser instead.
 //!
-//! Linux: WebKitGTK embeds into an X11 window only, so a GPUI window on
-//! native Wayland can't host it (`create` fails and the panel falls back to
-//! "Open in browser"). GTK is initialised on first use and its main loop is
-//! pumped from the GPUI executor while any webview is alive.
+//! Linux: X11 uses a native child view. Native Wayland uses WebKitGTK's
+//! software renderer in an offscreen GTK widget, then composites snapshots
+//! into GPUI and forwards input. GTK is initialised on first use and its
+//! main loop is pumped from the GPUI executor while any webview is alive.
 //!
-//! The native view always draws above GPUI content in its bounds, so the
-//! caller hides it whenever GPUI needs to show something there.
+//! Native child views draw above GPUI content, so the caller hides them
+//! whenever GPUI needs to show something there. Wayland frames are painted
+//! and clipped by GPUI like any other image.
 
 use std::cell::Cell;
+
+#[cfg(all(feature = "webview", target_os = "linux"))]
+mod wayland;
 
 use gpui_kit::gpui::{App, Bounds, Pixels, Window};
 
@@ -33,6 +37,9 @@ pub enum WebEvent {
     /// The main document failed to load (Linux reports this; elsewhere the
     /// load timeout catches it).
     Failed,
+    /// A software-rendered frame from the native Wayland backend.
+    #[cfg(all(feature = "webview", target_os = "linux"))]
+    Frame(std::sync::Arc<gpui_kit::gpui::RenderImage>),
 }
 
 /// The `window.parent.postMessage` shim, installed before any page script
@@ -63,8 +70,11 @@ pub struct PanelWebView {
     view: wry::WebView,
     shown: Cell<bool>,
     placed: Cell<Option<Bounds<Pixels>>>,
+    edit_revision: Cell<u64>,
     #[cfg(all(feature = "webview", target_os = "linux"))]
     scale: Cell<f32>,
+    #[cfg(all(feature = "webview", target_os = "linux"))]
+    offscreen: Option<wayland::Offscreen>,
 }
 
 #[cfg(all(feature = "webview", target_os = "linux"))]
@@ -116,8 +126,8 @@ impl PanelWebView {
             let origin = origin_of(url).ok_or_else(|| anyhow::anyhow!("panel URL has no origin"))?;
             #[cfg(target_os = "linux")]
             let parent = {
-                let parent = linux::X11Parent::new(window)?;
-                linux::ensure_gtk(cx)?;
+                let parent = linux::Parent::new(window)?;
+                linux::ensure_gtk(cx, matches!(parent, linux::Parent::Wayland))?;
                 parent
             };
             #[cfg(not(target_os = "linux"))]
@@ -139,7 +149,7 @@ impl PanelWebView {
 }
 
 #[cfg(all(feature = "webview", target_os = "linux"))]
-type Parent = linux::X11Parent;
+type Parent = linux::Parent;
 
 /// The GPUI window's native handle, held past the borrow of the `Window`.
 #[cfg(all(feature = "webview", not(target_os = "linux")))]
@@ -175,7 +185,7 @@ impl PendingWebView {
             let win_tx = tx.clone();
             #[cfg(target_os = "linux")]
             let fail_tx = tx.clone();
-            let load_tx = tx;
+            let load_tx = tx.clone();
             let load_origin = origin.clone();
             let builder = wry::WebViewBuilder::new()
                 .with_url(url)
@@ -228,6 +238,13 @@ impl PendingWebView {
                     }
                 });
 
+            #[cfg(target_os = "linux")]
+            let builder = if matches!(parent, linux::Parent::Wayland) {
+                builder.with_initialization_script(include_str!("webview/wayland_input.js"))
+            } else {
+                builder
+            };
+
             #[cfg(target_os = "windows")]
             let builder = {
                 use wry::WebViewBuilderExtWindows as _;
@@ -236,7 +253,20 @@ impl PendingWebView {
 
             #[cfg(target_os = "linux")]
             linux::set_theme(dark);
+            #[cfg(not(target_os = "linux"))]
             let view = builder.build_as_child(&parent)?;
+            #[cfg(target_os = "linux")]
+            let (view, offscreen) = match &parent {
+                linux::Parent::X11(parent) => (builder.build_as_child(parent)?, None),
+                linux::Parent::Wayland => {
+                    use wry::WebViewBuilderExtUnix as _;
+                    let host = wayland::Offscreen::new();
+                    let view = builder.build_gtk(&host.container)?;
+                    host.attach(&view, tx.clone());
+                    log::info!("[panel] using native Wayland software webview");
+                    (view, Some(host))
+                }
+            };
 
             #[cfg(target_os = "linux")]
             {
@@ -255,23 +285,100 @@ impl PendingWebView {
                 view,
                 shown: Cell::new(true),
                 placed: Cell::new(None),
+                edit_revision: Cell::new(0),
                 #[cfg(target_os = "linux")]
                 scale: Cell::new(self.scale),
+                #[cfg(target_os = "linux")]
+                offscreen,
             };
             Ok((this, rx))
         }
     }
-
 }
 
 impl PanelWebView {
-    /// Put the native view over `bounds` (window coordinates), or hide it.
-    /// Cheap to call every frame: only changes reach the platform.
+    pub fn composited(&self) -> bool {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        {
+            return self.offscreen.is_some();
+        }
+        #[cfg(not(all(feature = "webview", target_os = "linux")))]
+        {
+            false
+        }
+    }
+
     #[allow(unused_variables)]
-    pub fn place(&self, bounds: Option<Bounds<Pixels>>, window: &Window) {
+    pub fn pointer(
+        &self,
+        position: gpui_kit::gpui::Point<Pixels>,
+        button: Option<gpui_kit::gpui::MouseButton>,
+        down: Option<bool>,
+        modifiers: gpui_kit::gpui::Modifiers,
+    ) {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        if let (Some(host), Some(bounds)) = (&self.offscreen, self.placed.get()) {
+            host.pointer(&self.view, position, bounds.origin, button, down, modifiers);
+        }
+    }
+
+    #[allow(unused_variables)]
+    pub fn scroll(&self, event: &gpui_kit::gpui::ScrollEvent) {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        if let (Some(host), Some(bounds)) = (&self.offscreen, self.placed.get()) {
+            host.scroll(&self.view, event.position, bounds.origin, event.delta.pixel_delta(gpui_kit::gpui::px(40.0)), event.modifiers);
+        }
+    }
+
+    #[allow(unused_variables)]
+    pub fn key(&self, stroke: &gpui_kit::gpui::Keystroke, down: bool) {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        if let Some(host) = &self.offscreen {
+            host.key(&self.view, stroke, down);
+        }
+    }
+
+    pub fn edit_revision(&self) -> u64 {
+        self.edit_revision.get()
+    }
+
+    #[allow(unused_variables)]
+    pub fn edit(&self, operation: &str, range: Option<std::ops::Range<usize>>, text: &str, selection: Option<std::ops::Range<usize>>) {
+        if !self.composited() {
+            return;
+        }
+        self.edit_revision.set(self.edit_revision.get() + 1);
+        let script = format!(
+            "window.__lookoutEdit?.({}, {}, {}, {}, {})",
+            serde_json::json!(operation),
+            serde_json::json!(range.map(|r| [r.start, r.end])),
+            serde_json::json!(text),
+            serde_json::json!(selection.map(|r| [r.start, r.end])),
+            self.edit_revision.get()
+        );
+        #[cfg(feature = "webview")]
+        if let Err(e) = self.view.evaluate_script(&script) {
+            log::warn!("[panel] webview editing failed: {e}");
+        }
+    }
+
+    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.placed.get()
+    }
+
+    /// Put the native view over `bounds` (window coordinates), or hide it.
+    /// Native children update only on changes; Wayland requests snapshots at up to 30 fps.
+    #[allow(unused_variables)]
+    pub fn place(&self, bounds: Option<Bounds<Pixels>>, window: &mut Window) {
         let bounds = bounds.filter(|b| f32::from(b.size.width) >= 1.0 && f32::from(b.size.height) >= 1.0);
         #[cfg(feature = "webview")]
         {
+            #[cfg(target_os = "linux")]
+            if let Some(host) = &self.offscreen {
+                host.place(bounds, window, &self.view);
+                self.placed.set(bounds);
+                return;
+            }
             #[cfg(target_os = "linux")]
             if self.scale.replace(window.scale_factor()) != window.scale_factor() {
                 linux::match_scale_factor(&self.view, window.scale_factor());
@@ -318,12 +425,13 @@ mod linux {
 
     static PUMPING: AtomicBool = AtomicBool::new(false);
 
-    /// Initialise GTK (X11 backend) once, and pump its main loop from GPUI
+    /// Initialise GTK with the window's display backend once, and pump its main loop from GPUI
     /// while any webview is alive (plus a moment after, so teardown runs).
-    pub fn ensure_gtk(cx: &mut App) -> anyhow::Result<()> {
+    pub fn ensure_gtk(cx: &mut App, wayland: bool) -> anyhow::Result<()> {
         if !gtk::is_initialized_main_thread() {
-            // wry downcasts the default GDK display to X11.
-            gtk::gdk::set_allowed_backends("x11");
+            // Native child views require X11. The offscreen backend instead
+            // uses the session's Wayland connection without opening a toplevel.
+            gtk::gdk::set_allowed_backends(if wayland { "wayland" } else { "x11" });
             gtk::init().map_err(|e| anyhow::anyhow!("GTK init failed: {e}"))?;
         }
         if PUMPING.swap(true, Ordering::SeqCst) {
@@ -356,6 +464,21 @@ mod linux {
         use gtk::prelude::GtkSettingsExt as _;
         if let Some(s) = gtk::Settings::default() {
             s.set_gtk_application_prefer_dark_theme(dark);
+        }
+    }
+
+    pub enum Parent {
+        X11(X11Parent),
+        Wayland,
+    }
+
+    impl Parent {
+        pub fn new(window: &Window) -> anyhow::Result<Self> {
+            if matches!(HasWindowHandle::window_handle(window)?.as_raw(), RawWindowHandle::Wayland(_)) {
+                Ok(Self::Wayland)
+            } else {
+                X11Parent::new(window).map(Self::X11)
+            }
         }
     }
 
