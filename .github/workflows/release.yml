@@ -14,6 +14,10 @@ on:
         description: "Only build Lookout Native: skip the test suite and the Tauri build (unsigned artifacts, nothing published)"
         type: boolean
         default: false
+      sign:
+        description: "Sign the Lookout Native Windows installer even though this isn't a tagged release (tests the signing setup; still publishes nothing)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -676,7 +680,7 @@ jobs:
       # Same signer, account and preflight as the Tauri job above. sign.cmd
       # signs lookout.exe, which is also the installer (src/installer/).
       - name: Configure Windows code signing
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         env:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -725,7 +729,7 @@ jobs:
           cp "$exe" "clients/native/dist/Lookout-native_${version}_windows-x86_64-setup.exe"
 
       - name: Verify the installer is signed (Windows)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
