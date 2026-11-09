@@ -187,8 +187,8 @@ jobs:
                   "cmd": "artifact-signing-cli",
                   "args": [
                     "-e", "https://eus.codesigning.azure.net",
-                    "-a", "hackclub",
-                    "-c", "hackatime-desktop",
+                    "-a", "lookout",
+                    "-c", "lookout",
                     "--sign-tool-path", "$signtool",
                     "%1"
                   ]
@@ -210,7 +210,7 @@ jobs:
           echo "--- preflight: signing $probe"
           if ! artifact-signing-cli \
               -e https://eus.codesigning.azure.net \
-              -a hackclub -c hackatime-desktop \
+              -a lookout -c lookout \
               --sign-tool-path "$signtool" "$probe"; then
             echo "::error::artifact-signing-cli could not sign a probe binary. The output above is the real reason the build would fail; tauri only reports 'failed to run artifact-signing-cli'." >&2
             exit 1
@@ -694,7 +694,7 @@ jobs:
           signtool=$(cygpath -w "$signtool")
           # SIGN_CMD runs unquoted through cmd, so its path must have no spaces.
           sign_cmd="$RUNNER_TEMP\\lookout-sign.cmd"
-          printf '@echo off\r\nartifact-signing-cli -e https://eus.codesigning.azure.net -a hackclub -c hackatime-desktop --sign-tool-path "%s" %%1\r\n' "$signtool" > "$sign_cmd"
+          printf '@echo off\r\nartifact-signing-cli -e https://eus.codesigning.azure.net -a lookout -c lookout --sign-tool-path "%s" %%1\r\n' "$signtool" > "$sign_cmd"
           cat "$sign_cmd"
           case "$sign_cmd" in *" "*) echo "::error::$sign_cmd has a space in it" >&2; exit 1 ;; esac
           probe="$RUNNER_TEMP\\probe.exe"

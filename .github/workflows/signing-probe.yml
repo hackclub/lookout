@@ -64,7 +64,7 @@ jobs:
           set -x
           artifact-signing-cli \
             -e https://eus.codesigning.azure.net \
-            -a hackclub -c hackatime-desktop \
+            -a lookout -c lookout \
             --sign-tool-path "$signtool" "$probe"
           rc=$?
           set +x
