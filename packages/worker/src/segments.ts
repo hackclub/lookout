@@ -81,14 +81,19 @@ export const PREVIEW_HEIGHT = 720;
 /** Scale-with-pillarbox filter for a tier. The range/matrix options make
  *  swscale convert rather than relabel — a jpeg decodes full-range BT.601, a
  *  clip limited BT.709, and segments have to agree (SEGMENT_COLOR_ARGS).
- *  Padding after the conversion keeps the pillarbox black at Y=16. */
-export function scaleFilter(quality: SegmentQuality = "publish"): string {
-  const [w, h] =
+ *  Padding after the conversion keeps the pillarbox black at Y=16.
+ *  The compiler pins portrait once per session, never independently per unit. */
+export function scaleFilter(
+  quality: SegmentQuality = "publish",
+  portrait = false,
+): string {
+  const [long, short] =
     quality === "preview" ? [PREVIEW_WIDTH, PREVIEW_HEIGHT] : [1920, 1080];
+  const [w, h] = portrait ? [short, long] : [long, short];
   return (
     `scale=${w}:${h}:force_original_aspect_ratio=decrease` +
     `:in_range=auto:out_range=tv:out_color_matrix=bt709` +
-    `,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`
+    `,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`
   );
 }
 
@@ -292,13 +297,14 @@ export async function buildSegment(
   unitPath: string,
   format: string,
   quality: SegmentQuality = "publish",
+  portrait = false,
 ): Promise<string> {
   const segmentPath = path.join(
     tmpDir,
     `segment_${String(index).padStart(5, "0")}.ts`,
   );
   const encodeArgs = segmentEncodeArgs(quality);
-  const scale = scaleFilter(quality);
+  const scale = scaleFilter(quality, portrait);
 
   if (format === "jpeg") {
     // -framerate 1 over one still = exactly one second of input; fps
@@ -460,7 +466,7 @@ export function masksToVideoMasks(
         .filter((m): m is VideoMask => m !== null);
 }
 
-// Read video dimensions using ffprobe.
+// Read display dimensions, matching ffmpeg's default input autorotation.
 export async function probeDimensions(
     filePath: string,
 ): Promise<{ width: number; height: number }> {
@@ -470,14 +476,18 @@ export async function probeDimensions(
             [
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
+                "-show_entries", "stream=width,height:stream_side_data=rotation:stream_tags=rotate",
                 "-of", "json",
                 filePath,
             ],
             { timeout: 10_000 },
         );
         const data = JSON.parse(stdout) as {
-            streams?: Array<{ width?: number; height?: number }>;
+            streams?: Array<{
+                width?: number; height?: number;
+                tags?: { rotate?: string };
+                side_data_list?: Array<{ rotation?: number }>;
+            }>;
         };
         const stream = data.streams?.[0];
         if (
@@ -488,9 +498,12 @@ export async function probeDimensions(
         )
             throw new Error(`probeDimensions: could not determine video dimensions for ${filePath}`);
 
+        const rotation = stream.side_data_list?.find((s) => s.rotation != null)?.rotation
+            ?? Number(stream.tags?.rotate ?? 0);
+        const sideways = Math.abs(rotation % 180) === 90;
         return {
-            width: stream.width,
-            height: stream.height,
+            width: sideways ? stream.height : stream.width,
+            height: sideways ? stream.width : stream.height,
         };
     }
     catch (err) {
