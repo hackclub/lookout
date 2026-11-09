@@ -25,13 +25,13 @@ import {
 import * as schema from "./schema.js";
 import {
   buildSegment,
+  probeDimensions,
   cutVideoToKeptRanges,
   type VideoMask,
   maskToVideoMask,
   masksToVideoMasks,
   dropSeedUnit,
   segmentEncodeArgs,
-  PREVIEW_WIDTH,
   PREVIEW_HEIGHT,
   SEGMENT_CONCURRENCY,
   SEGMENT_FPS,
@@ -392,7 +392,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     if (buildQuality === "preview") {
       console.log(
         `Session ${sessionId}: building PREVIEW-grade original ` +
-          `(${PREVIEW_WIDTH}x${PREVIEW_HEIGHT}) — the editor opens on this, ` +
+          `(${PREVIEW_HEIGHT}p) — the editor opens on this, ` +
           `and publishing re-encodes from capture units at full quality.`,
       );
     }
@@ -511,6 +511,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     const segmentPaths: (string | null)[] = new Array(total).fill(null);
     let downloadFailures = 0;
     let buildFailures = 0;
+    let portrait: boolean | undefined;
     {
       let next = 0;
       // Real progress: units finished (built OR skipped — a skip still
@@ -531,8 +532,8 @@ export async function compileTimelapse(sessionId: string): Promise<{
           // Progress is cosmetic; a failed write must never fail the compile.
         }
       };
-      const worker = async () => {
-        while (next < total) {
+      const worker = async (chooseCanvas = false) => {
+        while (next < total && (!chooseCanvas || portrait === undefined)) {
           const i = next++;
           const ss = unitRows[i];
           const unitPath = path.join(tmpDir, `dl_${i}.${unitExt(ss.format)}`);
@@ -562,13 +563,19 @@ export async function compileTimelapse(sessionId: string): Promise<{
           }
 
           try {
+            const dimensions = portrait === undefined
+              ? await probeDimensions(unitPath)
+              : null;
+            const unitPortrait = portrait ?? (dimensions!.height > dimensions!.width);
             segmentPaths[i] = await buildSegment(
               tmpDir,
               i,
               unitPath,
               ss.format,
               buildQuality,
+              unitPortrait,
             );
+            portrait = unitPortrait;
           } catch (err) {
             buildFailures++;
             console.warn(
@@ -579,8 +586,12 @@ export async function compileTimelapse(sessionId: string): Promise<{
           await reportUnitDone();
         }
       };
+      // Bootstrap in capture order: the first usable unit chooses one canvas
+      // for EVERY segment, including later rotations. Completion order in the
+      // parallel pool must not decide the video shape. Failed units are skipped.
+      await worker(true);
       await Promise.all(
-        Array.from({ length: Math.min(SEGMENT_CONCURRENCY, total) }, worker),
+        Array.from({ length: Math.min(SEGMENT_CONCURRENCY, total - next) }, () => worker()),
       );
     }
 
@@ -919,6 +930,7 @@ async function buildPublishFromUnits(
   tmpDir: string,
   keptRanges: KeptRange[],
   totalUnits: number,
+  portrait: boolean,
 ): Promise<{ path: string; size: number } | null> {
   // The unit map's index space is what keptRanges refer to: index i is the
   // i-th unit in the compiled video, which is the i-th sampled screenshot in
@@ -976,6 +988,7 @@ async function buildPublishFromUnits(
           unitPath,
           row.format,
           "publish",
+          portrait,
         );
       } catch (err) {
         failures++;
@@ -1103,11 +1116,17 @@ async function applyCutCompile(
     const rangesToBuild = hasEffectiveMasks
       ? [{ start: 0, end: videoUnits.length }]
       : keptRanges;
+    // Keep the preview canvas even when the first minute is cut. Masks are
+    // positioned against that canvas, and legacy previews remain landscape.
+    const previewPath = path.join(tmpDir, "original.mp4");
+    await downloadObject(originalR2Key, previewPath);
+    const previewDimensions = await probeDimensions(previewPath);
     const built = await buildPublishFromUnits(
       sessionId,
       tmpDir,
       rangesToBuild,
       videoUnits.length,
+      previewDimensions.height > previewDimensions.width,
     );
     if (built && !hasEffectiveMasks) {
       publishPath = built.path;
@@ -1122,9 +1141,9 @@ async function applyCutCompile(
         console.error(
           `Session ${sessionId}: cannot re-encode from capture units — ` +
             `publishing the PREVIEW-grade original instead. The timelapse will ` +
-            `be ${PREVIEW_WIDTH}x${PREVIEW_HEIGHT} rather than full resolution.`,
+            `be ${previewDimensions.width}x${previewDimensions.height} rather than full resolution.`,
         );
-        await downloadObject(originalR2Key, originalPath);
+        // The preview was already downloaded to originalPath above.
       }
       publishPath = originalPath;
       publishR2Key = originalR2Key;
