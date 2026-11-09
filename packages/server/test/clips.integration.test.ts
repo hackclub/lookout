@@ -244,6 +244,27 @@ describe("per-format confirm validation", () => {
     expect(confirm.status).toBe(400);
     expect(confirm.body.error).toContain("too large");
   });
+
+  it("rejects a header-only clip so the client falls back to its JPEG", async () => {
+    const s = await createSession(true);
+    const up = await getUploadUrl(s.token, { capturedAt: nowIso(), format: "webm" });
+    // Firefox's MediaRecorder with a starved canvas track: the bare WebM
+    // header, no frames.
+    (globalThis as any).__r2HeadObjectOverride = {
+      ContentType: "video/webm",
+      ContentLength: 217,
+    };
+    const confirm = await confirmUpload(s.token, up.body.screenshotId, {
+      frameCount: 7,
+    });
+    expect(confirm.status).toBe(400);
+    expect(confirm.body.error).toContain("no video");
+
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, up.body.screenshotId),
+    });
+    expect(row?.confirmed).toBe(false);
+  });
 });
 
 describe("capability discovery", () => {
