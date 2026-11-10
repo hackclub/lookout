@@ -37,6 +37,7 @@ use crate::ui::icon::Icon;
 use crate::ui::sticker::{self, Sticker};
 use crate::ui::text::TextExt;
 use super::onboarding_demo as demo;
+use super::main_window::{WINDOW_MARGIN, linux_frame, uses_header_bar};
 
 const W: f32 = 420.0;
 const H: f32 = 620.0;
@@ -46,7 +47,7 @@ const HERO_H: f32 = 368.0;
 const PAGES: usize = 4;
 /// The opening: a small, faint Hack Club flag with a quick shimmer, held
 /// while the window settles and the stickers cut out, then the welcome.
-const INTRO_MS: f64 = 4500.0;
+const INTRO_MS: f64 = 2500.0;
 const FLAG_W: f32 = 84.0;
 const FLAG_H: f32 = FLAG_W * 184.0 / 526.0;
 /// The welcome icon's centre in the hero.
@@ -119,7 +120,11 @@ pub fn show_again(cx: &mut App) {
 }
 
 fn open_window(cx: &mut App, done: Box<dyn FnOnce(&mut App)>, at_launch: bool) {
-    let bounds = Bounds::centered(None, size(px(W), px(H)), cx);
+    // Linux with a compositor: our own frame (shadow, rounding, close
+    // button) in a transparent margin, like the main window.
+    let csd = is_linux() && crate::platform::desktop_appearance::client_frames();
+    let pad = if csd { 2.0 * WINDOW_MARGIN } else { 0.0 };
+    let bounds = Bounds::centered(None, size(px(W + pad), px(H + pad)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
@@ -127,8 +132,8 @@ fn open_window(cx: &mut App, done: Box<dyn FnOnce(&mut App)>, at_launch: bool) {
             appears_transparent: is_mac() || is_windows(),
             traffic_light_position: is_mac().then(|| point(px(14.0), px(14.0))),
         }),
-        window_decorations: is_linux().then_some(WindowDecorations::Server),
-        window_background: if is_mac() {
+        window_decorations: is_linux().then_some(if csd { WindowDecorations::Client } else { WindowDecorations::Server }),
+        window_background: if is_mac() || csd {
             WindowBackgroundAppearance::Transparent
         } else if is_windows() {
             WindowBackgroundAppearance::MicaBackdrop
@@ -140,7 +145,7 @@ fn open_window(cx: &mut App, done: Box<dyn FnOnce(&mut App)>, at_launch: bool) {
         kind: WindowKind::Normal,
         app_id: Some(crate::store::APP_ID.into()),
         icon: crate::platform::window_icon(),
-        window_min_size: Some(size(px(W), px(H))),
+        window_min_size: Some(size(px(W + pad), px(H + pad))),
         ..Default::default()
     };
     let done: Rc<Cell<Option<Box<dyn FnOnce(&mut App)>>>> = Rc::new(Cell::new(Some(done)));
@@ -287,6 +292,8 @@ impl Onboarding {
             cx.notify();
         })
         .detach();
+        // The Linux frame's shadow dims when the window loses focus.
+        cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         // At launch, closing it before finishing leaves nothing open: quit.
         // Reopened from Settings, it just closes.
         window.on_window_should_close(cx, move |_, cx| {
@@ -1075,7 +1082,25 @@ impl Render for Onboarding {
         };
         let flag = (reveal < 1.0).then(|| self.flag_el(&t, now, reveal));
         let caption = is_windows();
-        div()
+        let csd = uses_header_bar(window);
+        let at_launch = self.at_launch;
+        let close = move |window: &mut Window, cx: &mut App| {
+            if at_launch {
+                cx.quit()
+            } else {
+                window.remove_window()
+            }
+        };
+        let gnome_close = csd.then(|| {
+            let right = crate::platform::desktop_appearance::desktop_appearance().controls_on_right;
+            div().absolute().top(px(8.0)).when(right, |d| d.right(px(8.0))).when(!right, |d| d.left(px(8.0))).child(
+                HeaderBtn::new("close", HeaderBtnKind::Control, Icon::LkHeaderClose.el(14.0, t.text_primary), move |_, window, cx| {
+                    close(window, cx)
+                })
+                .tooltip("Close"),
+            )
+        });
+        let content = div()
             .id("onboarding")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
@@ -1089,7 +1114,24 @@ impl Render for Onboarding {
             .when(!self.vibrant, |d| d.bg(t.bg_body))
             .child(pages.opacity(reveal))
             .children(flag)
-            .child(div().id("drag").absolute().top_0().left_0().right_0().h(px(32.0)).window_control_area(WindowControlArea::Drag))
+            .child(
+                div()
+                    .id("drag")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(32.0))
+                    .window_control_area(WindowControlArea::Drag)
+                    // Linux has no OS-hit-tested caption: move the window ourselves.
+                    .when(csd, |d| {
+                        d.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            cx.stop_propagation();
+                            window.start_window_move();
+                        })
+                        .on_mouse_down(MouseButton::Right, |ev, window, _| window.show_window_menu(ev.position))
+                    }),
+            )
             .child(
                 div()
                     .absolute()
@@ -1107,22 +1149,20 @@ impl Render for Onboarding {
             .when(caption, |d| {
                 d.child(
                     div().absolute().top_0().right_0().flex().child(
-                        HeaderBtn::icon("close", HeaderBtnKind::Action, Icon::LkWinClose, 10.0, {
-                            let at_launch = self.at_launch;
-                            move |_, window, cx| {
-                                if at_launch {
-                                    cx.quit()
-                                } else {
-                                    window.remove_window()
-                                }
-                            }
-                        })
+                        HeaderBtn::icon("close", HeaderBtnKind::Action, Icon::LkWinClose, 10.0, move |_, window, cx| close(window, cx))
                             .tooltip("Close")
                             .caption()
                             .danger(),
                     ),
                 )
             })
+            .children(gnome_close);
+        if csd {
+            let active = if window.is_window_active() { 1.0 } else { 0.0 };
+            linux_frame(content.into_any_element(), &t, active, window)
+        } else {
+            content.into_any_element()
+        }
     }
 }
 
