@@ -481,9 +481,16 @@ impl MainWindow {
         }
     }
 
-    /// macOS: the setup page (permissions), until it has been completed.
+    /// macOS: the setup page (permissions), until it has been completed, and
+    /// again whenever a required one is missing right now (revoked in System
+    /// Settings, or never carried over to this build) rather than trusting
+    /// the saved "done" forever. Camera is optional, so only Screen
+    /// Recording and Accessibility bring it back.
     fn next_gate(&mut self, cx: &mut Context<Self>) {
-        if !is_mac() || (store(cx).perm_screen && store(cx).perm_camera && store(cx).perm_accessibility) {
+        use crate::platform::permissions::{self, Kind};
+        let completed = store(cx).perm_screen && store(cx).perm_camera && store(cx).perm_accessibility;
+        let required_granted = || permissions::check(Kind::Screen) && permissions::check(Kind::Accessibility);
+        if !is_mac() || (completed && required_granted()) {
             self.gate = None;
             return;
         }
