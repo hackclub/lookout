@@ -265,6 +265,10 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   like the rest of the app. macOS and Windows keep the system's own alert
   (NSAlert / task dialog), as the Tauri app's dialog plugin did, with buttons
   named for the action ("Archive", "Publish") instead of OK.
+- The Windows tray popup follows the system theme: a light flyout panel in
+  light mode, Tauri's dark `rgba(26,26,26,.93)` in dark. Tauri kept the dark
+  panel in light mode too, so its theme-coloured text was dark on dark (#209).
+  `LOOKOUT_TRAY_POPUP=1` opens the popup at launch to preview it on Linux.
 
 ## Known gaps and next steps
 

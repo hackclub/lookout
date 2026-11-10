@@ -115,6 +115,15 @@ pub fn wire_tray(rt: tokio::runtime::Handle, cx: &mut App) {
         tray_window::sync(cx);
     })
     .detach();
+    // `LOOKOUT_TRAY_POPUP=1` opens the tray popup shortly after launch, for
+    // previewing it where the tray can't be clicked (Linux, screenshots).
+    if std::env::var_os("LOOKOUT_TRAY_POPUP").is_some() {
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            cx.update(|cx| tray_window::toggle(None, cx));
+        })
+        .detach();
+    }
     cx.spawn(async move |cx| {
         while let Ok(action) = rx.recv_async().await {
             cx.update(|cx| handle_tray_action(action, cx));

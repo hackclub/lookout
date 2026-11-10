@@ -228,7 +228,13 @@ impl Render for TrayApp {
             .px(px(12.0))
             .py(px(8.0))
             .font_family(crate::ui::text::family())
-            .when(windows_look, |d| d.bg(theme::rgba8(26, 26, 26, 0.93)))
+            // Windows: a flat flyout panel that follows the system theme like
+            // the Windows 11 tray flyouts, so the theme's text stays legible
+            // (#209). Dark keeps Tauri's rgba(26,26,26,.93); light gets the
+            // light flyout fill plus a hairline edge, since a pale panel
+            // vanishes against a pale desktop without one.
+            .when(windows_look && t.dark, |d| d.bg(theme::rgba8(26, 26, 26, 0.93)))
+            .when(windows_look && !t.dark, |d| d.bg(theme::rgba8(249, 249, 249, 0.95)).border_1().border_color(theme::rgba8(0, 0, 0, 0.1)))
             .when(!windows_look, |d| d.rounded(px(10.0)))
             .child(
                 div()
