@@ -11,11 +11,11 @@ on:
         type: boolean
         default: false
       native_only:
-        description: "Only build Lookout Native: skip the test suite and the Tauri build (unsigned artifacts, nothing published)"
+        description: "Only build Lookout Native: skip the test suite and the Tauri build (unsigned unless \"sign\" is set, nothing published)"
         type: boolean
         default: false
       sign:
-        description: "Sign the Lookout Native Windows installer even though this isn't a tagged release (tests the signing setup; still publishes nothing)"
+        description: "Sign (and notarize on macOS) every platform's build even though this isn't a tagged release: Windows and macOS, Tauri and Lookout Native (tests the signing setup; still publishes nothing)"
         type: boolean
         default: false
 
@@ -146,7 +146,7 @@ jobs:
       # `tauri build` on a dev machine -- which has no signing credentials --
       # keeps working untouched.
       - name: Configure Windows code signing
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         env:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -223,7 +223,7 @@ jobs:
           echo "OK: the signer authenticates and produces a verifiable signature"
 
       - name: Build app (with signing)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign)
         run: npm run tauri build -- ${{ matrix.args }} ${{ runner.os == 'Windows' && format('--config {0}/clients/desktop/src-tauri/tauri.signing.conf.json', github.workspace) || '' }}
         working-directory: clients/desktop
         env:
@@ -259,7 +259,7 @@ jobs:
           CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
 
       - name: Build app (without signing)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.sign }}
         run: npm run tauri build -- ${{ matrix.args }}
         working-directory: clients/desktop
         env:
@@ -409,7 +409,7 @@ jobs:
       # signature says nothing about its payload, so reach inside the archive
       # and assert every executable it will drop on disk is signed too.
       - name: Verify the installer and its payload are signed
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         working-directory: clients/desktop
         run: |
@@ -457,7 +457,7 @@ jobs:
       # ordering ever changes the uploaded .sig still matches the uploaded exe
       # and auto-update keeps verifying. Re-signing identical bytes is a no-op.
       - name: Regenerate updater signatures (Windows)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         working-directory: clients/desktop
         env:
@@ -522,8 +522,8 @@ jobs:
   # releases always build native; manual runs can opt in with "native".
   # The bundling itself lives in
   # clients/native/packaging/ so it runs the same way on a dev machine.
-  # Untagged (manual) runs build unsigned artifacts for testing; only tags
-  # sign, notarize and stamp the tag's version. A manual run with
+  # Untagged (manual) runs build unsigned artifacts for testing unless `sign`
+  # is set; only tags stamp the tag's version and publish. A manual run with
   # `native_only` skips the tests and the Tauri build and only runs this job;
   # download the lookout-native-* artifacts from the run page.
   native-build:
@@ -630,10 +630,10 @@ jobs:
         if: runner.os == 'macOS'
         run: clients/native/packaging/macos/bundle.sh --target ${{ matrix.target }} --out clients/native/dist
         env:
-          # Empty on untagged runs: bundle.sh then signs ad hoc and skips notarizing.
-          APPLE_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          # Empty on untagged runs without `sign`: bundle.sh then signs ad hoc and skips notarizing.
+          APPLE_CERTIFICATE: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -643,6 +643,9 @@ jobs:
         run: grep -q 'BEGIN PGP PUBLIC KEY BLOCK' clients/desktop/src-tauri/linux/lookout-archive-keyring.asc
 
       - name: Verify native migration and installer unit tests
+        # Tagged releases only: this compiles the whole dependency tree a second
+        # time (dev profile), so manual tester builds skip it.
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         working-directory: clients/native
         run: cargo test -p lookout-native --locked --target ${{ matrix.target }}
@@ -938,7 +941,7 @@ jobs:
   #   actions/upload-artifact name `lookout-native-<anything>`, files named
   #   Lookout-native_<version>_darwin-aarch64.app.tar.gz   (tar of Lookout.app/)
   #   Lookout-native_<version>_darwin-x86_64.app.tar.gz
-  #   Lookout-native_<version>_windows-x86_64-setup.exe    (NSIS)
+  #   Lookout-native_<version>_windows-x86_64-setup.exe    (lookout.exe, its own installer)
   #   Lookout-native_<version>_linux-x86_64.AppImage
   # Stable: update.json + artifacts + patches go on the tag's release (live
   # once it's published, via releases/latest/download/update.json).
