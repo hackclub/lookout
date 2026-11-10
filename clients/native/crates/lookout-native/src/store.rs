@@ -477,12 +477,13 @@ pub mod import {
         if dir.ends_with("leveldb") {
             match leveldb::read(dir, KEYS) {
                 // leveldb::read already keeps only the best origin.
-                Ok(items) => {
+                Ok(items) if !items.is_empty() => {
                     out.push(Source { app: true, items });
                     return Ok(());
                 }
-                // Fall back to scanning the files for the values.
-                Err(e) => log::warn!("[store] couldn't open {} as LevelDB ({e}); scanning it", dir.display()),
+                // Nothing found or unreadable: fall back to scanning the files.
+                Ok(_) => log::warn!("[store] no values read from {} as LevelDB; scanning it", dir.display()),
+                Err(e) => log::warn!("[store] couldn't read {} as LevelDB ({e}); scanning it", dir.display()),
             }
         }
         let entries: Vec<_> = entries.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
