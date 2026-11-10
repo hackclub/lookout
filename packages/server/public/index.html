@@ -518,6 +518,7 @@ EOF</code></div>
         const label = document.getElementById("dl-label");
         const navDl = document.getElementById("nav-dl");
         const otherEl = document.getElementById("dl-other");
+        let macAlt = null;
 
         // Linux installs through a package manager, so the one-liner replaces
         // the download button rather than sitting beside it.
@@ -542,21 +543,36 @@ EOF</code></div>
 
           const v = release.tag_name;
           const assets = release.assets || [];
-          const find = (pat) => assets.find((a) => pat.test(a.name));
+          // Release-finish publishes stable alias names alongside the versioned files.
+          const find = (name) => assets.find((a) => a.name === name);
 
           // Show version under title
           document.getElementById("version").textContent = v;
 
           if (os === "mac") {
-            const dmg = find(/\.dmg$/);
-            if (dmg) {
-              btn.href = dmg.browser_download_url;
+            const arm = find("Lookout.dmg");
+            const intel = find("Lookout-Intel.dmg");
+            // Safari and Firefox report "Intel Mac OS X" on every Mac, so the
+            // user agent can't tell the chips apart. Default to Apple Silicon,
+            // trust Chromium's architecture hint when it gives one, and always
+            // offer the other build.
+            let isIntel = false;
+            try {
+              const hints = await navigator.userAgentData?.getHighEntropyValues?.(["architecture"]);
+              isIntel = hints?.architecture === "x86";
+            } catch {}
+            const [main, alt] = isIntel ? [intel || arm, arm] : [arm || intel, intel];
+            if (main) {
+              btn.href = main.browser_download_url;
               label.textContent = "Download for macOS";
-              navDl.innerHTML = makeNavButton(dmg.browser_download_url, "Download");
+              navDl.innerHTML = makeNavButton(main.browser_download_url, "Download");
+            }
+            if (alt && alt !== main) {
+              macAlt = `<a href="${alt.browser_download_url}">${isIntel ? "Apple Silicon" : "Intel"} Mac</a>`;
             }
           } else if (os === "windows") {
-            const x64 = find(/x64-setup\.exe$/);
-            const arm = find(/arm64-setup\.exe$/);
+            const x64 = find("Lookout-Setup.exe");
+            const arm = find("Lookout-Setup-ARM.exe");
             const mainButtons = [];
             const navButtons = [];
             if (x64) {
@@ -589,6 +605,7 @@ EOF</code></div>
         const others = ["mac", "windows", "linux"]
           .filter((k) => k !== os)
           .map((k) => `<a href="${fallback}">${osLabels[k]}</a>`);
+        if (macAlt) others.unshift(macAlt);
 
         if (others.length) {
           otherEl.innerHTML = `Also available for ${others.join(", ")}`;
