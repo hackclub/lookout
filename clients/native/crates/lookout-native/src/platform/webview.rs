@@ -322,6 +322,16 @@ impl PanelWebView {
         }
     }
 
+    /// Whether the page should act focused (draw its caret). Only the
+    /// composited Wayland view needs telling; native views get real focus.
+    #[allow(unused_variables)]
+    pub fn set_focused(&self, focused: bool) {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        if let Some(host) = &self.offscreen {
+            host.set_focused(&self.view, focused);
+        }
+    }
+
     #[allow(unused_variables)]
     pub fn scroll(&self, event: &gpui_kit::gpui::ScrollEvent) {
         #[cfg(all(feature = "webview", target_os = "linux"))]
@@ -430,8 +440,11 @@ mod linux {
     pub fn ensure_gtk(cx: &mut App, wayland: bool) -> anyhow::Result<()> {
         if !gtk::is_initialized_main_thread() {
             // Native child views require X11. The offscreen backend instead
-            // uses the session's Wayland connection without opening a toplevel.
-            gtk::gdk::set_allowed_backends(if wayland { "wayland" } else { "x11" });
+            // uses the session's Wayland connection without opening a toplevel,
+            // but works on any display, so it may fall back to XWayland when
+            // GDK_BACKEND=x11 is forced (linuxdeploy's GTK AppRun hook does
+            // that) rather than leaving GTK no backend at all.
+            gtk::gdk::set_allowed_backends(if wayland { "wayland,x11" } else { "x11" });
             gtk::init().map_err(|e| anyhow::anyhow!("GTK init failed: {e}"))?;
         }
         if PUMPING.swap(true, Ordering::SeqCst) {

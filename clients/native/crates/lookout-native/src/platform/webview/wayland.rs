@@ -25,6 +25,7 @@ pub struct Offscreen {
     alive: Rc<Cell<bool>>,
     last_frame: Cell<Instant>,
     size: Cell<(i32, i32, f32)>,
+    focused: Cell<bool>,
     sender: RefCell<Option<flume::Sender<WebEvent>>>,
 }
 
@@ -40,6 +41,7 @@ impl Offscreen {
             alive: Rc::new(Cell::new(true)),
             last_frame: Cell::new(Instant::now() - Duration::from_secs(1)),
             size: Cell::new((0, 0, 0.0)),
+            focused: Cell::new(false),
             sender: RefCell::new(None),
         }
     }
@@ -172,6 +174,35 @@ impl Offscreen {
                     modifier_bits(modifiers) | if button == Some(MouseButton::Left) { gdk::ffi::GDK_BUTTON1_MASK } else { 0 };
             }
         });
+    }
+
+    /// Mirror GPUI focus onto the offscreen toplevel. No compositor ever
+    /// focuses a GtkOffscreenWindow, so without this WebKit treats the page
+    /// as an inactive window: keys still arrive, but it draws no caret.
+    pub fn set_focused(&self, view: &wry::WebView, focused: bool) {
+        if self.focused.replace(focused) == focused {
+            return;
+        }
+        let Some(gdk_window) = self.window.window() else { return };
+        let web = view.webview();
+        if focused && !web.has_focus() {
+            web.grab_focus();
+        }
+        let mut event = gdk::Event::new(gdk::EventType::FocusChange);
+        // SAFETY: as in `event`: the union was allocated for FocusChange and
+        // the window reference is transferred to (and released by) the event.
+        unsafe {
+            let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+            (*raw).focus_change.window = gdk_window.into_glib_ptr();
+            (*raw).focus_change.send_event = 1;
+            (*raw).focus_change.in_ = focused as i16;
+        }
+        if let Some(seat) = gdk::Display::default().and_then(|d| d.default_seat()) {
+            event.set_device(seat.keyboard().as_ref());
+        }
+        // GtkWindow's focus handler sets has-toplevel-focus and is-active,
+        // which WebKit reads for the page's focused/active state.
+        self.window.event(&event);
     }
 
     pub fn scroll(&self, view: &wry::WebView, position: Point<Pixels>, origin: Point<Pixels>, delta: Point<Pixels>, modifiers: Modifiers) {
@@ -354,6 +385,22 @@ mod tests {
         }
         wait(&rx, |e| matches!(e, WebEvent::Message(v) if v["type"] == "clicked"));
         assert_eq!(probe(&panel, &rx, "window.clicks"), 1);
+        // An offscreen toplevel is never focused by a compositor: until GPUI
+        // focus is mirrored, WebKit treats the page as inactive (no caret).
+        // WebKit forwards activity state on its next main-loop turn, so poll.
+        let has_focus = |want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while probe(&panel, &rx, "document.hasFocus()") != want {
+                assert!(Instant::now() < deadline, "document.hasFocus() never became {want}");
+            }
+        };
+        assert_eq!(probe(&panel, &rx, "document.hasFocus()"), false);
+        panel.set_focused(true);
+        has_focus(true);
+        panel.set_focused(false);
+        has_focus(false);
+        panel.set_focused(true);
+        has_focus(true);
         for down in [true, false] {
             host.pointer(
                 &panel.view,

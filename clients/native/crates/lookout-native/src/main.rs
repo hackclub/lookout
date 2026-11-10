@@ -44,6 +44,15 @@ use std::borrow::Cow;
 use gpui_kit::gpui::App;
 
 fn main() {
+    // WebKitGTK's DMA-BUF renderer aborts the whole app (SIGABRT inside
+    // gtk_main_iteration, LOOKOUT-NATIVE-G) when the panel webview lives in
+    // an offscreen window on Wayland, at least on AMD/Ubuntu 26.04. That view
+    // renders in software anyway. Set before any thread exists.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: first thing in main, still single-threaded.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
     logbuf::init();
     // The crash reporter is this binary run again: send it straight into
     // `crash::init` (which never returns for it) before it can touch the

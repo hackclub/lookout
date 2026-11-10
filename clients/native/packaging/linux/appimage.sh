@@ -193,6 +193,15 @@ DEPLOY_GTK_VERSION=3 linuxdeploy-x86_64.AppImage \
   "${excludes[@]}" \
   --plugin gtk
 
+# The GTK plugin's hook forces GDK_BACKEND=x11. Lookout picks GTK's backend
+# itself (the panel webview renders offscreen on Wayland), and with x11 forced
+# GTK finds no allowed backend and the panel can't load. Keep the user's own
+# GDK_BACKEND instead.
+gtk_hook="$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+[ -f "$gtk_hook" ] || { echo "appimage.sh: linuxdeploy wrote no GTK AppRun hook" >&2; exit 1; }
+sed -i '/^export GDK_BACKEND=/d' "$gtk_hook"
+if grep -q 'GDK_BACKEND=' "$gtk_hook"; then echo "appimage.sh: couldn't drop GDK_BACKEND from $gtk_hook" >&2; exit 1; fi
+
 lib_wk="$appdir/usr/lib/libwebkit2gtk-4.1.so.0"
 [ -f "$lib_wk" ] || { echo "appimage.sh: linuxdeploy didn't bundle libwebkit2gtk-4.1.so.0" >&2; exit 1; }
 needle="/usr/lib/$multiarch/webkit2gtk-4.1"

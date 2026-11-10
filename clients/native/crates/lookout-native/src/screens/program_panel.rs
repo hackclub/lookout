@@ -314,6 +314,9 @@ impl Render for ProgramPanel {
         if crate::keep_animating!(window, self.height, self.cover) {}
         let sheet_open = self.sheet.as_ref().and_then(|s| s.upgrade()).map(|s| s.read(cx).is_open).unwrap_or(true);
         let show_web = !self.broken && !self.closing && sheet_open && self.revealed();
+        if let Some(web) = &self.web {
+            web.set_focused(show_web && window.is_window_active() && self.focus.is_focused(window));
+        }
 
         let origin = self.url.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("").to_string();
         let icon = self.icon_url.as_deref().and_then(|u| match images::get(u, cx) {
