@@ -13,6 +13,7 @@ import {
 import { sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Activity } from "../lib/activity.js";
+import type { MaskRegion } from "@lookout/shared";
 
 function randomHex(bytes: number): string {
   return randomBytes(bytes).toString("hex");
@@ -239,6 +240,7 @@ export const sessions = pgTable(
     // from every output (video, /timings, trackedSeconds). NULL/[] = no
     // edits. Canonical semantics live in @lookout/shared cuts.ts.
     cuts: jsonb("cuts").$type<{ start: string; end: string }[]>(),
+    masks: jsonb("masks").$type<MaskRegion[]>(),
     // Credited seconds removed by `cuts`. Reported trackedSeconds is
     // tracked_seconds − cut_seconds (raw value stays untouched as the audit
     // trail). Recomputed on every cuts write; authoritative at cut-compile.

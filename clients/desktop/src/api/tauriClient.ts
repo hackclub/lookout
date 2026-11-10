@@ -21,6 +21,7 @@ import type {
   ConfirmScreenshotResponse,
   CutInterval,
   EditHeartbeatResponse,
+  MaskRegion,
   PauseResponse,
   RenameSessionResponse,
   ResumeResponse,
@@ -178,10 +179,11 @@ export function createTauriLookoutClient({
       return call<UnitsResponse>("api_session_units", await session());
     },
 
-    async setCuts(cuts: CutInterval[]) {
+    async setCuts(cuts: CutInterval[], masks?: MaskRegion[]) {
       return call<SetCutsResponse>("api_session_set_cuts", {
         ...(await session()),
         cuts,
+        masks: masks ?? [],
       });
     },
 

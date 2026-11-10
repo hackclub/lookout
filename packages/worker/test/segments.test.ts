@@ -18,6 +18,8 @@ import * as path from "node:path";
 import {
   buildSegment,
   probeFrameCount,
+  probeDimensions,
+  cutVideoToKeptRanges,
   SEGMENT_FPS,
   PREVIEW_WIDTH,
   PREVIEW_HEIGHT,
@@ -211,6 +213,88 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     );
     expect(stderr.trim()).toBe("");
   }, 300_000);
+
+  describe("portrait canvas", () => {
+    let portraitJpeg: string;
+    let rotatedClip: string;
+
+    beforeAll(async () => {
+      portraitJpeg = path.join(tmpDir, "portrait.jpg");
+      await execFileAsync("ffmpeg", [
+        "-f", "lavfi", "-i", "color=red:size=360x640:rate=1",
+        "-frames:v", "1", "-y", portraitJpeg,
+      ]);
+      rotatedClip = path.join(tmpDir, "rotated.mp4");
+      await execFileAsync("ffmpeg", [
+        "-i", mp4Path, "-c", "copy", "-metadata:s:v:0", "rotate=90",
+        "-y", rotatedClip,
+      ]);
+      // ffmpeg 8 stopped translating the rotate tag into a display matrix.
+      // Older CI versions accept the tag; newer ones expose this input option.
+      const rotated = await probeDimensions(rotatedClip);
+      const original = await probeDimensions(mp4Path);
+      if (rotated.width === original.width) {
+        await execFileAsync("ffmpeg", [
+          "-display_rotation", "90", "-i", mp4Path,
+          "-c", "copy", "-y", rotatedClip,
+        ]);
+      }
+    });
+
+    it("uses display dimensions for rotated phone clips", async () => {
+      const original = await probeDimensions(mp4Path);
+      expect(await probeDimensions(rotatedClip)).toEqual({
+        width: original.height, height: original.width,
+      });
+      expect(await probeDimensions(portraitJpeg)).toEqual({ width: 360, height: 640 });
+    });
+
+    it.each(["preview", "publish"] as const)(
+      "keeps portrait stills, rotated clips and later landscape captures compatible at %s quality",
+      async (quality) => {
+        const base = quality === "preview" ? 300 : 310;
+        const segments = [
+          await buildSegment(tmpDir, base, portraitJpeg, "jpeg", quality, true),
+          await buildSegment(tmpDir, base + 1, rotatedClip, "mp4", quality, true),
+          await buildSegment(tmpDir, base + 2, webmPath, "webm", quality, true),
+        ];
+        const expected = quality === "preview"
+          ? { width: PREVIEW_HEIGHT, height: PREVIEW_WIDTH }
+          : { width: 1080, height: 1920 };
+        for (const segment of segments) {
+          expect(await probeResolution(segment)).toEqual(expected);
+          expect(await probeFrameCount(segment)).toBe(SEGMENT_FPS);
+        }
+        // A 9:16 red still fills the canvas: the left edge is red, not the
+        // black pillarbox the old landscape-only compiler introduced.
+        const { stdout: pixel } = await execFileAsync("ffmpeg", [
+          "-v", "error", "-i", segments[0], "-vf", "crop=2:2:0:100",
+          "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
+        ], { encoding: "buffer" });
+        expect(pixel[0]).toBeGreaterThan(200);
+        expect(pixel[1]).toBeLessThan(30);
+
+        const list = path.join(tmpDir, `portrait_${quality}.txt`);
+        const output = path.join(tmpDir, `portrait_${quality}.mp4`);
+        await fs.writeFile(list, segments.map((p) => `file '${p}'`).join("\n"));
+        await execFileAsync("ffmpeg", [
+          "-f", "concat", "-safe", "0", "-i", list,
+          "-c", "copy", "-y", output,
+        ]);
+        expect(await probeFrameCount(output)).toBe(3 * SEGMENT_FPS);
+        const { stderr } = await execFileAsync("ffmpeg", [
+          "-v", "error", "-i", output, "-f", "null", "-",
+        ]);
+        expect(stderr.trim()).toBe("");
+
+        // Removing the portrait first minute must preserve the canvas even
+        // though the surviving sources include a landscape capture.
+        const cut = await cutVideoToKeptRanges(tmpDir, output, [{ start: 1, end: 3 }], true);
+        expect(await probeResolution(cut)).toEqual(expected);
+        expect(await probeFrameCount(cut)).toBe(2 * SEGMENT_FPS);
+      }, 300_000,
+    );
+  });
 
   it("rejects an undecodable clip instead of emitting a bad segment", async () => {
     const garbagePath = path.join(tmpDir, "garbage.webm");

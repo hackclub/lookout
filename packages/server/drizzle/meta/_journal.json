@@ -237,7 +237,14 @@
       "idx": 33,
       "version": "7",
       "when": 1791800000000,
-      "tag": "0033_capture_activity",
+      "tag": "0033_session_masks",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791800000001,
+      "tag": "0034_capture_activity",
       "breakpoints": true
     }
   ]
