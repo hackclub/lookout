@@ -267,7 +267,7 @@ impl Theme {
             // over macOS vibrancy / Windows Mica the material shows through
             // cards and controls in both themes. Over the flat #fafafa body
             // (no material) it still comes out white.
-            bg_surface: white(0.5),
+            bg_surface: white(0.3),
             bg_sunken: black(0.04),
             bg_selected: black(0.1),
             text_primary: black(0.85),
