@@ -298,6 +298,11 @@ export const sessions = pgTable(
     // claim it, so nothing new is written to R2 behind the purge's back.
     // NULL = not scheduled.
     deleteAfter: timestamp("delete_after", { withTimezone: true }),
+    // The first clientInfo any upload of this session reported, copied here
+    // when it arrives so the admin dashboard can break sessions down by
+    // client without scanning every screenshot (millions of rows). The
+    // per-screenshot column stays the record; this is a read-side copy.
+    firstClientInfo: text("first_client_info"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

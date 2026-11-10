@@ -685,6 +685,21 @@ export async function sessionRoutes(app: FastifyInstance) {
         format,
       });
 
+      // Copy the session's first clientInfo onto the session row for the
+      // admin dashboard (see sessions.first_client_info). Guarded on both
+      // sides so it is one write per session, not one per upload.
+      if (clientInfo && session.firstClientInfo == null) {
+        await db
+          .update(schema.sessions)
+          .set({ firstClientInfo: clientInfo })
+          .where(
+            and(
+              eq(schema.sessions.id, session.id),
+              isNull(schema.sessions.firstClientInfo),
+            ),
+          );
+      }
+
       // Generate presigned PUT URL
       // Note: Don't set ContentLength — it signs an exact size and rejects
       // anything different. Size is validated at confirmation via HeadObject.

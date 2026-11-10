@@ -423,20 +423,15 @@ export async function adminRoutes(app: FastifyInstance) {
     // Global totals across ALL sessions, including program-less ones.
     const [totals] = await db.select(aggCols).from(schema.sessions);
 
-    // Client-info breakdown for the dashboard graphs. For each session we take
-    // its first reported clientInfo (earliest screenshot by requested_at that
-    // carried one — same "first recorded" rule as getFirstClientInfo), then
-    // group identical strings so each distinct string is parsed just once.
+    // Client-info breakdown for the dashboard graphs, keyed off each
+    // session's first reported clientInfo (sessions.first_client_info, a copy
+    // kept so this never has to scan screenshots), with identical strings
+    // grouped so each distinct string is parsed just once.
     const clientInfoResult = await db.execute(sql`
-      select client_info, count(*)::int as n
-      from (
-        select distinct on (${schema.screenshots.sessionId})
-          ${schema.screenshots.clientInfo} as client_info
-        from ${schema.screenshots}
-        where ${schema.screenshots.clientInfo} is not null
-        order by ${schema.screenshots.sessionId}, ${schema.screenshots.requestedAt} asc
-      ) t
-      group by client_info
+      select ${schema.sessions.firstClientInfo} as client_info, count(*)::int as n
+      from ${schema.sessions}
+      where ${schema.sessions.firstClientInfo} is not null
+      group by 1
     `);
     const clientInfoRows = (
       clientInfoResult as unknown as {
