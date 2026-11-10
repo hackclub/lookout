@@ -21,6 +21,23 @@ pub fn focus_main(cx: &mut App) {
     }
 }
 
+/// macOS: the app was launched again (Dock, Spotlight, Raycast) while no
+/// window is showing. Closing the main window doesn't quit there, so its
+/// handle may be dead: open a fresh one in that case.
+pub fn reopen(cx: &mut App) {
+    let Some(h) = cx.try_global::<MainHandle>().map(|h| h.0) else {
+        // Still onboarding (the app proper hasn't started).
+        onboarding::bring_forward(cx);
+        return;
+    };
+    if h.update(cx, |_, window, _| window.activate_window()).is_err() {
+        log::info!("[app] reopened with the main window closed: opening a new one");
+        let main = main_window::open(cx);
+        cx.set_global(MainHandle(main));
+    }
+    cx.activate(true);
+}
+
 /// System Settings' "Quit & Reopen" after a privacy permission is turned on:
 /// remember where the user was on the way out and put it back on the
 /// relaunch (see `platform::relaunch`). `deep_link_launch` skips the restore

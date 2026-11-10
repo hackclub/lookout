@@ -143,6 +143,8 @@ pub enum RecorderEvent {
     Preview,
     Tray,
     Notice { title: String, body: String },
+    /// The compositor closed these portal casts (Linux): their nodes are dead.
+    CastsRevoked(Vec<u32>),
 }
 
 impl EventEmitter<RecorderEvent> for RecorderModel {}
@@ -187,6 +189,10 @@ impl RecorderModel {
             }
             CoreMsg::Event(CoreEvent::RecorderNotice(n)) => {
                 cx.emit(RecorderEvent::Notice { title: n.title.clone(), body: n.body.clone() });
+            }
+            CoreMsg::Event(CoreEvent::ScreencastRevoked(r)) => {
+                log::info!("[screencast] compositor revoked node(s) {:?}", r.node_ids);
+                cx.emit(RecorderEvent::CastsRevoked(r.node_ids));
             }
             CoreMsg::Event(CoreEvent::Progress(p)) => log::debug!("[capture] {p}"),
             CoreMsg::Event(other) => log::debug!("[core] {}", other.name()),

@@ -182,6 +182,13 @@ impl EventEmitter<PickerEvent> for SourcePicker {}
 impl SourcePicker {
     pub fn new(submit_label: SharedString, cx: &mut Context<Self>) -> Self {
         cx.observe(&previews::entity(cx), |_, _, cx| cx.notify()).detach();
+        let model = app::state(cx).recorder.clone();
+        cx.subscribe(&model, |p, _, ev: &app::RecorderEvent, cx| {
+            if let app::RecorderEvent::CastsRevoked(nodes) = ev {
+                p.forget_casts_where(|id| nodes.contains(&id), cx);
+            }
+        })
+        .detach();
         let mut p = Self {
             sources: None,
             cameras: Vec::new(),
@@ -345,6 +352,23 @@ impl SourcePicker {
         let empty = next.iter().all(|s| matches!(s, Sel::Camera(_)));
         self.empty_text.set(if empty { 1.0 } else { 0.0 }, Curve::tween(300.0, Ease::MOTION_DEFAULT));
         self.selected = next;
+    }
+
+    /// The portal casts were released (source change, compositor revoke):
+    /// their nodes are dead, so drop them from the selection. Kept, they'd
+    /// leave "Cast Stream 1" ticked and Start Capture enabled on a node with
+    /// no fd — every capture failing "PipeWire fd not found".
+    pub fn forget_casts(&mut self, cx: &mut Context<Self>) {
+        self.forget_casts_where(|_| true, cx);
+    }
+
+    fn forget_casts_where(&mut self, dead: impl Fn(u32) -> bool, cx: &mut Context<Self>) {
+        let gone = |s: &Sel| matches!(s, Sel::Pipewire(id) if dead(*id));
+        if self.selected.iter().any(gone) {
+            let next = self.selected.iter().filter(|s| !gone(s)).cloned().collect();
+            self.set_selected(next);
+            cx.notify();
+        }
     }
 
     fn select(&mut self, sel: Sel, shift: bool, cx: &mut Context<Self>) {

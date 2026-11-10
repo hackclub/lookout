@@ -186,6 +186,7 @@ impl RecordPage {
     fn change_source(&mut self, cx: &mut Context<Self>) {
         close_recording(cx);
         release_screencast(cx);
+        self.picker.update(cx, |p, cx| p.forget_casts(cx));
         self.transition(Flow::Picker, -1.0);
         self.check_session(cx);
         cx.notify();

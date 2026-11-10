@@ -37,7 +37,7 @@ use crate::ui::icon::Icon;
 use crate::ui::sticker::{self, Sticker};
 use crate::ui::text::TextExt;
 use super::onboarding_demo as demo;
-use super::main_window::{WINDOW_MARGIN, linux_frame, uses_header_bar};
+use super::main_window::{WINDOW_MARGIN, linux_frame, uses_header_bar, window_corner_radius};
 
 const W: f32 = 420.0;
 const H: f32 = 620.0;
@@ -1083,6 +1083,7 @@ impl Render for Onboarding {
         let flag = (reveal < 1.0).then(|| self.flag_el(&t, now, reveal));
         let caption = is_windows();
         let csd = uses_header_bar(window);
+        let radius = if csd { window_corner_radius(window) } else { 0.0 };
         let at_launch = self.at_launch;
         let close = move |window: &mut Window, cx: &mut App| {
             if at_launch {
@@ -1110,6 +1111,9 @@ impl Render for Onboarding {
             .relative()
             .size_full()
             .overflow_hidden()
+            // GPUI's overflow mask is rectangular, so the fill must round
+            // itself or it squares off the Linux frame's corners.
+            .rounded(px(radius))
             .font_family(crate::ui::text::family())
             .when(!self.vibrant, |d| d.bg(t.bg_body))
             .child(pages.opacity(reveal))

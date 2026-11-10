@@ -780,6 +780,21 @@ impl MainWindow {
         });
     }
 
+    /// The panel was completed: drop the "needs a few details" card from the
+    /// session page it sits on (the page stays mounted, so nothing else would).
+    fn clear_panel_prompt(&mut self, token: &str, cx: &mut Context<Self>) {
+        for slot in &self.slots {
+            if let PageView::Session(page) = &slot.page {
+                if page.read(cx).token == token {
+                    page.update(cx, |p, cx| {
+                        p.below_video = None;
+                        cx.notify();
+                    });
+                }
+            }
+        }
+    }
+
     /// `handleAdd`: the + menu (programs, separator, "Start from link"), or
     /// straight to the add page when there are no programs. Clicking + while
     /// the menu is open closes it.
@@ -1451,6 +1466,7 @@ impl Render for MainWindow {
                     store(cx).save();
                     this.panel_sheet = None;
                     if store(cx).panel_state.get(&t3).map(String::as_str) == Some("done") {
+                        this.clear_panel_prompt(&t3, cx);
                         this.refresh_gallery_view(cx);
                         this.open_tip("panel-done", &t3, cx);
                     }

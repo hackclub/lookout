@@ -110,6 +110,9 @@ fn main() {
     app.on_open_urls(move |urls| {
         let _ = open_tx.send(urls);
     });
+    // macOS keeps running with no window once the main window is closed;
+    // launching it again (Dock, Spotlight, Raycast) has to bring one back.
+    app.on_reopen(windows::reopen);
     app.run(move |cx: &mut App| {
         cx.text_system()
             .add_fonts(assets::FONTS.iter().map(|b| Cow::Borrowed(*b)).collect())
