@@ -206,7 +206,7 @@ pub async fn pause_session_before_exit(config: &SessionConfig) {
     )
     .await
     {
-        Ok(_) => eprintln!("[exit] pause response: ok"),
-        Err(e) => eprintln!("[exit] pause failed (best-effort): {e}"),
+        Ok(_) => lookout_session::log_line!("[exit] pause response: ok"),
+        Err(e) => lookout_session::log_line!("[exit] pause failed (best-effort): {e}"),
     }
 }

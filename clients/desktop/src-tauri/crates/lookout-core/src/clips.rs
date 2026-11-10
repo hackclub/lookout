@@ -1134,7 +1134,7 @@ mod platform {
                 Err(real_cadence_err) => {
                     let per_frame_bitrate = ((bitrate as u64 * interval_ms) / 1000)
                         .min(u32::MAX as u64) as u32;
-                    eprintln!(
+                    lookout_session::log_line!(
                         "[clips] Media Foundation rejected the {interval_ms}ms cadence \
                          ({real_cadence_err}) — retrying at a 1fps hint"
                     );

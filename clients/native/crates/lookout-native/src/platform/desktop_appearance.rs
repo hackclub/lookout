@@ -418,7 +418,7 @@ pub fn shell_draws_window_frame() -> bool {
             if let Some(draw_our_own) = env_flag(
                 std::env::var("LOOKOUT_WINDOW_FRAME").ok().as_deref(),
             ) {
-                eprintln!("[linux-chrome] LOOKOUT_WINDOW_FRAME says draw={draw_our_own}");
+                log::info!("[linux-chrome] LOOKOUT_WINDOW_FRAME says draw={draw_our_own}");
                 return !draw_our_own;
             }
 
@@ -429,7 +429,7 @@ pub fn shell_draws_window_frame() -> bool {
             // because none of these sessions has a GNOME Shell to ask
             // about.
             if let Some(session) = self_decorating_session() {
-                eprintln!(
+                log::info!(
                     "[linux-chrome] {session} frames its own windows; \
                      leaving the window frame to it"
                 );
@@ -444,7 +444,7 @@ pub fn shell_draws_window_frame() -> bool {
                 .unwrap_or_default();
             let found = corner_extension_enabled(disabled, &enabled);
             if found {
-                eprintln!(
+                log::info!(
                     "[linux-chrome] a rounded-corners shell extension is enabled; \
                      leaving the window frame to it"
                 );

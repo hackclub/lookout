@@ -13,11 +13,16 @@ pub fn set_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
     let _ = SINK.set(Box::new(sink));
 }
 
-/// Emit one diagnostic line.
+/// Emit one diagnostic line. Never panics: a closed stderr (launched from
+/// a terminal that has since gone away) drops the line instead of taking
+/// the app down the way `eprintln!` would.
 pub fn line(message: &str) {
     match SINK.get() {
         Some(sink) => sink(message),
-        None => eprintln!("{message}"),
+        None => {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "{message}");
+        }
     }
 }
 

@@ -192,7 +192,7 @@ async fn portal_session_task(
     };
 
     let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
-    eprintln!("[screencast] session {id} started, nodes {node_ids:?}");
+    lookout_session::log_line!("[screencast] session {id} started, nodes {node_ids:?}");
 
     if result_tx.send(Ok((streams, raw_fd, cursor_raw_fd))).is_err() {
         // The caller walked away (command cancelled). Don't leave a cast
@@ -218,7 +218,7 @@ async fn portal_session_task(
         Err(e) => {
             // No signal to listen on. The session still works; a revocation
             // just falls to the capture loop's watchdog instead.
-            eprintln!("[screencast] session {id} closed-signal subscribe failed: {e}");
+            lookout_session::log_line!("[screencast] session {id} closed-signal subscribe failed: {e}");
             None
         }
     };
@@ -227,8 +227,8 @@ async fn portal_session_task(
     tokio::select! {
         _ = close_rx => {
             match session.close().await {
-                Ok(()) => eprintln!("[screencast] session {id} closed"),
-                Err(e) => eprintln!("[screencast] closing session {id} failed: {e}"),
+                Ok(()) => lookout_session::log_line!("[screencast] session {id} closed"),
+                Err(e) => lookout_session::log_line!("[screencast] closing session {id} failed: {e}"),
             }
         }
         _ = async {
@@ -242,7 +242,7 @@ async fn portal_session_task(
                 None => std::future::pending::<()>().await,
             }
         } => {
-            eprintln!("[screencast] session {id} was closed by the compositor");
+            lookout_session::log_line!("[screencast] session {id} was closed by the compositor");
             on_session_revoked(&core, id, node_ids);
         }
     }
@@ -412,7 +412,7 @@ impl Core {
             let state = self;
             if let Ok(mut sessions) = state.screencast_sessions.lock() {
                 if !sessions.is_empty() {
-                    eprintln!("[screencast] releasing {} session(s)", sessions.len());
+                    lookout_session::log_line!("[screencast] releasing {} session(s)", sessions.len());
                 }
                 sessions.clear();
             }

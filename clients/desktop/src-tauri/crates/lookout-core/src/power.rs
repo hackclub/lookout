@@ -32,7 +32,7 @@ pub fn begin_recording_assertion() {
     *guard = Some(ActivityToken(
         info.beginActivityWithOptions_reason(opts, &reason),
     ));
-    eprintln!("[power] recording sleep/App Nap suppression ON");
+    lookout_session::log_line!("[power] recording sleep/App Nap suppression ON");
 }
 
 /// End the recording assertion (no-op if none is held).
@@ -42,6 +42,6 @@ pub fn end_recording_assertion() {
         // SAFETY: `token.0` came from `beginActivityWithOptions_reason`,
         // so it is the correct activity type.
         unsafe { NSProcessInfo::processInfo().endActivity(&token.0) };
-        eprintln!("[power] recording sleep/App Nap suppression OFF");
+        lookout_session::log_line!("[power] recording sleep/App Nap suppression OFF");
     }
 }
