@@ -8,6 +8,11 @@
 # the quote and spilled the rest into the outer shell.
 set -eux
 
+# archive.ubuntu.com crawls from GitHub's runners (3 min to update, ~700 kB/s
+# for the ~220 MB of dependencies). The runners' own Azure mirror is local.
+# arm64 images use ports.ubuntu.com, which this leaves alone.
+sed -i -E 's#http://(archive|security)\.ubuntu\.com#http://azure.archive.ubuntu.com#g' \
+  /etc/apt/sources.list.d/ubuntu.sources
 apt-get update -qq
 # Resolving and installing for real is the assertion: a Depends
 # name that does not exist in the archive fails right here.
