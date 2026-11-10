@@ -239,7 +239,11 @@ jobs:
           docker run --rm -v "$PWD/repo/arch:/a" archlinux:base-devel bash -euc '
             for d in /a/*/; do
               cd "$d"
-              repo-add -q -R lookout.db.tar.gz *.pkg.tar.zst
+              # Several versions of lookout-bin arrive here (the release plus
+              # older ones), and without -p the one added last wins, by file
+              # name: Lookout_linux-0.4.1 sorts before lookout_linux-0.3.14.
+              # -p keeps the newest whatever the order.
+              repo-add -q -R -p lookout.db.tar.gz *.pkg.tar.zst
             done
           '
           sudo chown -R "$(id -u):$(id -g)" repo/arch
