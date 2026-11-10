@@ -29,7 +29,9 @@ import time
 from pathlib import Path
 
 PORT = 8765
-TOKEN = "rehearsal-token-0123456789abcdef"
+# 0.3.14 only accepts 64 hex characters (utils.ts isValidToken); anything else
+# is dropped without a word.
+TOKEN = "0123456789abcdef" * 4
 APP_ID = "com.hackclub.lookout"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -159,6 +161,11 @@ class Windows:
     def storage_listing(self):
         return Path(os.environ["LOCALAPPDATA"]) / APP_ID / "EBWebView/Default/Local Storage"
 
+    def tauri_saved_token(self):
+        # The token is ASCII in the LevelDB log (a single session never compacts).
+        d = self.storage_listing() / "leveldb"
+        return any(TOKEN.encode() in f.read_bytes() for f in d.glob("*") if f.is_file()) if d.exists() else False
+
     def logs(self):
         return [Path(os.environ["LOCALAPPDATA"]) / APP_ID / "logs", Path(os.environ["APPDATA"]) / APP_ID / "logs"]
 
@@ -222,6 +229,23 @@ class Mac:
     def storage_listing(self):
         return Path.home() / "Library/WebKit" / APP_ID
 
+    def tauri_saved_token(self):
+        import sqlite3, tempfile
+        for db in self.storage_listing().rglob("*"):
+            if not (db.name == "localstorage.sqlite3" or db.name.endswith(".localstorage")):
+                continue
+            with tempfile.TemporaryDirectory() as t:
+                for f in db.parent.glob(db.name + "*"):
+                    shutil.copy2(f, Path(t) / f.name)
+                con = sqlite3.connect(Path(t) / db.name)
+                for key, value in con.execute("SELECT key, value FROM ItemTable"):
+                    v = value.decode("utf-16-le", "replace") if isinstance(value, bytes) else str(value)
+                    if key == "lookout-tokens" and TOKEN in v:
+                        con.close()
+                        return True
+                con.close()
+        return False
+
     def logs(self):
         return [Path.home() / "Library/Logs" / APP_ID]
 
@@ -257,6 +281,8 @@ def main():
     os_.screenshot(a.out / "2-tauri-update-downloaded.png")
     os_.quit()
     time.sleep(5)
+    tauri_signed_in = os_.tauri_saved_token()
+    log(f"Tauri saved the sign-in before the update: {tauri_signed_in}")
 
     # Session 2: 0.3.14 installs an update downloaded in an earlier session by itself.
     log("session 2: relaunch Tauri; it should install the update and relaunch as native")
@@ -276,6 +302,8 @@ def main():
             failures.append(name)
 
     check("Tauri downloaded the update from latest.json", downloaded)
+    # Test setup, not the takeover: without it the sign-in check proves nothing.
+    check("Tauri had saved the sign-in before updating (setup)", tauri_signed_in)
     check("the installed app is the native build", os_.installed_matches(a.native))
     installed = os_.installed_version()
     check(f"installed version is {version} (found {installed})", installed == version)
