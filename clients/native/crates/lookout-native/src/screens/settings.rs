@@ -411,11 +411,19 @@ impl SettingsPage {
         }
         let desc = div().ts_lh(12.0, 1.5).text_color(t.text_secondary).child("Configure Lookout.").into_any_element();
         let me = cx.entity();
-        let about = div().mt(px(12.0)).rounded(px(10.0)).border_1().border_color(t.border_default).bg(t.bg_surface).p(px(4.0)).child(
-            menu_row("menu-about", Icon::InfoFill, "About Lookout", format!("Version {}", crate::updater::installed_version()), t, move |_, cx| {
+        let about = div()
+            .mt(px(12.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(t.border_default)
+            .bg(t.bg_surface)
+            .p(px(4.0))
+            .child(menu_row("menu-onboarding", Icon::LkPlay, "Show onboarding", String::new(), t, |_, cx| {
+                crate::windows::onboarding::show_again(cx)
+            }))
+            .child(menu_row("menu-about", Icon::InfoFill, "About Lookout", format!("Version {}", crate::updater::installed_version()), t, move |_, cx| {
                 me.update(cx, |_, cx| cx.emit(SettingsEvent::About))
-            }),
-        );
+            }));
         self.chrome("Settings", desc, t, cx).child(list).child(about).into_any_element()
     }
 
@@ -842,7 +850,10 @@ impl gpui_kit::gpui::RenderOnce for MenuRow {
                     .flex_1()
                     .min_w(px(0.0))
                     .child(div().ts(13.0).w500().child(self.title))
-                    .child(div().ts(12.0).text_color(t.text_tertiary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.description)),
+                    // A row with no description is title-only (vertically centred).
+                    .when(!self.description.is_empty(), |d| {
+                        d.child(div().ts(12.0).text_color(t.text_tertiary).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.description))
+                    }),
             )
             .child(div().relative().child(Icon::CaretRightBold.el(16.0, t.text_tertiary)))
             .on_click(move |_, window, cx| f(window, cx))

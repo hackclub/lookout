@@ -124,6 +124,10 @@ pub struct Persisted {
     /// only (no Tauri key): false for everyone who passed the older page,
     /// so they see it once more.
     pub perm_accessibility: bool,
+    /// `onboardingShown`: the onboarding was finished (or skipped through
+    /// to the end). Until it is, it shows at launch — for new and existing
+    /// users alike. Native only.
+    pub onboarding_shown: bool,
     /// `lookout-program-links`
     pub program_links: HashMap<String, ProgramLink>,
     /// `lookout-pending-pairing`

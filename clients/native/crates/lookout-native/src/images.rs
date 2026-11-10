@@ -33,6 +33,18 @@ pub fn decode_fit(bytes: &[u8], max_w: u32, max_h: u32) -> anyhow::Result<Arc<Re
     Ok(rgba_to_render_image(img.into_rgba8()))
 }
 
+/// [`decode_fit`] with a sharp Lanczos filter, for art shown at exactly
+/// the decoded size (icons, onboarding art).
+pub fn decode_fit_lanczos(bytes: &[u8], max_w: u32, max_h: u32) -> anyhow::Result<Arc<RenderImage>> {
+    let img = image::load_from_memory(bytes)?;
+    let img = if img.width() > max_w || img.height() > max_h {
+        img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    Ok(rgba_to_render_image(img.into_rgba8()))
+}
+
 #[derive(Clone)]
 pub enum Remote {
     Loading,

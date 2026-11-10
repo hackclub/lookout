@@ -18,7 +18,14 @@
 use gpui_kit::gpui::Window;
 
 pub fn apply(window: &Window) -> bool {
-    imp::apply(window)
+    imp::apply(window, false)
+}
+
+/// The onboarding window's material: on macOS the lighter, more
+/// see-through under-window material rather than the sidebar's, so the
+/// desktop colours glow through behind the stickers. Mica elsewhere.
+pub fn apply_onboarding(window: &Window) -> bool {
+    imp::apply(window, true)
 }
 
 #[cfg(target_os = "macos")]
@@ -33,18 +40,24 @@ mod imp {
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    pub fn apply(window: &Window) -> bool {
+    pub fn apply(window: &Window, onboarding: bool) -> bool {
         let Some(mtm) = MainThreadMarker::new() else { return false };
         let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
         let RawWindowHandle::AppKit(h) = handle.as_raw() else { return false };
         // SAFETY: GPUI's AppKit handle points at its live NSView (GPUIView).
         let gpui_view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
         let Some(ns_window) = gpui_view.window() else { return false };
-        measure_traffic_lights(&ns_window);
+        if !onboarding {
+            measure_traffic_lights(&ns_window);
+        }
         let Some(content) = ns_window.contentView() else { return false };
 
         let effect = NSVisualEffectView::initWithFrame(mtm.alloc(), content.bounds());
-        effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+        effect.setMaterial(if onboarding {
+            NSVisualEffectMaterial::UnderWindowBackground
+        } else {
+            NSVisualEffectMaterial::Sidebar
+        });
         effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
         effect.setState(NSVisualEffectState::Active);
         effect.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
@@ -87,7 +100,7 @@ mod imp {
 
     /// Mica needs build 22621 (`DWMWA_SYSTEMBACKDROP_TYPE`); GPUI skips the
     /// request on anything older.
-    pub fn apply(_window: &Window) -> bool {
+    pub fn apply(_window: &Window, _onboarding: bool) -> bool {
         let mut info = windows::Win32::System::SystemInformation::OSVERSIONINFOW {
             dwOSVersionInfoSize: std::mem::size_of::<windows::Win32::System::SystemInformation::OSVERSIONINFOW>() as u32,
             ..Default::default()
@@ -102,7 +115,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn apply(_window: &Window) -> bool {
+    pub fn apply(_window: &Window, _onboarding: bool) -> bool {
         false
     }
 }

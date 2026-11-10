@@ -461,9 +461,14 @@ fn run(
                 })
                 .unwrap_or(0.0);
             let ended = engine.IsEnded().as_bool();
+            let position = engine.GetCurrentTime();
+            // No engine calls while `shared` is held: the engine fires
+            // `Notify::EventNotify` (which locks `shared`) from its work queue
+            // while holding its own lock, so calling into it here deadlocks
+            // the worker, MF's thread and the UI thread (LOOKOUT-NATIVE-B).
             let mut s = shared.lock();
             s.duration = if duration.is_finite() && duration > 0.0 { duration } else { 0.0 };
-            s.position = engine.GetCurrentTime();
+            s.position = position;
             s.buffered = buffered;
             s.seeking = seek_started.is_some() || pending_seek.is_some();
             if !s.seeking && (s.seek_target.is_none() || s.seek_target == issued) {

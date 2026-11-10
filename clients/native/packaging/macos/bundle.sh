@@ -170,12 +170,17 @@ echo "==> Writing $name.dmg"
 # dmgbuild writes the Finder layout (background, icon positions, window
 # size) straight into .DS_Store, so it needs no Finder/AppleScript and works
 # headless on CI. The background ships as a multi-resolution TIFF so Retina
-# screens get the full 2000px artwork and others the 1000px copy.
+# screens get a 2x copy. The art is drawn at 560x291pt (see dmg-settings.py)
+# with 24pt of its bottom edge color (#ceffde) added below, so a title bar
+# shorter than the settings assume never uncovers white. sips only pads
+# evenly, so pad both ends by 48px and crop the top 48px back off.
 python3 -m venv "$work/venv"
 "$work/venv/bin/pip" install --quiet --disable-pip-version-check dmgbuild==1.6.5
 bg_src="$root/assets/installer/dmg-background.png"
-sips -z 520 1000 "$bg_src" --out "$work/bg.png" >/dev/null
-sips -z 1040 2000 "$bg_src" --out "$work/bg@2x.png" >/dev/null
+sips -z 582 1120 "$bg_src" --out "$work/bg@2x.png" >/dev/null
+sips --padToHeightWidth 678 1120 --padColor CEFFDE "$work/bg@2x.png" >/dev/null
+sips --cropToHeightWidth 630 1120 --cropOffset 48 0 "$work/bg@2x.png" >/dev/null
+sips -z 315 560 "$work/bg@2x.png" --out "$work/bg.png" >/dev/null
 tiffutil -cathidpicheck "$work/bg.png" "$work/bg@2x.png" -out "$work/dmg-background.tiff"
 rm -f "$out/$name.dmg"
 "$work/venv/bin/dmgbuild" -s "$here/dmg-settings.py" \

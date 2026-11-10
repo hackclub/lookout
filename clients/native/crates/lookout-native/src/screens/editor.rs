@@ -1351,7 +1351,7 @@ fn paint_pixelated(
 }
 
 /// 45° hatch: 5px stripe, 5px gap, clipped to `clip`.
-fn paint_hatch(b: Bounds<Pixels>, clip: Bounds<Pixels>, stripe: Hsla, window: &mut Window) {
+pub(crate) fn paint_hatch(b: Bounds<Pixels>, clip: Bounds<Pixels>, stripe: Hsla, window: &mut Window) {
     window.with_content_mask(Some(gpui_kit::gpui::ContentMask { bounds: clip }), |window| {
         let h = f32::from(b.size.height);
         let x0 = f32::from(b.origin.x) - h;

@@ -81,11 +81,18 @@ static INSTALLER: &[(&str, &[u8])] = &[
     ("installer/uac-shield.svg", include_bytes!("../../../assets/installer/uac-shield.svg")),
 ];
 
+/// The onboarding films' pointer: the macOS arrow (stageshow kit's
+/// `MacPointer`, MIT), as its white edge and black fill.
+static ONBOARDING: &[(&str, &[u8])] = &[
+    ("onboarding/cursor-mac-edge.svg", include_bytes!("../../../assets/onboarding/cursor-mac-edge.svg")),
+    ("onboarding/cursor-mac-fill.svg", include_bytes!("../../../assets/onboarding/cursor-mac-fill.svg")),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        Ok(ICONS.iter().chain(INSTALLER).find(|(n, _)| *n == path).map(|(_, b)| Cow::Borrowed(*b)))
+        Ok(ICONS.iter().chain(INSTALLER).chain(ONBOARDING).find(|(n, _)| *n == path).map(|(_, b)| Cow::Borrowed(*b)))
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {

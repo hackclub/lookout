@@ -53,11 +53,12 @@ impl NamingModal {
         let input = new_input("My timelapse", cx);
         input.update(cx, |i, _| i.max_len = 255);
         let sub = cx.subscribe(&input, |this, input, ev: &InputEvent, cx| {
+            // Enter takes the primary action, "Edit & Save".
             if let InputEvent::Submit = ev {
                 if !this.loading {
-                    this.choice = Some(Choice::Stop);
+                    this.choice = Some(Choice::Edit);
                     let name = trimmed(input.read(cx).text());
-                    cx.emit(NamingEvent::Confirm(name));
+                    cx.emit(NamingEvent::EditAndSave(name));
                 }
             }
         });

@@ -1,7 +1,7 @@
-//! What installing and uninstalling actually do. On Windows this replaces
-//! `packaging/windows/lookout.nsi`: the same per-user folder, the same
-//! registry keys (so it upgrades NSIS and Tauri installs in place) and the
-//! same Start menu shortcut, done by `lookout.exe` itself.
+//! What installing and uninstalling actually do. On Windows `lookout.exe`
+//! does it itself, with the same per-user folder, registry keys and Start
+//! menu shortcut as the Tauri app's NSIS installer, so it upgrades Tauri
+//! installs in place.
 //!
 //! Elsewhere (and in debug `LOOKOUT_INSTALLER=demo` runs) [`Ops::demo`]
 //! walks through the same steps with pauses and touches nothing, so the

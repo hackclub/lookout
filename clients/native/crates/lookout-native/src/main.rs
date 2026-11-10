@@ -123,36 +123,88 @@ fn main() {
         platform::app_menu::init(cx);
         app::init(cx, rt.clone());
         hang::start(cx);
-        let main = windows::main_window::open(cx);
-        smoke::start(cx);
-        smoke::start_tour(cx);
-        cx.set_global(windows::MainHandle(main));
-        windows::wire_tray(rt.clone(), cx);
-        windows::wire_relaunch_restore(!initial_urls.is_empty(), cx);
-        if !initial_urls.is_empty() {
-            let urls = initial_urls.clone();
-            main.update(cx, |mw, _, cx| mw.handle_deep_links(urls, cx)).ok();
-        }
-        for rx in [forwarded.clone(), open_rx.clone()] {
-            cx.spawn(async move |cx| {
-                while let Ok(urls) = rx.recv_async().await {
-                    let urls: Vec<String> = urls.into_iter().filter(|u| u.starts_with("lookout://")).collect();
-                    cx.update(|cx| {
-                        windows::focus_main(cx);
-                        if let Some(h) = cx.try_global::<windows::MainHandle>().map(|h| h.0) {
-                            h.update(cx, |mw, _, cx| {
-                                if !urls.is_empty() {
-                                    mw.handle_deep_links(urls, cx)
+        // First launch: the onboarding window comes first, and the app
+        // proper starts once it's finished.
+        let launch = Launch { rt: rt.clone(), initial_urls: initial_urls.clone(), forwarded: forwarded.clone(), open_rx: open_rx.clone() };
+        if windows::onboarding::wanted(cx) {
+            // Links (a `lookout://` launch, or ones clicked meanwhile) wait
+            // for the onboarding: each one brings it forward, and they open
+            // once it's finished.
+            let held: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+            let waiting: std::rc::Rc<std::cell::Cell<bool>> = std::rc::Rc::new(std::cell::Cell::new(true));
+            let (fwd, open) = (launch.forwarded.clone(), launch.open_rx.clone());
+            for rx in [fwd, open] {
+                let (held, waiting) = (held.clone(), waiting.clone());
+                cx.spawn(async move |cx| {
+                    while waiting.get() {
+                        let Ok(urls) = rx.recv_async().await else { break };
+                        held.borrow_mut().extend(urls.into_iter().filter(|u| u.starts_with("lookout://")));
+                        cx.update(windows::onboarding::bring_forward);
+                        if !waiting.get() {
+                            // Finished meanwhile: hand them straight on.
+                            let urls = std::mem::take(&mut *held.borrow_mut());
+                            cx.update(|cx| {
+                                windows::focus_main(cx);
+                                if let Some(h) = cx.try_global::<windows::MainHandle>().map(|h| h.0) {
+                                    h.update(cx, |mw, _, cx| if !urls.is_empty() { mw.handle_deep_links(urls, cx) }).ok();
                                 }
-                            })
-                            .ok();
+                            });
                         }
-                    });
-                }
-            })
-            .detach();
+                    }
+                })
+                .detach();
+            }
+            windows::onboarding::open(cx, move |cx| {
+                waiting.set(false);
+                let mut launch = launch;
+                launch.initial_urls.extend(std::mem::take(&mut *held.borrow_mut()));
+                start_app(launch, cx)
+            });
+        } else {
+            start_app(launch, cx);
         }
     });
     crash::on_exit();
     drop(runtime);
+}
+
+/// What the app proper needs to start (after onboarding, if any).
+struct Launch {
+    rt: tokio::runtime::Handle,
+    initial_urls: Vec<String>,
+    forwarded: flume::Receiver<Vec<String>>,
+    open_rx: flume::Receiver<Vec<String>>,
+}
+
+/// Open the main window and wire the tray, relaunch restore and deep links.
+fn start_app(launch: Launch, cx: &mut App) {
+    let main = windows::main_window::open(cx);
+    smoke::start(cx);
+    smoke::start_tour(cx);
+    cx.set_global(windows::MainHandle(main));
+    windows::wire_tray(launch.rt.clone(), cx);
+    windows::wire_relaunch_restore(!launch.initial_urls.is_empty(), cx);
+    if !launch.initial_urls.is_empty() {
+        let urls = launch.initial_urls.clone();
+        main.update(cx, |mw, _, cx| mw.handle_deep_links(urls, cx)).ok();
+    }
+    for rx in [launch.forwarded.clone(), launch.open_rx.clone()] {
+        cx.spawn(async move |cx| {
+            while let Ok(urls) = rx.recv_async().await {
+                let urls: Vec<String> = urls.into_iter().filter(|u| u.starts_with("lookout://")).collect();
+                cx.update(|cx| {
+                    windows::focus_main(cx);
+                    if let Some(h) = cx.try_global::<windows::MainHandle>().map(|h| h.0) {
+                        h.update(cx, |mw, _, cx| {
+                            if !urls.is_empty() {
+                                mw.handle_deep_links(urls, cx)
+                            }
+                        })
+                        .ok();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
 }

@@ -1,5 +1,7 @@
 pub mod editor;
 pub mod main_window;
+pub mod onboarding;
+pub mod onboarding_demo;
 pub mod tray_window;
 
 use gpui_kit::gpui::{App, Global, WindowHandle};
