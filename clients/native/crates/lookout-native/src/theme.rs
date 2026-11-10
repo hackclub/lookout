@@ -263,7 +263,11 @@ impl Theme {
             bg_body: hex(0xfafafa),
             bg_panel: hex(0xffffff),
             bg_backdrop: black(0.35),
-            bg_surface: hex(0xffffff),
+            // A white veil rather than solid white, the way dark's is a tint:
+            // over macOS vibrancy / Windows Mica the material shows through
+            // cards and controls in both themes. Over the flat #fafafa body
+            // (no material) it still comes out white.
+            bg_surface: white(0.5),
             bg_sunken: black(0.04),
             bg_selected: black(0.1),
             text_primary: black(0.85),
