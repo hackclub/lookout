@@ -140,7 +140,9 @@ Lookout package (it can lag behind the latest release):
 
   # Lookout links against glibc. musl systems (Alpine, Void's musl flavour,
   # Chimera) can't run it at all, and an older glibc can't start it.
-  glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}') || glibc=''
+  # Only sed and the shell from here on: a minimal system can lack awk, and
+  # a missing tool must not read as a missing glibc.
+  glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p') || glibc=''
   if [ -z "$glibc" ]; then
     die "$NAME doesn't use glibc (it looks like a musl system), which Lookout
 needs. See $RELEASES"
@@ -220,13 +222,13 @@ installed_version() {
   case "$MGR" in
     apt)
       dpkg-query -W -f='${db:Status-Abbrev} ${Version}\n' lookout 2>/dev/null \
-        | awk '$1 == "ii" { print $2 }' ;;
+        | sed -n 's/^ii  *//p' ;;
     dnf|zypper)
       if rpm -q lookout >/dev/null 2>&1; then
         rpm -q --qf '%{VERSION}\n' lookout | tail -1
       fi ;;
     pacman)
-      pacman -Q lookout-bin 2>/dev/null | awk '{ sub(/-[0-9]+$/, "", $2); print $2 }' ;;
+      pacman -Q lookout-bin 2>/dev/null | sed -n 's/^lookout-bin \(.*\)-[0-9][0-9]*$/\1/p' ;;
   esac
 }
 
@@ -287,7 +289,7 @@ confirm() {
 # guards this file against a bad edit rather than against the network.
 check_key() {
   have gpg || return 0
-  got=$(gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }') || got=''
+  got=$(gpg --batch --show-keys --with-colons "$1" 2>/dev/null | sed -n 's/^fpr:*\([0-9A-F]*\):.*/\1/p' | head -1) || got=''
   # Empty: a gpg too old for --show-keys, which says nothing either way.
   [ -z "$got" ] || [ "$got" = "$KEY_FPR" ] || die "The embedded signing key is $got, expected $KEY_FPR. Not continuing."
 }
@@ -376,8 +378,11 @@ do_zypper() {
 
 do_pacman() {
   step "Trusting the key"
-  # A fresh install (or a container) may never have set up pacman's keyring.
-  [ -d /etc/pacman.d/gnupg ] || as_root pacman-key --init
+  # Signing our key locally needs pacman's own secret key, which a fresh
+  # install (or a container) may not have generated yet.
+  if ! as_root gpg --homedir /etc/pacman.d/gnupg --batch --list-secret-keys 2>/dev/null | grep -q '^sec'; then
+    as_root pacman-key --init
+  fi
   as_root pacman-key --add "$key"
   as_root pacman-key --lsign-key "$KEY_FPR"
 

@@ -36,6 +36,7 @@ if command -v apt-get >/dev/null; then
 elif command -v dnf >/dev/null; then
   dnf install -y -q curl procps-ng >/dev/null
 elif command -v zypper >/dev/null; then
+  # Not awk: Tumbleweed's image has none, and the installer must cope.
   zypper --non-interactive -q install curl gzip >/dev/null
 elif command -v pacman >/dev/null; then
   # -Syu even here: an image's packages plus fresh lists is a partial upgrade.
@@ -113,7 +114,9 @@ case "$SCENARIO" in
       pacman)
         curl -fsSLo /tmp/old.pkg.tar.zst "$REL/v$OLD_VERSION/lookout_linux-${OLD_VERSION}_$(uname -m).pkg.tar.zst"
         pacman -Syu --noconfirm >/dev/null
-        pacman -U --noconfirm /tmp/old.pkg.tar.zst >/dev/null ;;
+        # -dd: 0.3.9 needs libsoup 2, which Arch has since dropped. The
+        # machines still running 0.3.9 kept it; this one can't get it.
+        pacman -Udd --noconfirm /tmp/old.pkg.tar.zst >/dev/null ;;
     esac
     [ "$(version)" = "$OLD_VERSION" ] || fail "couldn't set up $OLD_VERSION (got '$(version)')"
     ;;
