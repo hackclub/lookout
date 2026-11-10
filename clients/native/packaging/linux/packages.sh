@@ -69,10 +69,26 @@ Release: 1
 Summary: Lookout native desktop timelapse recorder
 License: AGPL-3.0-or-later
 URL: https://github.com/hackclub/lookout
-Requires: desktop-file-utils, hicolor-icon-theme
-Requires: glibc >= 2.39, vulkan-loader, libglvnd-egl, libglvnd-glx, glib-networking
-Requires: pipewire-gstreamer, gstreamer1-plugins-base, gstreamer1-plugins-good, gstreamer1-plugins-bad-free
-Recommends: gstreamer1-plugin-openh264, gstreamer1-libav
+Requires: desktop-file-utils, hicolor-icon-theme, glib-networking, glibc >= 2.39
+# Capabilities rather than package names, so one rpm installs on Fedora/RHEL
+# and openSUSE alike: both distributions name these packages differently
+# (vulkan-loader/libvulkan1, pipewire-gstreamer/gstreamer-plugin-pipewire,
+# gstreamer1-plugins-good/gstreamer-plugins-good, ...), but both generate the
+# same soname and gstreamer1(element-*) provides. These are dlopened, so rpm
+# can't find them in the ELF by itself.
+Requires: libvulkan.so.1()(64bit), libEGL.so.1()(64bit), libGL.so.1()(64bit)
+# capture
+Requires: gstreamer1(element-pipewiresrc)()(64bit), gstreamer1(element-videoconvert)()(64bit)
+Requires: gstreamer1(element-appsink)()(64bit), gstreamer1(element-appsrc)()(64bit)
+# clips: the guaranteed VP9/WebM encoder, and the MP4 path for H.264 encoders
+Requires: gstreamer1(element-vp9enc)()(64bit), gstreamer1(element-webmmux)()(64bit)
+Requires: gstreamer1(element-mp4mux)()(64bit), gstreamer1(element-h264parse)()(64bit)
+# playback
+Requires: gstreamer1(element-playbin)()(64bit), gstreamer1(element-matroskademux)()(64bit)
+# Better H.264 when available. libav has no element provides (its elements
+# are generated at runtime), so it is named, either distribution's way.
+Recommends: gstreamer1(element-openh264enc)()(64bit)
+Recommends: (gstreamer1-plugin-libav or gstreamer-plugins-libav)
 %description
 Lookout native desktop timelapse recorder.
 %install

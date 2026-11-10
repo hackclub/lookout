@@ -670,8 +670,11 @@ jobs:
           docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-deb.sh:/verify.sh:ro" \
             -e "DEB=$deb" -e PKG=lookout ubuntu:24.04 bash /verify.sh
           rpm=$(find "$dir" -name '*.rpm' -printf '%f\n')
-          docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-rpm.sh:/verify.sh:ro" \
-            -e "RPMFILE=$rpm" fedora:43 bash /verify.sh
+          # One rpm, two families that name their packages differently.
+          for image in fedora:43 opensuse/tumbleweed; do
+            docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-rpm.sh:/verify.sh:ro" \
+              -e "RPMFILE=$rpm" "$image" bash /verify.sh
+          done
           if [ "$RUNNER_ARCH" = X64 ]; then
             pkg=$(find "$dir" -name '*.pkg.tar.zst' -printf '%f\n')
             docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-arch.sh:/verify.sh:ro" \

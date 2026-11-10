@@ -18,12 +18,32 @@ guessing.
 ## One line
 
 ```bash
-curl -fsSL https://lookout.hackclub.com/install.sh | sh
+curl -fsSL https://hack.club/lookout.sh | sh
 ```
+
+(`hack.club/lookout.sh` redirects to `lookout.hackclub.com/install.sh`; the
+source is [`packages/server/public/install.sh`](../packages/server/public/install.sh).)
 
 Works on apt, dnf, zypper and pacman. It prints what it will do and waits for
 confirmation; `-y` skips the prompt, and it refuses to run unattended without
 it rather than assuming consent.
+
+It is also the update path for anyone without a repository. Run on a machine
+that already has Lookout, it says which version is installed, adds the
+repository, updates in place and reports `Updated Lookout from X to Y` (or that
+it was already the newest). Running it twice changes nothing. The app suggests
+exactly this command when it finds a newer version and no repository to get it
+from, which is the case for everyone who installed 0.3.11 or earlier: packages
+only started enrolling a repository after that.
+
+Before changing anything it refuses, with the reason, on systems Lookout can't
+run on: glibc older than 2.39 (Ubuntu 22.04, Debian 12, Mint 21), musl
+(Alpine), image-based systems (Fedora Atomic, Bazzite, SteamOS, Ubuntu Core)
+and NixOS, where it points at the community package in nixpkgs instead.
+
+The `Linux installer` workflow runs it in clean containers (fresh installs,
+an update from 0.3.9, a second run and the refusals) on every change to it, after
+every repository publish, and weekly.
 
 ## Debian and Ubuntu
 
@@ -88,6 +108,40 @@ EOF
 sudo dnf install lookout
 ```
 
+## openSUSE
+
+```bash
+sudo zypper install --allow-unsigned-rpm ./Lookout_linux-*_x86_64.rpm
+```
+
+The same rpm as Fedora's. Its dependencies are capabilities both distributions
+provide (`libvulkan.so.1()(64bit)`, `gstreamer1(element-vp9enc)()(64bit)`, …)
+rather than package names, which differ (`vulkan-loader` vs `libvulkan1`,
+`pipewire-gstreamer` vs `gstreamer-plugin-pipewire`). Its post-install script
+writes `/etc/zypp/repos.d/lookout.repo` when zypper is present, since zypper
+never reads `/etc/yum.repos.d`, and `zypper update` handles the rest. Tumbleweed
+and Leap 16 qualify; Leap 15's glibc is too old. By hand:
+
+```bash
+sudo install -d /etc/pki/rpm-gpg
+sudo curl -fsSL -o /etc/pki/rpm-gpg/RPM-GPG-KEY-lookout \
+  https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-lookout
+sudo tee /etc/zypp/repos.d/lookout.repo >/dev/null <<'EOF'
+[lookout]
+name=Lookout
+baseurl=https://pkg.lookout.hackclub.com/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-lookout
+type=rpm-md
+autorefresh=1
+pkg_gpgcheck=1
+EOF
+sudo zypper refresh lookout && sudo zypper install lookout
+```
+
 ## Arch
 
 Arch is the one that isn't self-enrolling: a package editing `pacman.conf` is
@@ -105,7 +159,7 @@ sudo tee -a /etc/pacman.conf >/dev/null <<'EOF'
 Server = https://pkg.lookout.hackclub.com/arch/$arch
 EOF
 
-sudo pacman -Sy lookout-bin
+sudo pacman -Syu lookout-bin
 ```
 
 After that `pacman -Syu` updates it with everything else.
@@ -123,7 +177,7 @@ so existing scripts and launchers keep working.
 Delete the file and it stays deleted; the package will not put it back:
 
 ```bash
-sudo rm /etc/apt/sources.list.d/lookout.sources   # or /etc/yum.repos.d/lookout.repo
+sudo rm /etc/apt/sources.list.d/lookout.sources   # or /etc/yum.repos.d/ or /etc/zypp/repos.d/lookout.repo
 ```
 
 To opt out *before* installing:

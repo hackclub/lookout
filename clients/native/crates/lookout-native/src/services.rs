@@ -239,6 +239,11 @@ pub fn compare_versions(a: &str, b: &str) -> i64 {
     0
 }
 
+/// The installer, which adds the right repository for any supported manager
+/// and updates an existing install in place. What to run when this copy has
+/// no repository to update from.
+const LINUX_INSTALLER: &str = "curl -fsSL https://hack.club/lookout.sh | sh";
+
 /// `linux_install_kind`: which package manager owns this binary, and whether
 /// its Lookout repository is set up.
 fn linux_install_kind() -> (&'static str, bool) {
@@ -246,11 +251,20 @@ fn linux_install_kind() -> (&'static str, bool) {
     let owns = |cmd: &str, args: &[&str]| {
         std::process::Command::new(cmd).args(args).arg(&exe).output().map(|o| o.status.success()).unwrap_or(false)
     };
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let on_path = |cmd: &str| {
+        std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(cmd).is_file()))
+    };
     if owns("dpkg", &["-S"]) {
-        return ("apt", std::path::Path::new("/etc/apt/sources.list.d/lookout.sources").exists());
+        return ("apt", exists("/etc/apt/sources.list.d/lookout.sources"));
     }
     if owns("rpm", &["-qf"]) {
-        return ("rpm", std::path::Path::new("/etc/yum.repos.d/lookout.repo").exists());
+        // One rpm serves Fedora and openSUSE; they keep repositories in
+        // different places, and only one of them has dnf.
+        if on_path("zypper") && !on_path("dnf") {
+            return ("zypper", exists("/etc/zypp/repos.d/lookout.repo"));
+        }
+        return ("rpm", exists("/etc/yum.repos.d/lookout.repo"));
     }
     if owns("pacman", &["-Qo"]) {
         let enrolled = std::fs::read_to_string("/etc/pacman.conf").map(|c| c.contains("[lookout]")).unwrap_or(false);
@@ -259,15 +273,21 @@ fn linux_install_kind() -> (&'static str, bool) {
     ("unknown", false)
 }
 
-/// `instructionsFor` (updateCommand.ts).
+/// `instructionsFor` (updateCommand.ts): the command to show, and the text
+/// to show instead when there is no command.
 fn instructions(manager: &str, enrolled: bool) -> (Option<String>, Option<String>) {
     match (manager, enrolled) {
         ("apt", true) => (Some("sudo apt update && sudo apt install lookout".into()), None),
-        ("apt", false) => (None, Some("This copy was installed before Lookout had an apt repository. Download the latest .deb once, and every update after it arrives through apt.".into())),
-        ("rpm", true) => (Some("sudo dnf upgrade lookout".into()), None),
-        ("rpm", false) => (None, Some("This copy was installed before Lookout had a dnf repository. Download the latest .rpm once, and every update after it arrives through dnf.".into())),
+        // --refresh: dnf trusts its cached metadata for up to two days, which
+        // would hide the very release this prompt is about.
+        ("rpm", true) => (Some("sudo dnf upgrade --refresh lookout".into()), None),
+        ("zypper", true) => (Some("sudo zypper refresh lookout && sudo zypper update lookout".into()), None),
         ("pacman", true) => (Some("sudo pacman -Syu".into()), None),
-        ("pacman", false) => (None, Some("Add the Lookout repository to get updates, or download the latest package.".into())),
+        // Installed from a downloaded package, before the package enrolled a
+        // repository, or with the repository removed since. The installer
+        // adds it and updates this copy in one go, so every later version
+        // arrives with the system's updates.
+        ("apt" | "rpm" | "zypper" | "pacman", false) => (Some(LINUX_INSTALLER.into()), None),
         _ => (None, Some("Download the latest version to update.".into())),
     }
 }
@@ -391,3 +411,33 @@ impl Render for UpdateBody {
 
 #[allow(unused)]
 fn _u(_: Entity<UpdateBody>, _: SharedString) {}
+
+#[cfg(test)]
+mod linux_update_tests {
+    use super::{instructions, LINUX_INSTALLER};
+
+    #[test]
+    fn enrolled_installs_update_through_their_own_manager() {
+        assert_eq!(instructions("apt", true).0.as_deref(), Some("sudo apt update && sudo apt install lookout"));
+        assert_eq!(instructions("rpm", true).0.as_deref(), Some("sudo dnf upgrade --refresh lookout"));
+        assert_eq!(
+            instructions("zypper", true).0.as_deref(),
+            Some("sudo zypper refresh lookout && sudo zypper update lookout")
+        );
+        assert_eq!(instructions("pacman", true).0.as_deref(), Some("sudo pacman -Syu"));
+    }
+
+    #[test]
+    fn unenrolled_installs_are_pointed_at_the_installer() {
+        for manager in ["apt", "rpm", "zypper", "pacman"] {
+            assert_eq!(instructions(manager, false), (Some(LINUX_INSTALLER.to_string()), None), "{manager}");
+        }
+    }
+
+    #[test]
+    fn unknown_installs_get_text_not_a_command() {
+        let (command, fallback) = instructions("unknown", false);
+        assert!(command.is_none());
+        assert!(fallback.is_some());
+    }
+}

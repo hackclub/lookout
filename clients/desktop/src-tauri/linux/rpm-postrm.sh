@@ -6,12 +6,13 @@ set -e
 
 KEYRING="/etc/pki/rpm-gpg/RPM-GPG-KEY-lookout"
 REPO_FILE="/etc/yum.repos.d/lookout.repo"
+ZYPP_FILE="/etc/zypp/repos.d/lookout.repo"
 MARKER="/var/lib/lookout/repo-added"
 LEGACY_ALIAS="/usr/bin/lookout-desktop"
 
 if [ "$1" = "0" ]; then
   # Marker goes too, or a later reinstall would never re-enroll.
-  rm -f "$REPO_FILE" "$KEYRING" "$MARKER" || true
+  rm -f "$REPO_FILE" "$ZYPP_FILE" "$KEYRING" "$MARKER" || true
   if [ -L "$LEGACY_ALIAS" ]; then
     rm -f "$LEGACY_ALIAS"
   fi

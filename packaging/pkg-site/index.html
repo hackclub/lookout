@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light only">
 <link rel="icon" href="https://lookout.hackclub.com/icon.png">
 <title>Lookout package repositories</title>
-<meta name="description" content="apt, dnf and pacman packages for the Lookout desktop app.">
+<meta name="description" content="apt, dnf, zypper and pacman packages for the Lookout desktop app.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
@@ -97,10 +97,12 @@ h2 {
 .panel { display: none; }
 #deb:checked ~ .bar label[for=deb],
 #rpm:checked ~ .bar label[for=rpm],
-#arch:checked ~ .bar label[for=arch] { background: var(--code-bg); color: var(--fg); }
+#arch:checked ~ .bar label[for=arch],
+#suse:checked ~ .bar label[for=suse] { background: var(--code-bg); color: var(--fg); }
 #deb:checked ~ .panels .p-deb,
 #rpm:checked ~ .panels .p-rpm,
-#arch:checked ~ .panels .p-arch { display: block; }
+#arch:checked ~ .panels .p-arch,
+#suse:checked ~ .panels .p-suse { display: block; }
 .step { margin-bottom: 26px; }
 .cmd {
   position: relative;
@@ -202,18 +204,20 @@ footer a:hover { color: var(--fg); text-decoration: none; }
 
   <div class="quick">
     <h2>One line</h2>
-    <div class="cmd"><div class="scroll"><pre>curl -fsSL https://lookout.hackclub.com/install.sh | sh</pre></div></div>
+    <div class="cmd"><div class="scroll"><pre>curl -fsSL https://hack.club/lookout.sh | sh</pre></div></div>
     <p class="hint">Detects your package manager and shows what it will do before touching anything. Or do it by hand:</p>
   </div>
 
   <div class="tabs">
     <input type="radio" name="os" id="deb" checked>
     <input type="radio" name="os" id="rpm">
+    <input type="radio" name="os" id="suse">
     <input type="radio" name="os" id="arch">
 
     <div class="bar">
       <label for="deb">Debian &amp; Ubuntu</label>
       <label for="rpm">Fedora &amp; RHEL</label>
+      <label for="suse">openSUSE</label>
       <label for="arch">Arch</label>
     </div>
 
@@ -260,6 +264,31 @@ EOF</pre></div></div>
         </div>
       </div>
 
+      <div class="panel p-suse">
+        <div class="step">
+          <h2>Add the repository</h2>
+          <p class="hint">Tumbleweed or Leap 16. The same packages as Fedora&rsquo;s.</p>
+          <div class="cmd"><div class="scroll"><pre>sudo rpm --import https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+
+sudo tee /etc/zypp/repos.d/lookout.repo >/dev/null &lt;&lt;'EOF'
+[lookout]
+name=Lookout
+baseurl=https://pkg.lookout.hackclub.com/rpm
+enabled=1
+autorefresh=1
+type=rpm-md
+gpgcheck=1
+repo_gpgcheck=1
+pkg_gpgcheck=1
+gpgkey=https://pkg.lookout.hackclub.com/lookout-archive-keyring.asc
+EOF</pre></div></div>
+        </div>
+        <div class="step">
+          <h2>Install</h2>
+          <div class="cmd"><div class="scroll"><pre>sudo zypper refresh lookout &amp;&amp; sudo zypper install lookout</pre></div></div>
+        </div>
+      </div>
+
       <div class="panel p-arch">
         <div class="step">
           <h2>Trust the key</h2>
@@ -277,7 +306,7 @@ EOF</pre></div></div>
         </div>
         <div class="step">
           <h2>Install</h2>
-          <div class="cmd"><div class="scroll"><pre>sudo pacman -Sy lookout-bin</pre></div></div>
+          <div class="cmd"><div class="scroll"><pre>sudo pacman -Syu lookout-bin</pre></div></div>
         </div>
       </div>
     </div>

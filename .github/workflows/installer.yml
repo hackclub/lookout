@@ -1,0 +1,100 @@
+name: Linux installer
+
+# Runs packages/server/public/install.sh (served as hack.club/lookout.sh) in
+# clean containers against the live repositories at pkg.lookout.hackclub.com:
+# a fresh install, an update from a release that predates the repositories
+# (where most Linux users still are), a second run that must change nothing,
+# and refusals on systems Lookout can't run on.
+#
+# Also run by packages.yml after every repository deploy, so a publish that
+# breaks installs or updates is caught while it is fresh.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/server/public/install.sh
+      - scripts/test-installer.sh
+      - clients/desktop/src-tauri/linux/**
+      - .github/workflows/installer.yml
+  pull_request:
+    paths:
+      - packages/server/public/install.sh
+      - scripts/test-installer.sh
+      - clients/desktop/src-tauri/linux/**
+      - .github/workflows/installer.yml
+  schedule:
+    # Weekly: distributions move under the installer even when it doesn't.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: shellcheck
+        run: |
+          shellcheck -s sh packages/server/public/install.sh scripts/test-installer.sh
+          # Sourcing /etc/default/lookout is the point of those lines.
+          shellcheck -s sh -e SC1090,SC1091 clients/desktop/src-tauri/linux/*.sh
+
+      # The installer embeds the key rather than fetching it. If it drifted
+      # from the one the packages ship and the repository is signed with,
+      # every install would fail signature checks.
+      - name: Embedded key matches the repository key
+        run: |
+          set -euo pipefail
+          sed -n '/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/,/^-----END PGP PUBLIC KEY BLOCK-----$/p' \
+            packages/server/public/install.sh > embedded.asc
+          diff -u clients/desktop/src-tauri/linux/lookout-archive-keyring.asc embedded.asc
+          fpr=$(gpg --batch --show-keys --with-colons embedded.asc | awk -F: '/^fpr:/ {print $10; exit}')
+          grep -q "KEY_FPR=\"$fpr\"" packages/server/public/install.sh
+
+      # install.sh and the packages' own scripts both write the repository
+      # files; if their text differs, each run of one undoes the other.
+      - name: Installer and packages write the same repository files
+        run: |
+          set -euo pipefail
+          grep -q 'baseurl=%s/rpm' packages/server/public/install.sh
+          grep -q 'REPO_URL="https://pkg.lookout.hackclub.com/rpm"' clients/desktop/src-tauri/linux/rpm-postinst.sh
+          hdr='# Added by the lookout package. Delete it to stop receiving updates; it will'
+          for f in packages/server/public/install.sh clients/desktop/src-tauri/linux/postinst.sh \
+                   clients/desktop/src-tauri/linux/rpm-postinst.sh; do
+            grep -qF "$hdr" "$f" || { echo "::error::$f has a different repository header"; exit 1; }
+          done
+
+  e2e:
+    needs: lint
+    name: ${{ matrix.scenario }} on ${{ matrix.image }}${{ matrix.runner == 'ubuntu-24.04-arm' && ' (arm64)' || '' }}
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "ubuntu:24.04", scenario: fresh }
+          - { image: "ubuntu:24.04", scenario: fresh, runner: ubuntu-24.04-arm }
+          - { image: "debian:13", scenario: fresh }
+          - { image: "fedora:43", scenario: fresh }
+          - { image: "opensuse/tumbleweed", scenario: fresh }
+          - { image: "archlinux:latest", scenario: fresh }
+          - { image: "ubuntu:24.04", scenario: update }
+          - { image: "fedora:43", scenario: update }
+          - { image: "archlinux:latest", scenario: update }
+          - { image: "ubuntu:22.04", scenario: refuse }
+          - { image: "alpine:3.22", scenario: refuse }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run
+        run: |
+          docker run --rm \
+            -v "$PWD/packages/server/public/install.sh:/install.sh:ro" \
+            -v "$PWD/scripts/test-installer.sh:/test.sh:ro" \
+            -e "SCENARIO=${{ matrix.scenario }}" \
+            "${{ matrix.image }}" sh /test.sh

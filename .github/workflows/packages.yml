@@ -306,3 +306,10 @@ jobs:
 
       - id: deploy
         uses: actions/deploy-pages@v4
+
+  # Install and update through what was just published, from clean machines.
+  installer:
+    needs: publish
+    permissions:
+      contents: read
+    uses: ./.github/workflows/installer.yml
