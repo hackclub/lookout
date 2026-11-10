@@ -26,6 +26,9 @@ pub struct TrayApp {
     tick_due: Option<std::time::Instant>,
     _tick: Option<gpui_kit::gpui::Task<()>>,
     _subs: Vec<Subscription>,
+    /// macOS: hides the popup on a click in another app (see [`outside_click`]).
+    #[cfg(target_os = "macos")]
+    _outside: (outside_click::Monitor, gpui_kit::gpui::Task<()>),
 }
 
 const W: f32 = 300.0;
@@ -106,7 +109,69 @@ impl TrayApp {
                 }
             }),
         ];
-        Self { model, tick_due: None, _tick: None, _subs: subs }
+        // Blur alone isn't enough on macOS: the popup is a non-activating
+        // panel and the app usually isn't active, so a click in another app
+        // (or on the desktop) never makes it resign key. Watch for those
+        // clicks instead. In-app clicks still arrive through blur above.
+        #[cfg(target_os = "macos")]
+        let _outside = {
+            let (tx, rx) = flume::bounded::<()>(1);
+            let task = cx.spawn(async move |_, cx| {
+                if rx.recv_async().await.is_ok() {
+                    let _ = cx.update(|cx| hide(cx));
+                }
+            });
+            (outside_click::Monitor::new(tx), task)
+        };
+        Self {
+            model,
+            tick_due: None,
+            _tick: None,
+            _subs: subs,
+            #[cfg(target_os = "macos")]
+            _outside,
+        }
+    }
+}
+
+/// A global mouse-down monitor, alive while the popup is open. Global
+/// monitors only see events headed to *other* apps, so clicks on the popup
+/// itself or the menu-bar item (which toggles) never reach it.
+#[cfg(target_os = "macos")]
+mod outside_click {
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    pub struct Monitor(Option<Retained<AnyObject>>);
+
+    impl Monitor {
+        pub fn new(tx: flume::Sender<()>) -> Self {
+            // NSEventMaskLeftMouseDown | RightMouseDown | OtherMouseDown.
+            let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+            let block = RcBlock::new(move |_event: NonNull<AnyObject>| {
+                let _ = tx.try_send(());
+            });
+            // SAFETY: +[NSEvent addGlobalMonitorForEventsMatchingMask:handler:]
+            // copies the block and returns an opaque monitor (nil if denied).
+            let monitor: Option<Retained<AnyObject>> =
+                unsafe { msg_send![class!(NSEvent), addGlobalMonitorForEventsMatchingMask: mask, handler: &*block] };
+            Self(monitor)
+        }
+    }
+
+    impl Drop for Monitor {
+        fn drop(&mut self) {
+            if let Some(m) = self.0.take() {
+                // SAFETY: `m` came from addGlobalMonitorForEventsMatchingMask.
+                unsafe {
+                    let _: () = msg_send![class!(NSEvent), removeMonitor: &*m];
+                }
+            }
+        }
     }
 }
 
