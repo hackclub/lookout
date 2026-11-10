@@ -80,6 +80,8 @@ const PENDING_KEY = "lookout-pending-pairing";
 const PENDING_TTL_MS = 10 * 60_000;
 const EXCHANGE_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 15_000;
+/** A missing consent page should fail fast into the browser flow, not hang the +. */
+const CONSENT_PROBE_TIMEOUT_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -183,6 +185,17 @@ export function isAcceptableEndpoint(raw: string | null | undefined): raw is str
 /** Whether a registry entry advertises the instant-start capability at all. */
 export function isLinkable(p: LinkableProgram): boolean {
   return isAcceptableEndpoint(p.pairUrl) && isAcceptableEndpoint(p.startUrl);
+}
+
+/**
+ * The registry can advertise a pair URL the program has not deployed yet.
+ * A 404 or 405 means there is no consent page to open, so callers fall
+ * back to newSessionUrl instead of showing the user that error. A login
+ * redirect, a 400 for a probe without the pairing query, or a 200 means
+ * the page is there and the browser hop should proceed.
+ */
+export function consentPageMissing(status: number): boolean {
+  return status === 404 || status === 405;
 }
 
 export function buildPairPageUrl(
@@ -295,9 +308,30 @@ function readPending(): PendingPairing | null {
  * consent page in the OS browser. Resolution happens later, when the
  * lookout://pair deep link arrives and App routes it to completePairing().
  */
+/**
+ * GET the bare pair URL before we mint a verifier or open the browser.
+ * A probe failure (offline, timeout) is not proof the page is missing, so
+ * pairing continues and the browser hop can still succeed.
+ */
+async function assertConsentPageExists(pairUrl: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(pairUrl, { method: "GET" }, CONSENT_PROBE_TIMEOUT_MS);
+  } catch (e) {
+    console.warn("[pair] consent-page probe failed, opening it anyway:", e);
+    return;
+  }
+  if (consentPageMissing(res.status)) {
+    throw new Error(`consent page returned ${res.status}`);
+  }
+}
+
 export async function beginPairing(program: LinkableProgram): Promise<void> {
   if (!isLinkable(program)) throw new Error("program does not support pairing");
   const pairUrl = program.pairUrl!;
+  // Before any pending state is stored. Callers already fall back to
+  // newSessionUrl when this throws — that is the create page Lapse actually ships.
+  await assertConsentPageExists(pairUrl);
   const verifier = base64url(randomBytes(32));
   const state = base64url(randomBytes(16));
   const challenge = base64url(sha256(new TextEncoder().encode(verifier)));

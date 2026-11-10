@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   base64url,
   buildPairPageUrl,
+  consentPageMissing,
   isAcceptableEndpoint,
   isLinkable,
   parsePairCallback,
@@ -97,6 +98,18 @@ describe("isLinkable", () => {
         startUrl: "http://x.example/start",
       }),
     ).toBe(false);
+  });
+});
+
+describe("consentPageMissing", () => {
+  it("treats a missing or non-GET route as no consent page", () => {
+    expect(consentPageMissing(404)).toBe(true);
+    expect(consentPageMissing(405)).toBe(true);
+  });
+  it("leaves login redirects, auth challenges, and validation errors to the browser", () => {
+    for (const status of [200, 204, 301, 302, 400, 401, 403, 500]) {
+      expect(consentPageMissing(status)).toBe(false);
+    }
   });
 });
 
