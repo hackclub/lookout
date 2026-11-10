@@ -32,7 +32,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write only so the token can see a draft release: release.yml starts
+      # this for the tag while its release is still a draft. Nothing is written.
+      contents: write
       pages: write
       id-token: write
     environment:
