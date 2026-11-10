@@ -38,7 +38,8 @@ elif command -v dnf >/dev/null; then
 elif command -v zypper >/dev/null; then
   zypper --non-interactive -q install curl gzip >/dev/null
 elif command -v pacman >/dev/null; then
-  pacman -Sy --noconfirm --needed curl >/dev/null
+  # -Syu even here: an image's packages plus fresh lists is a partial upgrade.
+  pacman -Syu --noconfirm --needed curl >/dev/null
 fi
 
 if command -v dpkg-query >/dev/null; then MGR=apt
@@ -60,8 +61,8 @@ newest() {
   case "$MGR" in
     apt) curl -fsSL "$HOST/deb/Packages" | awk '/^Version:/{print $2}' | sort -V | tail -1 ;;
     dnf|zypper)
-      primary=$(curl -fsSL "$HOST/rpm/repodata/repomd.xml" | tr '\n' ' ' \
-        | sed -n 's/.*<data type="primary">.*<location href="\([^"]*\)".*/\1/p' | sed 's/".*//')
+      primary=$(curl -fsSL "$HOST/rpm/repodata/repomd.xml" | grep -o 'href="[^"]*-primary\.xml\.gz"' \
+        | head -1 | sed 's/^href="//; s/"$//')
       curl -fsSL "$HOST/rpm/$primary" | gunzip | grep -o '<version [^>]*ver="[^"]*"' \
         | sed 's/.*ver="//; s/"//' | sort -V | tail -1 ;;
     pacman) curl -fsSL "$HOST/arch/$(uname -m)/lookout.db" | tar -tzf - | sed -n 's#^lookout-bin-\(.*\)-[0-9]*/$#\1#p' | sort -V | tail -1 ;;
@@ -80,7 +81,8 @@ repo_file() {
 # tee hides the installer's exit status from `set -e`; keep it separately.
 installer() {
   out=$(mktemp)
-  { sh /install.sh -y </dev/null 2>&1; echo $? > /tmp/rc; } | tee "$out"
+  # `|| r=$?`, or errexit would end the group before the status is saved.
+  { r=0; sh /install.sh -y </dev/null 2>&1 || r=$?; echo "$r" > /tmp/rc; } | tee "$out"
   rc=$(cat /tmp/rc)
 }
 
