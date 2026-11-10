@@ -51,6 +51,16 @@ function persistCache(cache: Record<string, CachedSession>): void {
   }
 }
 
+/** Newest first by `createdAt`. The server returns `Date.toISOString()`
+ *  (fixed-width UTC), so string order is time order. The server only sorts
+ *  within one 100-token batch and the token list can be oldest-first
+ *  (imported from the old desktop app), so merged batches need this. */
+export function sortNewestFirst(sessions: SessionSummary[]): SessionSummary[] {
+  return [...sessions].sort((a, b) =>
+    a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+  );
+}
+
 const globalSessionsCache: Record<string, CachedSession> = loadPersistedCache();
 
 async function fetchSessionsHttp(
@@ -72,9 +82,11 @@ async function fetchSessionsHttp(
 export function useGallery({ apiBaseUrl, tokens, fetchSessions }: UseGalleryOptions): UseGallery {
   const validTokens = tokens.filter((t) => /^[a-f0-9]{64}$/i.test(t));
   
-  const initialSessions = validTokens
-    .map(t => globalSessionsCache[t]?.summary)
-    .filter((s): s is SessionSummary => s !== undefined);
+  const initialSessions = sortNewestFirst(
+    validTokens
+      .map((t) => globalSessionsCache[t]?.summary)
+      .filter((s): s is SessionSummary => s !== undefined),
+  );
 
   const hasAllInCache = validTokens.length > 0 && initialSessions.length === validTokens.length;
 
@@ -117,7 +129,7 @@ export function useGallery({ apiBaseUrl, tokens, fetchSessions }: UseGalleryOpti
 
     const lookup = fetchSessions ?? ((chunk: string[]) => fetchSessionsHttp(apiBaseUrl, chunk));
     Promise.all(chunks.map((chunk) => lookup(chunk)))
-      .then((results) => ({ sessions: results.flatMap((r) => r.sessions ?? []) }))
+      .then((results) => ({ sessions: sortNewestFirst(results.flatMap((r) => r.sessions ?? [])) }))
       .then((data: { sessions: SessionSummary[] }) => {
         if (!cancelled) {
           // Thumbnail URLs are permanent (/api/media/:id/thumbnail.jpg) and

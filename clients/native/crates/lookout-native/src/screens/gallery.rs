@@ -20,6 +20,13 @@ use crate::ui::icon::Icon;
 use crate::ui::primitives::{AspectBox, BadgeSize, PressScale, Skeleton, badge, card, edge_faded};
 use crate::ui::text::TextExt;
 
+/// Newest first by `created_at`. The server sends `Date.toISOString()`
+/// (fixed-width UTC), so string order is time order; the sort is stable so
+/// ties keep the server's order.
+fn sort_newest_first(sessions: &mut [SessionSummary]) {
+    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+}
+
 pub enum GalleryEvent {
     Open(String, String),
     Settings,
@@ -49,7 +56,9 @@ impl GalleryPage {
         cx.observe(&images::cache(cx), |_, _, cx| cx.notify()).detach();
         let tokens = store(cx).active_tokens();
         let cache = &store(cx).gallery_cache;
-        let initial: Vec<SessionSummary> = tokens.iter().filter_map(|t| cache.get(t).map(|c| c.summary.clone())).collect();
+        let mut initial: Vec<SessionSummary> =
+            tokens.iter().filter_map(|t| cache.get(t).map(|c| c.summary.clone())).collect();
+        sort_newest_first(&mut initial);
         let all_cached = !tokens.is_empty() && initial.len() == tokens.len();
         let mut page = Self {
             sessions: initial,
@@ -93,6 +102,9 @@ impl GalleryPage {
                     .unwrap_or_default();
                 out.extend(list);
             }
+            // The server sorts within one request only; the token list can be
+            // oldest-first (imported from the Tauri app), so order the merge.
+            sort_newest_first(&mut out);
             Ok::<_, String>(out)
         });
         cx.spawn(async move |this, cx| {
@@ -495,4 +507,28 @@ fn session_card(
             let (t, s) = (tok_menu.clone(), st_menu.clone());
             g_menu.update(cx, |_, cx| cx.emit(GalleryEvent::ContextMenu { token: t, status: s, position: pos }));
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(token: &str, created_at: &str) -> SessionSummary {
+        serde_json::from_value(serde_json::json!({ "token": token, "createdAt": created_at })).unwrap()
+    }
+
+    #[test]
+    fn merged_chunks_sort_newest_first() {
+        // Two batch responses, each newest-first within itself, but the
+        // second chunk holds the newer sessions (oldest-first token list).
+        let mut list = vec![
+            summary("b", "2025-03-01T00:00:00.000Z"),
+            summary("a", "2025-01-01T00:00:00.000Z"),
+            summary("d", "2026-11-09T12:00:00.000Z"),
+            summary("c", "2026-02-01T00:00:00.000Z"),
+        ];
+        sort_newest_first(&mut list);
+        let order: Vec<&str> = list.iter().map(|s| s.token.as_str()).collect();
+        assert_eq!(order, ["d", "c", "b", "a"]);
+    }
 }
