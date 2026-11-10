@@ -197,7 +197,9 @@ impl SourcePicker {
             selected: Vec::new(),
             hovered_window: None,
             hover_cards: Vec::new(),
-            is_wayland: std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false),
+            is_wayland: std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false)
+                // ChromeOS's Linux is always Wayland; see CaptureErrorDialog.
+                || cfg!(debug_assertions) && std::env::var("LOOKOUT_DEV_CROSTINI").as_deref() == Ok("1"),
             scroll: ScrollHandle::new(),
             tiles: Vec::new(),
             empty_text: Anim::new(1.0),

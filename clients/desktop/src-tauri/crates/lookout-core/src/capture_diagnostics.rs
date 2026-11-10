@@ -55,6 +55,28 @@ pub struct CaptureEnvironment {
     /// the package — it is a Recommends, so a `dpkg -i` install or any
     /// Fedora install does not have it.
     pub clip_encoder: Option<String>,
+    /// Running inside ChromeOS's Linux container (Crostini). Nothing in
+    /// there can capture the Chromebook's screen: the container's
+    /// compositor (sommelier) only proxies its own windows to the host, and
+    /// no portal backend implements ScreenCast. Worth knowing up front,
+    /// because every other diagnosis would send the person to install
+    /// packages that can't help.
+    pub chromeos: Option<bool>,
+}
+
+/// Crostini's fingerprints, any one of which is enough: the milestone file
+/// and the cros-containers mount are set up by the container tooling, and
+/// sommelier exports its version into every session it starts.
+///
+/// Takes its probes as arguments so the decision can be tested without a
+/// Chromebook.
+pub fn looks_like_crostini(
+    path_exists: impl Fn(&str) -> bool,
+    env_var: impl Fn(&str) -> Option<String>,
+) -> bool {
+    path_exists("/dev/.cros_milestone")
+        || path_exists("/opt/google/cros-containers")
+        || env_var("SOMMELIER_VERSION").is_some_and(|v| !v.is_empty())
 }
 
 /// Read one key out of os-release.
@@ -148,7 +170,13 @@ async fn probe_portal() -> (Option<bool>, Option<bool>) {
 
     let screencast = tokio::time::timeout(PROBE_TIMEOUT, async {
         use ashpd::desktop::screencast::Screencast;
-        let proxy = Screencast::new().await.ok()?;
+        let proxy = match Screencast::new().await {
+            Ok(proxy) => proxy,
+            // The portal answered and said it has no ScreenCast interface:
+            // that is a definite "no backend", not "couldn't tell".
+            Err(ashpd::Error::PortalNotFound(_)) => return Some(false),
+            Err(_) => return None,
+        };
         // A property read, not a session — this never prompts the user. The
         // interface itself is absent unless a backend implements ScreenCast.
         Some(!proxy.available_source_types().await.ok()?.is_empty())
@@ -205,6 +233,10 @@ async fn collect() -> CaptureEnvironment {
         pipewire_running,
         pipewire_gst_element: pipewire_gst_element(),
         clip_encoder: clip_encoder(),
+        chromeos: Some(looks_like_crostini(
+            |p| std::path::Path::new(p).exists(),
+            |k| std::env::var(k).ok(),
+        )),
     }
 }
 
@@ -252,6 +284,23 @@ mod tests {
                 "reported an encoder that isn't installed: {name}"
             );
         }
+    }
+
+    #[test]
+    fn crostini_is_recognised_by_any_one_fingerprint() {
+        let none = |_: &str| None;
+        assert!(looks_like_crostini(|p| p == "/dev/.cros_milestone", none));
+        assert!(looks_like_crostini(|p| p == "/opt/google/cros-containers", none));
+        assert!(looks_like_crostini(|_| false, |k| (k == "SOMMELIER_VERSION").then(|| "0.20".into())));
+    }
+
+    #[test]
+    fn an_ordinary_desktop_is_not_crostini() {
+        assert!(!looks_like_crostini(|_| false, |_| None));
+        // An empty variable is not a fingerprint.
+        assert!(!looks_like_crostini(|_| false, |k| (k == "SOMMELIER_VERSION").then(String::new)));
+        // Other ChromeOS-adjacent paths don't count on their own.
+        assert!(!looks_like_crostini(|p| p == "/opt/google/chrome", |_| None));
     }
 
     #[cfg(target_os = "linux")]

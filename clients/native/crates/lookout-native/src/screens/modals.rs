@@ -300,6 +300,9 @@ pub struct CaptureErrorDialog {
     pub error: String,
     pub fallback_title: Option<String>,
     pub can_retry: bool,
+    /// This session in Lookout's web recorder, offered when capture can't
+    /// work on this machine at all (ChromeOS's Linux environment).
+    web_recorder_url: Option<String>,
     env: Option<CaptureEnvironment>,
     probed: bool,
     copied_command: bool,
@@ -313,7 +316,14 @@ impl CaptureErrorDialog {
     pub fn new(error: String, fallback_title: Option<String>, can_retry: bool, cx: &mut Context<Self>) -> Self {
         let fut = crate::app::tokio(cx, async { lookout_core::capture_diagnostics::capture_environment().await });
         cx.spawn(async move |this, cx| {
-            let env = fut.await;
+            #[allow(unused_mut)]
+            let mut env = fut.await;
+            // Debug builds can pretend to be ChromeOS's Linux environment,
+            // to see this dialog without a Chromebook.
+            #[cfg(debug_assertions)]
+            if std::env::var("LOOKOUT_DEV_CROSTINI").as_deref() == Ok("1") {
+                env.chromeos = Some(true);
+            }
             this.update(cx, |d, cx| {
                 d.env = Some(env);
                 d.probed = true;
@@ -326,12 +336,20 @@ impl CaptureErrorDialog {
             error,
             fallback_title,
             can_retry,
+            web_recorder_url: None,
             env: None,
             probed: false,
             copied_command: false,
             copied_report: false,
             details_open: false,
         }
+    }
+
+    /// The session this error belongs to, so the dialog can offer to record
+    /// it in the browser when the desktop can't.
+    pub fn with_session(mut self, token: &str, api_base: &str) -> Self {
+        self.web_recorder_url = Some(diagnosis::web_recorder_url(api_base, token));
+        self
     }
 
     fn diagnosis(&self) -> Option<Diagnosis> {
@@ -404,7 +422,7 @@ impl Render for CaptureErrorDialog {
                         .ts_lh(14.0, 1.5)
                         .text_color(t.text_primary)
                         .child(div().w(px(12.0)).flex_none().text_right().child(format!("{}.", i + 1)))
-                        .child(div().flex_1().child(step.clone())),
+                        .child(div().flex_1().min_w(px(0.0)).child(step.clone())),
                 );
             }
             col = col.child(ol);
@@ -467,12 +485,23 @@ impl Render for CaptureErrorDialog {
                 }),
         );
         let report = diagnosis::build_report(&self.error, self.env.as_ref(), d.as_ref());
+        // Retrying can't help where capture is impossible; the browser can.
+        let browser = self.web_recorder_url.clone().filter(|_| d.as_ref().is_some_and(|d| d.record_in_browser));
+        let retry = self.can_retry && browser.is_none();
         let (e_retry, e_copy, e_close) = (e.clone(), e.clone(), e);
         col.child(
             div()
                 .flex()
                 .gap(px(8.0))
-                .when(self.can_retry, |dd| {
+                .when_some(browser, |dd, url| {
+                    dd.child(
+                        Button::new("cap-browser", "Record in Chrome")
+                            .size(BtnSize::Md)
+                            .flex_1()
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
+                .when(retry, |dd| {
                     dd.child(
                         Button::new("cap-retry", "Try again")
                             .size(BtnSize::Md)

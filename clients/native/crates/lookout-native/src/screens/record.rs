@@ -76,7 +76,8 @@ impl RecordPage {
             PickerEvent::Submit(sel) => this.start_recorder(sel.clone(), window, cx),
             PickerEvent::CaptureError { error, detecting } => {
                 let title = if *detecting { "Couldn't detect your displays" } else { "Couldn't start the capture" };
-                let d = cx.new(|cx| CaptureErrorDialog::new(error.clone(), Some(title.into()), true, cx));
+                let (token, base) = (this.token.clone(), api_base(cx));
+                let d = cx.new(|cx| CaptureErrorDialog::new(error.clone(), Some(title.into()), true, cx).with_session(&token, &base));
                 let picker = this.picker.clone();
                 this._subs.push(cx.subscribe(&d, move |this, _, ev: &CaptureErrorEvent, cx| {
                     match ev {

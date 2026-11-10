@@ -10,6 +10,10 @@ pub struct Diagnosis {
     pub summary: String,
     pub steps: Vec<String>,
     pub command: Option<String>,
+    /// Capture can't work on this machine at all, and the way out is to
+    /// record the same session in the browser instead. The dialog turns this
+    /// into a button that opens Lookout's web recorder.
+    pub record_in_browser: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -143,6 +147,9 @@ fn backend_missing(raw: &str) -> bool {
             "Failed to select sources",
             "Failed to start screencast",
             "Failed to create screencast session",
+            // ashpd's PortalNotFound: the portal is running but nothing
+            // implements the interface we asked for.
+            "A portal frontend implementing",
         ],
     )
 }
@@ -173,9 +180,13 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
                     "Quit and reopen Lookout — macOS only applies the change on relaunch.".into(),
                 ],
                 command: None,
+                record_in_browser: false,
             });
         }
         return None;
+    }
+    if env.and_then(|e| e.chromeos) == Some(true) {
+        return Some(chromeos());
     }
     let portal_installed = env.and_then(|e| e.portal_installed);
     if portal_installed == Some(false) || (portal_installed != Some(true) && portal_missing(raw) && !backend_missing(raw)) {
@@ -206,23 +217,34 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
             summary: "Wayland only lets an app record what you explicitly hand it, through a system component called the XDG desktop portal. It isn't installed here, so there's nothing to ask permission with.".into(),
             steps,
             command,
+            record_in_browser: false,
         });
     }
     if env.and_then(|e| e.screencast_available) == Some(false) || backend_missing(raw) {
         let (steps, command) = backend_steps(env);
         let known = backend_for(env);
         let backends = env.map(|e| e.portal_backends.clone()).unwrap_or_default();
+        // A desktop we couldn't place (`X-Generic`, a bare window manager)
+        // gets the full menu of backends; say why, or the list reads as if
+        // we hadn't looked.
+        let unplaced = match env.and_then(|e| e.desktop.as_deref()).map(str::trim).filter(|d| !d.is_empty()) {
+            Some(desktop) if known.is_none() => {
+                format!(" Your desktop calls itself “{desktop}”, which doesn't say which backend it needs.")
+            }
+            _ => String::new(),
+        };
         return Some(Diagnosis {
             title: match known {
                 Some((_, label)) => format!("No screen-sharing backend for {label}"),
                 None => "No screen-sharing backend installed".into(),
             },
             summary: format!(
-                "The desktop portal is running, but nothing on this system implements screen sharing for it. The portal itself is just a front door — the backend that matches your desktop does the actual capturing.{}",
+                "The desktop portal is running, but nothing on this system implements screen sharing for it. The portal itself is just a front door — the backend that matches your desktop does the actual capturing.{}{unplaced}",
                 if backends.is_empty() { String::new() } else { format!(" Installed backends: {}.", backends.join(", ")) }
             ),
             steps,
             command,
+            record_in_browser: false,
         });
     }
     if env.and_then(|e| e.pipewire_running) == Some(false) {
@@ -235,6 +257,7 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
                 "If the command isn't found, install the `pipewire` package first.".into(),
             ],
             command: Some("systemctl --user enable --now pipewire pipewire-pulse".into()),
+            record_in_browser: false,
         });
     }
     if env.and_then(|e| e.pipewire_gst_element) == Some(false) || gst_missing(raw) {
@@ -259,6 +282,7 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
                 "Try casting again.".into(),
             ],
             command,
+            record_in_browser: false,
         });
     }
     if no_frames(raw) {
@@ -271,6 +295,7 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
                 "If it keeps happening, capture a whole screen instead of a single window.".into(),
             ],
             command: None,
+            record_in_browser: false,
         });
     }
     if x11_enumeration(raw) && env.and_then(|e| e.session_type.clone()).unwrap_or_default().eq_ignore_ascii_case("wayland") {
@@ -279,9 +304,34 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
             summary: "Wayland deliberately hides the list of windows and monitors from apps. Use the Cast tab, which asks your desktop for permission and lets you choose the source there.".into(),
             steps: vec!["Switch to the Cast tab.".into(), "Choose the screen or window you want to record.".into()],
             command: None,
+            record_in_browser: false,
         });
     }
     None
+}
+
+/// ChromeOS's Linux environment (Crostini). The container's compositor only
+/// shows its own windows to ChromeOS, and nothing inside implements screen
+/// sharing, so no package or setting fixes this; Chrome on the same machine
+/// records the screen fine through `getDisplayMedia`.
+fn chromeos() -> Diagnosis {
+    Diagnosis {
+        title: "Linux apps can't record on ChromeOS".into(),
+        summary: "Lookout is running in ChromeOS's Linux environment, a sealed-off container that can't see your Chromebook's screen. No setting or package changes that. Chrome can record the screen, though, and Lookout's web recorder runs right in it.".into(),
+        steps: vec![
+            "Choose Record in Chrome below. It opens this session in Lookout's web recorder.".into(),
+            "Pick This browser, then Entire screen when Chrome asks what to share.".into(),
+            "Keep that tab open while you record.".into(),
+        ],
+        command: None,
+        record_in_browser: true,
+    }
+}
+
+/// The hosted recorder for a session, the same URL the server hands
+/// programs as `sessionUrl`.
+pub fn web_recorder_url(api_base: &str, token: &str) -> String {
+    format!("{}/session?token={token}", api_base.trim_end_matches('/'))
 }
 
 pub fn build_report(raw: &str, env: Option<&CaptureEnvironment>, d: Option<&Diagnosis>) -> String {
@@ -313,6 +363,7 @@ pub fn build_report(raw: &str, env: Option<&CaptureEnvironment>, d: Option<&Diag
             "portal backends: {}",
             if env.portal_backends.is_empty() { "none found".into() } else { env.portal_backends.join(", ") }
         ));
+        lines.push(format!("chromeos linux: {}", yn(env.chromeos)));
         lines.push(format!("pipewire running: {}", yn(env.pipewire_running)));
         lines.push(format!("pipewiresrc element: {}", yn(env.pipewire_gst_element)));
         lines.push(format!(
@@ -323,4 +374,115 @@ pub fn build_report(raw: &str, env: Option<&CaptureEnvironment>, d: Option<&Diag
     }
     lines.push(crate::logbuf::report(raw));
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What ashpd says when the portal is up but nothing implements
+    /// ScreenCast (issue #212, ChromeOS's Linux; also any desktop with only
+    /// the gtk backend).
+    const PORTAL_NOT_FOUND: &str = "Failed to connect to screencast portal: A portal frontend implementing `org.freedesktop.portal.ScreenCast` was not found";
+
+    fn linux(f: impl FnOnce(&mut CaptureEnvironment)) -> CaptureEnvironment {
+        let mut env = CaptureEnvironment { os: "linux".into(), ..Default::default() };
+        f(&mut env);
+        env
+    }
+
+    #[test]
+    fn portal_not_found_reads_as_a_missing_backend() {
+        assert!(backend_missing(PORTAL_NOT_FOUND));
+        // The message also carries "Failed to connect to screencast portal",
+        // which on its own would read as no portal at all; the backend match
+        // has to win (see the next test).
+        assert!(portal_missing(PORTAL_NOT_FOUND));
+    }
+
+    #[test]
+    fn portal_not_found_is_diagnosed_even_before_the_probe_answers() {
+        let d = diagnose(PORTAL_NOT_FOUND, None).expect("diagnosis");
+        assert_eq!(d.title, "No screen-sharing backend installed");
+        assert!(!d.record_in_browser);
+    }
+
+    #[test]
+    fn chromeos_linux_points_at_the_browser_whatever_the_error() {
+        let env = linux(|e| {
+            e.chromeos = Some(true);
+            e.desktop = Some("X-Generic".into());
+            e.portal_installed = Some(true);
+            e.screencast_available = Some(false);
+            e.portal_backends = vec!["gtk".into()];
+            e.distro_id = Some("debian".into());
+        });
+        for raw in [PORTAL_NOT_FOUND, "no element \"pipewiresrc\"", "something nobody has seen before"] {
+            let d = diagnose(raw, Some(&env)).expect("diagnosis");
+            assert_eq!(d.title, "Linux apps can't record on ChromeOS", "{raw}");
+            assert!(d.record_in_browser);
+            // Nothing to install: a command here would send people chasing
+            // packages that can't help.
+            assert_eq!(d.command, None);
+        }
+    }
+
+    #[test]
+    fn x_generic_without_a_backend_says_why_it_lists_them_all() {
+        let env = linux(|e| {
+            e.chromeos = Some(false);
+            e.desktop = Some("X-Generic".into());
+            e.portal_installed = Some(true);
+            e.screencast_available = Some(false);
+            e.portal_backends = vec!["gtk".into()];
+            e.distro_id = Some("debian".into());
+        });
+        let d = diagnose(PORTAL_NOT_FOUND, Some(&env)).expect("diagnosis");
+        assert_eq!(d.title, "No screen-sharing backend installed");
+        assert!(d.summary.contains("Installed backends: gtk."), "{}", d.summary);
+        assert!(d.summary.contains("“X-Generic”"), "{}", d.summary);
+        assert_eq!(d.steps[0], BACKEND_MENU);
+        assert!(!d.record_in_browser);
+    }
+
+    #[test]
+    fn a_known_desktop_without_a_backend_is_named_and_not_called_unplaced() {
+        let env = linux(|e| {
+            e.desktop = Some("GNOME".into());
+            e.portal_installed = Some(true);
+            e.screencast_available = Some(false);
+            e.distro_id = Some("fedora".into());
+        });
+        let d = diagnose(PORTAL_NOT_FOUND, Some(&env)).expect("diagnosis");
+        assert_eq!(d.title, "No screen-sharing backend for GNOME");
+        assert!(!d.summary.contains("calls itself"), "{}", d.summary);
+        assert_eq!(d.command.as_deref(), Some("sudo dnf install xdg-desktop-portal-gnome"));
+    }
+
+    #[test]
+    fn the_probe_alone_is_enough_for_a_missing_backend() {
+        let env = linux(|e| {
+            e.portal_installed = Some(true);
+            e.screencast_available = Some(false);
+        });
+        let d = diagnose("Failed to do something opaque", Some(&env)).expect("diagnosis");
+        assert_eq!(d.title, "No screen-sharing backend installed");
+    }
+
+    #[test]
+    fn web_recorder_url_matches_the_servers_session_url() {
+        let token = "4a55606b76818c97a2adb8c3ced9e4effa05101b26313c47525d68737e89949f";
+        assert_eq!(
+            web_recorder_url("https://lookout.hackclub.com", token),
+            format!("https://lookout.hackclub.com/session?token={token}")
+        );
+        assert_eq!(web_recorder_url("http://127.0.0.1:8797/", "t"), "http://127.0.0.1:8797/session?token=t");
+    }
+
+    #[test]
+    fn the_report_says_whether_this_is_chromeos() {
+        let env = linux(|e| e.chromeos = Some(true));
+        let report = build_report(PORTAL_NOT_FOUND, Some(&env), None);
+        assert!(report.contains("chromeos linux: yes"), "{report}");
+    }
 }

@@ -232,7 +232,10 @@ impl RecorderView {
     }
 
     fn show_capture_detail(&mut self, error: String, cx: &mut Context<Self>) {
-        let d = cx.new(|cx| CaptureErrorDialog::new(error, Some("The recording hit a capture error".into()), false, cx));
+        let (token, base) = (self.token.clone(), api_base(cx));
+        let d = cx.new(|cx| {
+            CaptureErrorDialog::new(error, Some("The recording hit a capture error".into()), false, cx).with_session(&token, &base)
+        });
         self._subs.push(cx.subscribe(&d, |this, _, ev: &CaptureErrorEvent, cx| {
             if let CaptureErrorEvent::Dismiss = ev {
                 this.capture_detail = None;
