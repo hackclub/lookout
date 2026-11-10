@@ -60,7 +60,10 @@ fn mode_for(args: &[String]) -> Mode {
     if has_flag(args, "--uninstall") {
         return if has_flag(args, "/S") { Mode::SilentUninstall { report } } else { Mode::Uninstall { ops: Ops::Real } };
     }
-    if has_flag(args, "/S") {
+    // `/P` is NSIS "passive": what the Tauri app up to 0.3.13 passes when it
+    // updates (`/P /R /UPDATE /ARGS`; 0.3.14 switched to `/S`). Either way
+    // nobody is there to click through an installer window.
+    if has_flag(args, "/S") || has_flag(args, "/P") {
         // NSIS: /D= is the rest of the command line and comes last.
         let dir = args.iter().position(|a| a.len() >= 3 && a[..3].eq_ignore_ascii_case("/D=")).map(|i| {
             let mut d = args[i][3..].to_string();
@@ -174,6 +177,23 @@ mod tests {
         match mode_for(&args(&["/S", "/UPDATE", "/R"])) {
             Mode::Silent { relaunch: true, dir: None, report: None } => {}
             m => panic!("{m:?}"),
+        }
+    }
+
+    /// What tauri-plugin-updater 2.10 runs: 0.3.14 (installMode "quiet") and
+    /// every earlier release (installMode "passive"), with the app's own
+    /// launch arguments after /ARGS.
+    #[test]
+    fn tauri_updater_flags_mean_a_silent_install() {
+        for line in [
+            &["/S", "/R", "/UPDATE", "/ARGS"][..],
+            &["/P", "/R", "/UPDATE", "/ARGS"][..],
+            &["/P", "/R", "/UPDATE", "/ARGS", "\"lookout://session/?token=abc\""][..],
+        ] {
+            match mode_for(&args(line)) {
+                Mode::Silent { relaunch: true, dir: None, report: None } => {}
+                m => panic!("{line:?} -> {m:?}"),
+            }
         }
     }
 
