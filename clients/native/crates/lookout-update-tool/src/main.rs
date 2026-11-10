@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Native artifacts are found by name: `Lookout-native_<version>_<platform><ext>` with
-//! `darwin-aarch64` / `darwin-x86_64` → `.app.tar.gz`, `windows-x86_64` → `-setup.exe`,
+//! `darwin-aarch64` / `darwin-x86_64` → `.app.tar.gz`, `windows-x86_64` / `windows-aarch64` → `-setup.exe`,
 //! `linux-x86_64` → `.AppImage`. Patches are `zstd --patch-from` deltas between *payloads*
 //! (the tar inside an `.app.tar.gz`; other files as they are) of the newest `--max-patches`
 //! earlier versions found in the `--previous` dirs.
@@ -36,6 +36,7 @@ const PLATFORMS: &[(&str, &str, Format)] = &[
     ("darwin-aarch64", ".app.tar.gz", Format::AppTarGz),
     ("darwin-x86_64", ".app.tar.gz", Format::AppTarGz),
     ("windows-x86_64", "-setup.exe", Format::Nsis),
+    ("windows-aarch64", "-setup.exe", Format::Nsis),
     ("linux-x86_64", ".AppImage", Format::Appimage),
 ];
 

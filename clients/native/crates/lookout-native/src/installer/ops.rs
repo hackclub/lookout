@@ -298,30 +298,47 @@ fn install_real(dir: &Path, progress: &dyn Fn(Progress)) -> Result<PathBuf, Stri
     // Copy ourselves in, unless this already is the installed copy.
     if !(target.exists() && same_file(&me, &target)) {
         progress(Progress { fraction: 0.02, step: format!("Output folder: {}", dir.display()) });
-        make_room(&target)?;
-        let tmp = dir.join("lookout.exe.partial");
-        let mut src = std::fs::File::open(&me).map_err(|e| format!("Couldn't read the installer: {e}"))?;
-        let total = src.metadata().map(|m| m.len()).unwrap_or(1).max(1);
-        let mut dst = std::fs::File::create(&tmp).map_err(|e| format!("Couldn't write to {}: {e}", dir.display()))?;
-        let mut buf = vec![0u8; 1 << 20];
-        let mut done = 0u64;
-        loop {
-            let n = src.read(&mut buf).map_err(|e| format!("Couldn't read the installer: {e}"))?;
-            if n == 0 {
-                break;
+        let aside = make_room(&target)?;
+        // If anything below fails, put the app that was there back, so a
+        // failed update never leaves the user with no Lookout at all.
+        let restore = |e: String| {
+            if let Some(old) = &aside {
+                if !target.exists() {
+                    let _ = std::fs::rename(old, &target);
+                }
             }
-            dst.write_all(&buf[..n]).map_err(|e| format!("Couldn't write Lookout: {e}"))?;
-            done += n as u64;
-            progress(Progress {
-                fraction: 0.05 + 0.75 * done as f32 / total as f32,
-                step: format!("Extract: {EXE}... {}%", done * 100 / total),
-            });
-        }
-        dst.sync_all().map_err(|e| format!("Couldn't write Lookout: {e}"))?;
-        drop(dst);
-        std::fs::rename(&tmp, &target).map_err(|e| {
+            e
+        };
+        let tmp = dir.join("lookout.exe.partial");
+        let copied = (|| -> Result<(), String> {
+            let mut src = std::fs::File::open(&me).map_err(|e| format!("Couldn't read the installer: {e}"))?;
+            let total = src.metadata().map(|m| m.len()).unwrap_or(1).max(1);
+            let mut dst = std::fs::File::create(&tmp).map_err(|e| format!("Couldn't write to {}: {e}", dir.display()))?;
+            let mut buf = vec![0u8; 1 << 20];
+            let mut done = 0u64;
+            loop {
+                let n = src.read(&mut buf).map_err(|e| format!("Couldn't read the installer: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                dst.write_all(&buf[..n]).map_err(|e| format!("Couldn't write Lookout: {e}"))?;
+                done += n as u64;
+                progress(Progress {
+                    fraction: 0.05 + 0.75 * done as f32 / total as f32,
+                    step: format!("Extract: {EXE}... {}%", done * 100 / total),
+                });
+            }
+            dst.sync_all().map_err(|e| format!("Couldn't write Lookout: {e}"))?;
+            drop(dst);
+            std::fs::rename(&tmp, &target).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Couldn't replace {}: {e}", target.display())
+            })?;
+            Ok(())
+        })();
+        copied.map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("Couldn't replace {}: {e}", target.display())
+            restore(e)
         })?;
     }
 
@@ -366,19 +383,22 @@ fn install_real(_: &Path, _: &dyn Fn(Progress)) -> Result<PathBuf, String> {
 /// exe) so the new one can go in while the old process finishes.
 /// Never kills by name: this installer may itself be called lookout.exe.
 #[cfg(windows)]
-fn make_room(target: &Path) -> Result<(), String> {
+/// Waits for `target` to be writable (the app that's updating quits right
+/// after starting us); if it stays locked, renames it aside and returns where.
+fn make_room(target: &Path) -> Result<Option<PathBuf>, String> {
     if !target.exists() {
-        return Ok(());
+        return Ok(None);
     }
     for _ in 0..40 {
         if std::fs::OpenOptions::new().write(true).open(target).is_ok() {
-            return Ok(());
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let aside = target.with_file_name(format!("lookout.old-{stamp}.exe"));
-    std::fs::rename(target, &aside).map_err(|e| format!("Lookout is still running and couldn't be replaced ({e}). Quit it and try again."))
+    std::fs::rename(target, &aside).map_err(|e| format!("Lookout is still running and couldn't be replaced ({e}). Quit it and try again."))?;
+    Ok(Some(aside))
 }
 
 #[cfg(windows)]

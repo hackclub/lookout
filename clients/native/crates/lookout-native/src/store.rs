@@ -173,10 +173,13 @@ impl Persisted {
             .unwrap_or_default();
         if !p.imported_tauri {
             match crate::store::import::from_tauri(&mut p) {
-                Ok(()) => {
+                Ok(true) => {
                     p.imported_tauri = true;
                     p.save();
                 }
+                // Nothing found (a fresh install, or storage this build can't
+                // see yet): look again next launch rather than giving up for good.
+                Ok(false) => {}
                 Err(e) => log::warn!("[store] legacy import will retry on next launch: {e}"),
             }
         }
@@ -319,10 +322,12 @@ pub mod secrets {
 
 // ── One-time import from the Tauri app's webview storage ────────────────
 
+mod leveldb;
 mod webkit;
 
 pub mod import {
     use super::*;
+    use std::path::Path;
 
     /// Copy the user's sessions and settings out of the Tauri webview's
     /// localStorage, so switching to the native app keeps the gallery,
@@ -330,46 +335,73 @@ pub mod import {
     /// WebKit (macOS, Linux) keeps localStorage in a SQLite `ItemTable` with
     /// UTF-16LE values; WebView2 (Windows) uses LevelDB, which we scan for
     /// the JSON values directly.
-    pub fn from_tauri(p: &mut Persisted) -> Result<(), String> {
+    pub fn from_tauri(p: &mut Persisted) -> Result<bool, String> {
         let items = read_webview_local_storage()?;
         if items.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         log::info!("[store] importing {} localStorage keys from the Tauri app", items.len());
+        merge(p, &items);
+        Ok(true)
+    }
+
+    /// Merges the Tauri app's values into `p` without overwriting anything
+    /// native already has: sign-ins are added to (never replaced), and the
+    /// rest only fills fields that are still empty.
+    fn merge(p: &mut Persisted, items: &HashMap<String, String>) {
         let get = |k: &str| items.get(k).cloned();
         if let Some(v) = get("lookout-tokens").and_then(|v| serde_json::from_str::<Vec<TokenEntry>>(&v).ok()) {
-            p.tokens = v;
+            for t in v {
+                if !p.tokens.iter().any(|have| have.token == t.token) {
+                    p.tokens.push(t);
+                }
+            }
         }
         if let Some(v) = get("lookout:gallery-cache:v2")
             .and_then(|v| serde_json::from_str::<HashMap<String, CachedSummary>>(&v).ok())
         {
-            p.gallery_cache = v;
+            for (k, s) in v {
+                p.gallery_cache.entry(k).or_insert(s);
+            }
         }
-        if let Some(v) = get("lookout-api-base") {
-            p.api_base = Some(v);
+        if p.api_base.is_none() {
+            p.api_base = get("lookout-api-base").filter(|v| !v.is_empty());
         }
-        if let Some(v) = get("lookout-blacklisted-apps").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.blacklisted_apps = v;
+        if p.blacklisted_apps.is_empty() {
+            if let Some(v) = get("lookout-blacklisted-apps").and_then(|v| serde_json::from_str(&v).ok()) {
+                p.blacklisted_apps = v;
+            }
         }
-        if let Some(v) = get("lookout-last-monitor-selection").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.last_monitor_selection = v;
+        if p.last_monitor_selection.is_empty() {
+            if let Some(v) = get("lookout-last-monitor-selection").and_then(|v| serde_json::from_str(&v).ok()) {
+                p.last_monitor_selection = v;
+            }
         }
-        p.perm_screen = get("lookout-perm-screen").as_deref() == Some("1");
-        p.perm_camera = get("lookout-perm-camera").as_deref() == Some("1");
-        if let Some(v) = get("lookout-program-links").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.program_links = v;
+        p.perm_screen |= get("lookout-perm-screen").as_deref() == Some("1");
+        p.perm_camera |= get("lookout-perm-camera").as_deref() == Some("1");
+        if let Some(v) = get("lookout-program-links").and_then(|v| serde_json::from_str::<HashMap<String, ProgramLink>>(&v).ok()) {
+            for (k, l) in v {
+                p.program_links.entry(k).or_insert(l);
+            }
         }
-        if let Some(v) = get("lookout-panel-state").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.panel_state = v;
+        if p.panel_state.is_empty() {
+            if let Some(v) = get("lookout-panel-state").and_then(|v| serde_json::from_str(&v).ok()) {
+                p.panel_state = v;
+            }
         }
-        if let Some(v) = get("lookout-deeplink-sessions").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.deeplink_sessions = v;
+        if let Some(v) = get("lookout-deeplink-sessions").and_then(|v| serde_json::from_str::<HashMap<String, String>>(&v).ok()) {
+            for (k, s) in v {
+                p.deeplink_sessions.entry(k).or_insert(s);
+            }
         }
-        if let Some(v) = get("lookout-tip-moments").and_then(|v| serde_json::from_str(&v).ok()) {
-            p.tip_moments = v;
+        if p.tip_moments.is_empty() {
+            if let Some(v) = get("lookout-tip-moments").and_then(|v| serde_json::from_str(&v).ok()) {
+                p.tip_moments = v;
+            }
         }
-        p.update_nag_dismissed = get("lookout_update_nag_dismissed");
-        Ok(())
+        if p.update_nag_dismissed.is_none() {
+            p.update_nag_dismissed = get("lookout_update_nag_dismissed");
+        }
     }
 
     fn candidate_dirs() -> Vec<PathBuf> {
@@ -381,8 +413,8 @@ pub mod import {
         }
         if cfg!(target_os = "macos") {
             if let Some(h) = dirs::home_dir() {
-                out.push(h.join("Library/WebKit").join(APP_ID).join("WebsiteData/LocalStorage"));
-                out.push(h.join("Library/WebKit").join("lookout").join("WebsiteData/LocalStorage"));
+                out.push(h.join("Library/WebKit").join(APP_ID).join("WebsiteData"));
+                out.push(h.join("Library/WebKit").join("lookout").join("WebsiteData"));
             }
         }
         if cfg!(target_os = "windows") {
@@ -396,23 +428,50 @@ pub mod import {
     fn read_webview_local_storage() -> Result<HashMap<String, String>, String> {
         let mut out = HashMap::new();
         for dir in candidate_dirs() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("{}: {e}", dir.display())),
-            };
-            for e in entries {
-                let e = e.map_err(|e| e.to_string())?;
-                let path = e.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.ends_with(".localstorage") {
-                    read_sqlite_items(&path, &mut out)?;
-                } else if name.ends_with(".ldb") || name.ends_with(".log") {
-                    scan_leveldb(&path, &mut out)?;
-                }
-            }
+            scan_dir(&dir, 0, &mut out)?;
         }
         Ok(out)
+    }
+
+    /// Walks `dir` for localStorage databases. Recursive because WebKit's
+    /// layout moved: older versions keep `WebsiteData/LocalStorage/<origin>.localstorage`,
+    /// newer macOS keeps `WebsiteData/Default/<salted hash>/<salted hash>/LocalStorage/localstorage.sqlite3`.
+    fn scan_dir(dir: &Path, depth: usize, out: &mut HashMap<String, String>) -> Result<(), String> {
+        const MAX_DEPTH: usize = 6;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        };
+        if dir.ends_with("leveldb") {
+            match leveldb::read(dir, KEYS) {
+                Ok(found) => {
+                    out.extend(found);
+                    return Ok(());
+                }
+                // Fall back to scanning the files for the values.
+                Err(e) => log::warn!("[store] couldn't open {} as LevelDB ({e}); scanning it", dir.display()),
+            }
+        }
+        let mut entries: Vec<_> = entries.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+        // Later reads win, so a dev server's storage (localhost:1420) never
+        // shadows the shipped app's (tauri://localhost / tauri.localhost).
+        entries.sort_by_key(|e| e.file_name().to_string_lossy().contains("tauri"));
+        for e in entries {
+            let path = e.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if depth < MAX_DEPTH {
+                    scan_dir(&path, depth + 1, out)?;
+                }
+            } else if name.ends_with(".localstorage") || name == "localstorage.sqlite3" {
+                read_sqlite_items(&path, out)?;
+            } else if (name.ends_with(".ldb") || name.ends_with(".log")) && dir.ends_with("leveldb") {
+                scan_leveldb(&path, out)?;
+            }
+        }
+        Ok(())
     }
 
     fn read_sqlite_items(path: &PathBuf, out: &mut HashMap<String, String>) -> Result<(), String> {
@@ -462,4 +521,73 @@ pub mod import {
         "lookout-tip-moments",
         "lookout_update_nag_dismissed",
     ];
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn webkit_db(path: &Path, key: &str, value: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let db = rusqlite::Connection::open(path).unwrap();
+            db.execute_batch("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL);").unwrap();
+            let bytes: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            db.execute("INSERT INTO ItemTable VALUES (?1, ?2)", rusqlite::params![key, bytes]).unwrap();
+        }
+
+        #[test]
+        fn finds_old_and_new_webkit_layouts_and_webview2_leveldb() {
+            let root = std::env::temp_dir().join(format!("lookout-import-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            // Older WebKit (and WebKitGTK with an explicit localstorage dir).
+            webkit_db(&root.join("old/LocalStorage/tauri_localhost_0.localstorage"), "lookout-api-base", "https://old.example");
+            // Newer macOS WebKit: salted origin hashes under Default/.
+            webkit_db(
+                &root.join("new/Default/abc123/abc123/LocalStorage/localstorage.sqlite3"),
+                "lookout-tokens",
+                r#"[{"token":"t","addedAt":"2026-01-01T00:00:00Z"}]"#,
+            );
+            // WebView2: LevelDB log with a latin1-prefixed value.
+            let ldb = root.join("EBWebView/Default/Local Storage/leveldb");
+            fs::create_dir_all(&ldb).unwrap();
+            let mut log = b"_tauri://localhost\x00\x01lookout-perm-screen\x011".to_vec();
+            log.push(0);
+            fs::write(ldb.join("000003.log"), &log).unwrap();
+            // A stray .log outside a leveldb folder is ignored.
+            fs::write(root.join("new/Default/debug.log"), b"lookout-perm-camera\x011").unwrap();
+
+            let mut out = HashMap::new();
+            for dir in ["old", "new", "EBWebView/Default/Local Storage/leveldb"] {
+                scan_dir(&root.join(dir), 0, &mut out).unwrap();
+            }
+            let _ = fs::remove_dir_all(&root);
+            assert_eq!(out.get("lookout-api-base").map(String::as_str), Some("https://old.example"));
+            assert!(out.get("lookout-tokens").is_some_and(|t| t.contains(r#""token":"t""#)));
+            assert_eq!(out.get("lookout-perm-screen").map(String::as_str), Some("1"));
+            assert!(!out.contains_key("lookout-perm-camera"));
+        }
+
+        #[test]
+        fn merge_adds_sign_ins_and_never_overwrites() {
+            let mut p = Persisted {
+                tokens: vec![TokenEntry { token: "a".into(), added_at: "native".into(), label: None, archived: false }],
+                api_base: Some("https://chosen-in-native".into()),
+                ..Default::default()
+            };
+            let items: HashMap<String, String> = [
+                ("lookout-tokens", r#"[{"token":"a","addedAt":"tauri"},{"token":"b","addedAt":"tauri"}]"#),
+                ("lookout-api-base", "https://from-tauri"),
+                ("lookout-blacklisted-apps", r#"["Slack"]"#),
+                ("lookout-perm-screen", "1"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            merge(&mut p, &items);
+            let tokens: Vec<_> = p.tokens.iter().map(|t| (t.token.as_str(), t.added_at.as_str())).collect();
+            assert_eq!(tokens, [("a", "native"), ("b", "tauri")]);
+            assert_eq!(p.api_base.as_deref(), Some("https://chosen-in-native"));
+            assert_eq!(p.blacklisted_apps, ["Slack"]);
+            assert!(p.perm_screen);
+        }
+    }
 }

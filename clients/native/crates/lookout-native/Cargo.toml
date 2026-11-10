@@ -46,6 +46,8 @@ sentry = { version = "0.49.5", default-features = false, features = ["backtrace"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tar = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Reads the Tauri app's WebView2 localStorage (LevelDB, snappy blocks) on first launch.
+rusty-leveldb = "4.0.2"
 
 [features]
 default = ["webview"]

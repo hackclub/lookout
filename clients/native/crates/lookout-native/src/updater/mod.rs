@@ -73,6 +73,8 @@ fn platform_key() -> &'static str {
         "native-darwin-aarch64"
     } else if cfg!(target_os = "macos") {
         "native-darwin-x86_64"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "native-windows-aarch64"
     } else if cfg!(target_os = "windows") {
         "native-windows-x86_64"
     } else {

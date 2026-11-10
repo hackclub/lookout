@@ -550,7 +550,12 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x86_64
-          # glibc 2.39 is the AppImage's floor, the same as the Tauri .deb's.
+          # Built on an Arm runner rather than cross-built, so the unit tests
+          # run on the real target too.
+          - platform: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            label: windows-aarch64
+          # glibc 2.39 is the packages' floor, the same as the Tauri .deb's.
           - platform: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             label: linux-x86_64
@@ -564,10 +569,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       # Build: GPUI (X11/Wayland/xkbcommon/fontconfig), wry (WebKitGTK 4.1),
-      # the recorder (GStreamer, PipeWire, xcap's xcb/gbm). Bundle: the
-      # GStreamer plugin packages, whose plugins appimage.sh copies into the
-      # AppImage, glib-networking (TLS for libsoup), and the GTK tools
-      # linuxdeploy-plugin-gtk runs.
+      # the recorder (GStreamer, PipeWire, xcap's xcb/gbm), and the deb/rpm/Arch
+      # packaging tools. No AppImage: it can't register the lookout:// handler
+      # (sign-in), so Linux ships only as packages (packaging/linux/appimage.sh
+      # is kept but unused).
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -673,14 +678,21 @@ jobs:
               -e "PKGFILE=$pkg" archlinux:latest bash /verify.sh
           fi
 
-      - name: Build AppImage (Linux)
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: clients/native/packaging/linux/appimage.sh --no-build --out clients/native/dist
+      # ring builds its aarch64-pc-windows-msvc code with clang, not cl.exe.
+      - name: Make sure clang is available (Windows Arm64)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: bash
+        run: |
+          if ! command -v clang >/dev/null; then
+            choco install llvm -y --no-progress
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          fi
+          clang --version || "/c/Program Files/LLVM/bin/clang" --version
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         working-directory: clients/native
-        run: cargo build --release -p lookout-native
+        run: cargo build --release -p lookout-native --target ${{ matrix.target }}
 
       # Same signer, account and preflight as the Tauri job above. sign.cmd
       # signs lookout.exe, which is also the installer (src/installer/).
@@ -727,18 +739,18 @@ jobs:
           # lookout.exe is its own installer (src/installer/): sign it and
           # ship it under the -setup.exe name that native-updates and the
           # in-app updater (which runs it with /S /UPDATE /R) key off.
-          exe=clients/native/target/release/lookout.exe
+          exe=clients/native/target/${{ matrix.target }}/release/lookout.exe
           if [ -n "${SIGN_CMD:-}" ]; then
             cmd //c "$SIGN_CMD" "$(cygpath -aw "$exe")"
           fi
-          cp "$exe" "clients/native/dist/Lookout-native_${version}_windows-x86_64-setup.exe"
+          cp "$exe" "clients/native/dist/Lookout-native_${version}_${{ matrix.label }}-setup.exe"
 
       - name: Verify the installer is signed (Windows)
         if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          "$SIGNTOOL" verify //pa //v clients/native/target/release/lookout.exe
+          "$SIGNTOOL" verify //pa //v clients/native/target/${{ matrix.target }}/release/lookout.exe
           for exe in clients/native/dist/Lookout-native_*-setup.exe; do
             "$SIGNTOOL" verify //pa //v "$exe"
           done
@@ -774,7 +786,7 @@ jobs:
           fi
           case "$RUNNER_OS" in
             macOS) files=(clients/native/target/${{ matrix.target }}/release/lookout.dSYM) ;;
-            Windows) files=(clients/native/target/release/lookout.exe clients/native/target/release/lookout.pdb) ;;
+            Windows) files=(clients/native/target/${{ matrix.target }}/release/lookout.exe clients/native/target/${{ matrix.target }}/release/lookout.pdb) ;;
             *) files=(clients/native/target/release/lookout) ;;
           esac
           npx --yes @sentry/cli@2 debug-files upload --include-sources --wait "${files[@]}"
@@ -785,7 +797,7 @@ jobs:
         with:
           name: pdb-native-${{ matrix.label }}
           if-no-files-found: warn
-          path: clients/native/target/release/*.pdb
+          path: clients/native/target/${{ matrix.target }}/release/*.pdb
 
   release:
     needs: [build, native-build]
@@ -944,7 +956,9 @@ jobs:
   #   Lookout-native_<version>_darwin-aarch64.app.tar.gz   (tar of Lookout.app/)
   #   Lookout-native_<version>_darwin-x86_64.app.tar.gz
   #   Lookout-native_<version>_windows-x86_64-setup.exe    (lookout.exe, its own installer)
-  #   Lookout-native_<version>_linux-x86_64.AppImage
+  #   Lookout-native_<version>_windows-aarch64-setup.exe
+  # Linux has no self-updating build (no AppImage): its packages update through
+  # the apt/rpm/Arch repositories, so update.json carries no linux entry.
   # Stable: update.json + artifacts + patches go on the tag's release (live
   # once it's published, via releases/latest/download/update.json).
   # Beta: everything also goes on the rolling `channel-beta` prerelease, live
@@ -1048,6 +1062,62 @@ jobs:
             --title "Lookout Native beta channel" \
             --notes "Rolling release the Lookout Native beta channel updates from (update.json). Not for direct download."
           publish beta "$REPO_URL/channel-beta" out-beta channel-beta
+
+      # Moves Tauri users onto Lookout Native. The Tauri updater reads latest.json,
+      # so pointing its macOS and Windows (x64, Arm64) entries at the native artifacts makes
+      # the Tauri app install native as an ordinary update. Both formats fit as is:
+      # - macOS: Tauri swaps in the Lookout.app inside the .app.tar.gz and relaunches
+      #   Contents/MacOS/lookout, which native has too (same bundle id).
+      # - Windows: Tauri runs the setup.exe with `/S /UPDATE /R /ARGS`, the flags the
+      #   native installer already takes. It installs to the same %LOCALAPPDATA%\Lookout
+      #   and the same Uninstall\Lookout registry key, replacing the Tauri install.
+      # First launch imports the Tauri app's localStorage (store.rs import::from_tauri).
+      # Signatures: the same minisign key, base64-wrapped the way Tauri expects.
+      # Stable tags only, and only when the NATIVE_TAKEOVER repo variable is 'true'.
+      - name: Point the Tauri updater (latest.json) at Lookout Native
+        if: >-
+          steps.native.outputs.present == 'true'
+          && vars.NATIVE_TAKEOVER == 'true'
+          && !contains(github.ref_name, '-')
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          TOOL=clients/native/target/release/lookout-update-tool
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
+
+          gh release download "$TAG" --pattern latest.json --dir takeover --clobber
+          cp takeover/latest.json takeover/latest.tauri.json
+
+          entry() { # tauri-key native-file
+            local f="native/$2"
+            if [ ! -f "$f" ]; then
+              echo "::error::$2 is missing, so $1 can't be moved to Lookout Native."
+              exit 1
+            fi
+            # gh release upload stores files under their base names.
+            "$TOOL" sign "$f"
+            "$TOOL" verify "$f"
+            jq --arg k "$1" --arg url "$BASE_URL/$2" --arg sig "$(base64 -w0 "$f.minisig")" \
+              '.platforms[$k] = {url: $url, signature: $sig}' \
+              takeover/latest.json > takeover/next.json
+            mv takeover/next.json takeover/latest.json
+          }
+
+          entry darwin-aarch64 "Lookout-native_${VERSION}_darwin-aarch64.app.tar.gz"
+          entry darwin-x86_64 "Lookout-native_${VERSION}_darwin-x86_64.app.tar.gz"
+          entry windows-x86_64 "Lookout-native_${VERSION}_windows-x86_64-setup.exe"
+          entry windows-aarch64 "Lookout-native_${VERSION}_windows-aarch64-setup.exe"
+          # Tauri builds look up darwin-<arch>, never darwin-universal.
+          jq 'del(.platforms["darwin-universal"])' takeover/latest.json > takeover/next.json
+          mv takeover/next.json takeover/latest.json
+
+          echo "latest.json now:"; cat takeover/latest.json
+          # Keep the Tauri-only manifest on the release too, to roll back by re-uploading it.
+          gh release upload "$TAG" takeover/latest.json takeover/latest.tauri.json --clobber
 
   packages:
     needs: release

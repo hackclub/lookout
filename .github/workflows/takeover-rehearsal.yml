@@ -1,0 +1,178 @@
+name: Takeover rehearsal
+
+# Proves the Tauri app (as shipped in v0.3.14) updates itself into Lookout
+# Native, the way release.yml's "Point the Tauri updater at Lookout Native"
+# step sets it up. Each runner:
+#   1. rebuilds v0.3.14 from its tag with only the updater config swapped for
+#      a local endpoint and a throwaway key (tauri build --config); the updater
+#      code is what users run (tauri-plugin-updater 2.10.0, pinned by Cargo.lock),
+#   2. signs the native build from a release.yml run with that key and serves it
+#      from a local latest.json,
+#   3. installs Tauri, signs in through a lookout:// link, lets it download the
+#      update, quits and relaunches (0.3.14 installs a parked update by itself),
+#   4. checks native replaced it, launched, and kept the sign-in.
+# See .github/scripts/takeover_rehearsal.py. Screenshots, logs, the WebView
+# storage layout and native-state.json are uploaded per platform.
+#
+# Needs a release.yml run with lookout-native-* artifacts (e.g. a manual run
+# with "native only"); by default the newest successful one on this branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_run_id:
+        description: "release.yml run to take the native builds from (blank: newest successful run on this branch)"
+        type: string
+        default: ""
+      tauri_ref:
+        description: "Tauri version to update from"
+        type: string
+        default: v0.3.14
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rehearse:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: darwin-aarch64
+            bundle: app
+          - platform: windows-latest
+            label: windows-x86_64
+            bundle: nsis
+          - platform: windows-11-arm
+            label: windows-aarch64
+            bundle: nsis
+    runs-on: ${{ matrix.platform }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Keep rehearsal crashes out of the lookout-native Sentry project.
+      LOOKOUT_SENTRY_DSN: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: cur
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tauri_ref || 'v0.3.14' }}
+          path: old
+
+      - name: Find the native build
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+          id="${{ inputs.native_run_id }}"
+          if [ -z "$id" ]; then
+            id=$(gh run list -R "$GITHUB_REPOSITORY" -w release.yml -b "$GITHUB_REF_NAME" --status success -L 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          [ -n "$id" ] || { echo "::error::No successful release.yml run on $GITHUB_REF_NAME; run it with 'native only' first."; exit 1; }
+          echo "Native builds from run $id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Download the native build
+        uses: actions/download-artifact@v8
+        with:
+          name: lookout-native-${{ matrix.label }}
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+          path: native
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: lts/*
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      # ring builds its aarch64-pc-windows-msvc code with clang, not cl.exe.
+      - name: Make sure clang is available (Windows Arm64)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: bash
+        run: |
+          if ! command -v clang >/dev/null; then
+            choco install llvm -y --no-progress
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            old/clients/desktop/src-tauri -> target
+            cur/clients/native -> target
+          shared-key: takeover-${{ matrix.label }}
+
+      - name: Build lookout-update-tool and a throwaway key
+        shell: bash
+        working-directory: cur/clients/native
+        run: |
+          set -euo pipefail
+          cargo build --release -p lookout-update-tool --locked
+          target/release/lookout-update-tool keygen --dir "$GITHUB_WORKSPACE/key"
+          ls "$GITHUB_WORKSPACE/key"
+
+      # Only the updater (endpoint, key, plain HTTP) and the bundle formats change.
+      - name: Build ${{ inputs.tauri_ref || 'v0.3.14' }} pointed at the local feed
+        shell: bash
+        working-directory: old
+        run: |
+          set -euo pipefail
+          python - <<'EOF'
+          import json, os
+          ws = os.environ["GITHUB_WORKSPACE"]
+          conf = {
+              "bundle": {"createUpdaterArtifacts": False, "targets": ["${{ matrix.bundle }}"]},
+              "plugins": {"updater": {
+                  "pubkey": open(f"{ws}/key/test.pub.b64").read().strip(),
+                  "endpoints": ["http://127.0.0.1:8765/latest.json"],
+                  "dangerousInsecureTransportProtocol": True,
+              }},
+          }
+          json.dump(conf, open("clients/desktop/src-tauri/rehearsal.conf.json", "w"), indent=2)
+          EOF
+          cat clients/desktop/src-tauri/rehearsal.conf.json
+          npm ci
+          npm run build -w packages/shared
+          npm run build -w clients/react
+          cd clients/desktop
+          npm run tauri build -- --config src-tauri/rehearsal.conf.json
+
+      - name: Rehearse the takeover
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle=old/clients/desktop/src-tauri/target/release/bundle
+          if [ "$RUNNER_OS" = Windows ]; then
+            tauri=$(ls "$bundle"/nsis/*-setup.exe | head -1)
+            native_file=$(ls native/Lookout-native_*_${{ matrix.label }}-setup.exe | head -1)
+            tool=cur/clients/native/target/release/lookout-update-tool.exe
+          else
+            tauri="$bundle/macos/Lookout.app"
+            native_file=$(ls native/Lookout-native_*_${{ matrix.label }}.app.tar.gz | head -1)
+            tool=cur/clients/native/target/release/lookout-update-tool
+          fi
+          python cur/.github/scripts/takeover_rehearsal.py \
+            --tauri "$tauri" --native "$native_file" --tool "$tool" \
+            --key-dir key --out rehearsal
+
+      - name: Upload what the rehearsal saw
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: takeover-rehearsal-${{ matrix.label }}
+          path: |
+            rehearsal/
+            !rehearsal/feed/
+          if-no-files-found: warn

@@ -105,11 +105,23 @@ pub fn run(mode: Mode) -> i32 {
                     ops::report_line(r, &ops::report_progress(&p));
                 }
             });
-            finish_silent(result.map(|exe| {
-                if relaunch {
-                    ops.launch(&exe);
+            if relaunch {
+                match &result {
+                    Ok(exe) => ops.launch(exe),
+                    // The updating app has already quit: bring back whatever is
+                    // installed (the install puts the old exe back on failure),
+                    // so a failed update never leaves Lookout closed. It retries
+                    // the update itself, a bounded number of times.
+                    Err(e) => {
+                        let old = dir.join(ops::EXE);
+                        log::error!("[installer] silent install failed: {e}; relaunching {}", old.display());
+                        if old.is_file() {
+                            ops.launch(&old);
+                        }
+                    }
                 }
-            }), report.as_deref())
+            }
+            finish_silent(result.map(|_| ()), report.as_deref())
         }
         Mode::SilentUninstall { report } => {
             let result = Ops::Real.uninstall(&|p| {
