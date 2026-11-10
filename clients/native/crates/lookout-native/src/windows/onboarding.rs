@@ -868,7 +868,7 @@ impl Onboarding {
             t,
             ms,
             (
-                "Click + and pick Lapse to start a\u{a0}timelapse.",
+                "Click + and pick a program to start a\u{a0}timelapse.",
                 "Lookout takes a screenshot every so often while you work. Pause any\u{a0}time.",
             ),
             self.arrive[i].get(),
