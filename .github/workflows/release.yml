@@ -1061,7 +1061,10 @@ jobs:
           gh release view channel-beta >/dev/null 2>&1 || gh release create channel-beta --prerelease \
             --title "Lookout Native beta channel" \
             --notes "Rolling release the Lookout Native beta channel updates from (update.json). Not for direct download."
-          publish beta "$REPO_URL/channel-beta" out-beta channel-beta
+          # Releases are immutable once published, so the rolling channel-beta
+          # release refuses new assets. Don't let that stop the stable release.
+          publish beta "$REPO_URL/channel-beta" out-beta channel-beta \
+            || echo "::warning::The beta channel (channel-beta) couldn't be updated: published releases are immutable here."
 
       # Moves Tauri users onto Lookout Native. The Tauri updater reads latest.json,
       # so pointing its macOS and Windows (x64, Arm64) entries at the native artifacts makes
@@ -1117,12 +1120,13 @@ jobs:
 
           echo "latest.json now:"; cat takeover/latest.json
           # Keep the Tauri-only manifest on the release too, to roll back by re-uploading it.
-          gh release upload "$TAG" takeover/latest.json takeover/latest.tauri.json --clobber
+          gh release upload "$TAG" takeover/latest.json --clobber
 
-          # The Tauri .dmg is only a first-install download (its updater uses the
-          # .app.tar.gz, kept for rollback); Lookout.dmg below replaces it.
-          for dmg in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("Lookout_macos-") and endswith(".dmg"))'); do
-            gh release delete-asset "$TAG" "$dmg" --yes
+          # Nothing points at the Tauri builds any more, and the release can't be
+          # changed once published (so no rollback to them either): take them off
+          # the page so the only downloads are the native ones.
+          for a in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("Lookout_macos-") or startswith("Lookout_windows-") or startswith("macos-Lookout.app.tar.gz"))'); do
+            gh release delete-asset "$TAG" "$a" --yes
           done
 
       # Short names for the downloads people click, so they get Lookout.dmg rather
@@ -1149,15 +1153,22 @@ jobs:
           link "Lookout-native_${VERSION}_windows-aarch64-setup.exe" Lookout-Setup-ARM.exe
           ls -la short
           gh release upload "$TAG" short/* --clobber
+          # Lookout.dmg and Lookout-Intel.dmg are the same files; updates use the .app.tar.gz.
+          for dmg in "Lookout-native_${VERSION}_darwin-aarch64.dmg" "Lookout-native_${VERSION}_darwin-x86_64.dmg"; do
+            gh release delete-asset "$TAG" "$dmg" --yes || true
+          done
 
+  # The github-pages environment only deploys from main, so a tag can't run the
+  # repositories' publish itself: start packages.yml on main for this tag. It
+  # takes the tag's packages even while the release is still a draft.
   packages:
     needs: release
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pages: write
-      id-token: write
-    uses: ./.github/workflows/packages.yml
-    with:
-      tag: ${{ github.ref_name }}
-    secrets: inherit
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish the apt, dnf and pacman repositories (packages.yml on main)
+        run: gh workflow run packages.yml -R "$GITHUB_REPOSITORY" --ref main -f tag="$GITHUB_REF_NAME"
