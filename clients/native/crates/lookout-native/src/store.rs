@@ -426,17 +426,48 @@ pub mod import {
     }
 
     fn read_webview_local_storage() -> Result<HashMap<String, String>, String> {
-        let mut out = HashMap::new();
+        let mut found = Vec::new();
         for dir in candidate_dirs() {
-            scan_dir(&dir, 0, &mut out)?;
+            scan_dir(&dir, 0, &mut found)?;
         }
-        Ok(out)
+        Ok(pick(found))
+    }
+
+    /// One origin's values: the shipped app's when it has storage, so a dev
+    /// server's (`localhost:1420`, pointed at a local API) never fills its
+    /// gaps; otherwise whatever was found.
+    fn pick(found: Vec<Source>) -> HashMap<String, String> {
+        let app = found.iter().any(|s| s.app);
+        let mut out = HashMap::new();
+        for s in found.into_iter().filter(|s| s.app || !app) {
+            out.extend(s.items);
+        }
+        out
+    }
+
+    struct Source {
+        /// The shipped app's origin (`tauri://localhost`, `http://tauri.localhost`).
+        app: bool,
+        items: HashMap<String, String>,
+    }
+
+    /// Whether a WebKit database belongs to the shipped app's origin: by its
+    /// file name (`tauri_localhost_0.localstorage`) or, in the hashed layout,
+    /// by the `origin` file two levels up.
+    fn is_app_origin(db: &Path) -> bool {
+        if db.file_name().is_some_and(|n| n.to_string_lossy().contains("tauri")) {
+            return true;
+        }
+        db.ancestors()
+            .skip(1)
+            .take(3)
+            .any(|d| fs::read(d.join("origin")).is_ok_and(|b| b.windows(5).any(|w| w == b"tauri")))
     }
 
     /// Walks `dir` for localStorage databases. Recursive because WebKit's
     /// layout moved: older versions keep `WebsiteData/LocalStorage/<origin>.localstorage`,
     /// newer macOS keeps `WebsiteData/Default/<salted hash>/<salted hash>/LocalStorage/localstorage.sqlite3`.
-    fn scan_dir(dir: &Path, depth: usize, out: &mut HashMap<String, String>) -> Result<(), String> {
+    fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<Source>) -> Result<(), String> {
         const MAX_DEPTH: usize = 6;
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -445,18 +476,16 @@ pub mod import {
         };
         if dir.ends_with("leveldb") {
             match leveldb::read(dir, KEYS) {
-                Ok(found) => {
-                    out.extend(found);
+                // leveldb::read already keeps only the best origin.
+                Ok(items) => {
+                    out.push(Source { app: true, items });
                     return Ok(());
                 }
                 // Fall back to scanning the files for the values.
                 Err(e) => log::warn!("[store] couldn't open {} as LevelDB ({e}); scanning it", dir.display()),
             }
         }
-        let mut entries: Vec<_> = entries.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
-        // Later reads win, so a dev server's storage (localhost:1420) never
-        // shadows the shipped app's (tauri://localhost / tauri.localhost).
-        entries.sort_by_key(|e| e.file_name().to_string_lossy().contains("tauri"));
+        let entries: Vec<_> = entries.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
         for e in entries {
             let path = e.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -466,9 +495,13 @@ pub mod import {
                     scan_dir(&path, depth + 1, out)?;
                 }
             } else if name.ends_with(".localstorage") || name == "localstorage.sqlite3" {
-                read_sqlite_items(&path, out)?;
+                let mut items = HashMap::new();
+                read_sqlite_items(&path, &mut items)?;
+                out.push(Source { app: is_app_origin(&path), items });
             } else if (name.ends_with(".ldb") || name.ends_with(".log")) && dir.ends_with("leveldb") {
-                scan_leveldb(&path, out)?;
+                let mut items = HashMap::new();
+                scan_leveldb(&path, &mut items)?;
+                out.push(Source { app: true, items });
             }
         }
         Ok(())
@@ -555,15 +588,48 @@ pub mod import {
             // A stray .log outside a leveldb folder is ignored.
             fs::write(root.join("new/Default/debug.log"), b"lookout-perm-camera\x011").unwrap();
 
-            let mut out = HashMap::new();
+            let mut found = Vec::new();
             for dir in ["old", "new", "EBWebView/Default/Local Storage/leveldb"] {
-                scan_dir(&root.join(dir), 0, &mut out).unwrap();
+                scan_dir(&root.join(dir), 0, &mut found).unwrap();
             }
             let _ = fs::remove_dir_all(&root);
+            let out: HashMap<String, String> = found.into_iter().flat_map(|s| s.items).collect();
             assert_eq!(out.get("lookout-api-base").map(String::as_str), Some("https://old.example"));
             assert!(out.get("lookout-tokens").is_some_and(|t| t.contains(r#""token":"t""#)));
             assert_eq!(out.get("lookout-perm-screen").map(String::as_str), Some("1"));
             assert!(!out.contains_key("lookout-perm-camera"));
+        }
+
+        #[test]
+        fn a_dev_server_origin_never_fills_the_apps_gaps() {
+            let root = std::env::temp_dir().join(format!("lookout-origin-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            // Old layout: the origin is in the file name.
+            webkit_db(&root.join("ls/http_localhost_1420.localstorage"), "lookout-api-base", "http://127.0.0.1:8787");
+            webkit_db(&root.join("ls/tauri_localhost_0.localstorage"), "lookout-tokens", "[]");
+            // Hashed layout: the origin is in a file two levels up.
+            let hashed = root.join("wd/Default/h1/h1");
+            webkit_db(&hashed.join("LocalStorage/localstorage.sqlite3"), "lookout-perm-screen", "1");
+            fs::write(hashed.join("origin"), b"\x00tauri\x00localhost").unwrap();
+            let dev = root.join("wd/Default/h2/h2");
+            webkit_db(&dev.join("LocalStorage/localstorage.sqlite3"), "lookout-blacklisted-apps", "[\"x\"]");
+            fs::write(dev.join("origin"), b"\x00http\x00localhost\x00\x00\x01\x01\x01").unwrap();
+
+            let mut found = Vec::new();
+            scan_dir(&root.join("ls"), 0, &mut found).unwrap();
+            scan_dir(&root.join("wd"), 0, &mut found).unwrap();
+            let _ = fs::remove_dir_all(&root);
+            let out = pick(found);
+            assert_eq!(out.get("lookout-tokens").map(String::as_str), Some("[]"));
+            assert_eq!(out.get("lookout-perm-screen").map(String::as_str), Some("1"));
+            assert!(!out.contains_key("lookout-api-base"), "{out:?}");
+            assert!(!out.contains_key("lookout-blacklisted-apps"), "{out:?}");
+
+            // With only a dev server's storage, it's used.
+            assert_eq!(
+                pick(vec![Source { app: false, items: [("k".to_string(), "v".to_string())].into() }]).get("k").map(String::as_str),
+                Some("v")
+            );
         }
 
         #[test]
