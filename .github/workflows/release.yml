@@ -1119,6 +1119,37 @@ jobs:
           # Keep the Tauri-only manifest on the release too, to roll back by re-uploading it.
           gh release upload "$TAG" takeover/latest.json takeover/latest.tauri.json --clobber
 
+          # The Tauri .dmg is only a first-install download (its updater uses the
+          # .app.tar.gz, kept for rollback); Lookout.dmg below replaces it.
+          for dmg in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("Lookout_macos-") and endswith(".dmg"))'); do
+            gh release delete-asset "$TAG" "$dmg" --yes
+          done
+
+      # Short names for the downloads people click, so they get Lookout.dmg rather
+      # than Lookout-native_0.4.1_darwin-aarch64.dmg, and stable links work:
+      # https://github.com/hackclub/lookout/releases/latest/download/Lookout.dmg
+      # The long names stay: update.json, latest.json and patches key off them.
+      - name: Upload the downloads under short names
+        if: steps.native.outputs.present == 'true' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          mkdir -p short
+          link() { # long-name short-name
+            if [ -f "native/$1" ]; then
+              cp "native/$1" "short/$2"
+            else
+              echo "::warning::native/$1 is missing, so there's no $2."
+            fi
+          }
+          link "Lookout-native_${VERSION}_darwin-aarch64.dmg" Lookout.dmg
+          link "Lookout-native_${VERSION}_darwin-x86_64.dmg" Lookout-Intel.dmg
+          link "Lookout-native_${VERSION}_windows-x86_64-setup.exe" Lookout-Setup.exe
+          link "Lookout-native_${VERSION}_windows-aarch64-setup.exe" Lookout-Setup-ARM.exe
+          ls -la short
+          gh release upload "$TAG" short/* --clobber
+
   packages:
     needs: release
     if: startsWith(github.ref, 'refs/tags/v')
