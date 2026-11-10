@@ -5,9 +5,9 @@
 #
 # window_rect is the whole window frame, title bar included, so the frame is
 # the artwork's height plus TITLE_BAR. Title bars differ between macOS
-# versions (about 28pt before Tahoe, 32pt on it), so bundle.sh pads the
-# bottom of the background with its own edge color: a shorter title bar
-# reveals a bit of that padding instead of a white strip.
+# versions (about 28pt before Tahoe, 32pt on it). Finder stretches the
+# background to fill the content area, so a shorter title bar just stretches
+# the art a few points taller; it never uncovers white.
 import os.path
 
 app = defines["app"]  # noqa: F821 (dmgbuild injects `defines`)
