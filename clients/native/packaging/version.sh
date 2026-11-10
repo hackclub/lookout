@@ -22,14 +22,17 @@ if [ "${1:-}" = "--set" ]; then
   fi
   NEW="$new" perl -0pi -e 's/(\[workspace\.package\][^\[]*?\nversion\s*=\s*")[^"]*(")/${1}$ENV{NEW}${2}/s' "$manifest"
   # The crates that take the workspace version, by their [package] name.
+  # \r?: Windows runners check the lockfile out with CRLF line endings.
   for crate in "$root"/crates/*/Cargo.toml; do
     grep -q '^version\.workspace *= *true' "$crate" || continue
     name=$(sed -n '/^\[package\]/,/^\[/s/^name *= *"\(.*\)"/\1/p' "$crate")
-    NAME="$name" NEW="$new" perl -0pi -e 's/(\[\[package\]\]\nname = "\Q$ENV{NAME}\E"\nversion = ")[^"]*(")/${1}$ENV{NEW}${2}/' "$root/Cargo.lock"
+    name="${name%$'\r'}"
+    NAME="$name" NEW="$new" perl -0pi -e 's/(\[\[package\]\]\r?\nname = "\Q$ENV{NAME}\E"\r?\nversion = ")[^"]*(")/${1}$ENV{NEW}${2}/' "$root/Cargo.lock"
   done
 fi
 
 v=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' "$manifest")
+v="${v%$'\r'}"
 [ -n "$v" ] || { echo "version.sh: no [workspace.package] version in $manifest" >&2; exit 1; }
 if [ -n "${new:-}" ] && [ "$v" != "$new" ]; then
   echo "version.sh: stamping $new failed (still $v)" >&2
