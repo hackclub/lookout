@@ -6,7 +6,9 @@
 //! every frame, or composited into the sheet on native Wayland. The protocol is `programPanel.ts`'s: the page posts
 //! `lookout:ready` / `lookout:resize {height}` / `lookout:done` /
 //! `lookout:cancel` to `window.parent`, origin-checked. A panel that doesn't
-//! load within 12s, or a webview that can't be created, shows an in-app error.
+//! load within 12s, or a webview that can't be created, shows an in-app error;
+//! where there is no web engine at all (Linux without WebKitGTK 4.1, such as
+//! RHEL 9) it offers to open the page in the browser instead.
 //!
 //! Differences forced by a native view: it always draws above GPUI, so it is
 //! hidden (not merely covered) until the panel is revealed and as soon as the
@@ -27,8 +29,9 @@ use gpui_kit::gpui::{
 
 use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease, Spring};
-use crate::platform::webview::{PanelWebView, WebEvent};
+use crate::platform::webview::{EngineMissing, PanelWebView, WebEvent};
 use crate::theme::theme;
+use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::sheet::Sheet;
 use crate::ui::spinner::{Spinner, SpinnerSize};
@@ -104,6 +107,8 @@ pub struct ProgramPanel {
     ready: bool,
     grace_elapsed: bool,
     broken: bool,
+    /// Broken because there is no web engine to embed the page in.
+    no_engine: bool,
     closing: bool,
     height: Anim,
     /// Loading cover opacity: 1 → 0 over 0.18s easeOut once revealed.
@@ -160,6 +165,7 @@ impl ProgramPanel {
             ready: false,
             grace_elapsed: false,
             broken,
+            no_engine: false,
             closing: false,
             height: Anim::new(PANEL_MIN_HEIGHT),
             cover: Anim::new(1.0),
@@ -287,6 +293,7 @@ impl ProgramPanel {
     fn web_unavailable(&mut self, e: anyhow::Error) {
         log::warn!("[panel] can't embed {}: {e:#}", self.label);
         self.broken = true;
+        self.no_engine = e.downcast_ref::<EngineMissing>().is_some();
     }
 }
 
@@ -340,12 +347,20 @@ impl Render for ProgramPanel {
                 .p(px(20.0))
                 .text_center()
                 .child(Icon::WarningCircleFill.el(26.0, t.text_tertiary))
-                .child(
-                    div()
-                        .ts_lh(12.0, 1.5)
-                        .text_color(t.text_secondary)
-                        .child(format!("{} couldn't load here. Please close this panel and try again.", self.label)),
-                )
+                .child(div().ts_lh(12.0, 1.5).text_color(t.text_secondary).child(if self.no_engine {
+                    format!("{} can't open inside Lookout because WebKitGTK isn't installed. Open it in your browser instead.", self.label)
+                } else {
+                    format!("{} couldn't load here. Please close this panel and try again.", self.label)
+                }))
+                .when(self.no_engine, |d| {
+                    let url = self.url.clone();
+                    d.child(
+                        Button::new("panel-open-browser", "Open in Browser")
+                            .variant(Variant::Secondary)
+                            .size(BtnSize::Sm)
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
         } else {
             div()
                 .size_full()

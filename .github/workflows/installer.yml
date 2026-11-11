@@ -84,10 +84,15 @@ jobs:
           - { image: "fedora:43", scenario: fresh }
           - { image: "opensuse/tumbleweed", scenario: fresh }
           - { image: "archlinux:latest", scenario: fresh }
+          # EL9: glibc 2.34, and no WebKitGTK 4.1 (the app does without it).
+          - { image: "almalinux:9", scenario: fresh }
+          - { image: "almalinux:9", scenario: fresh, runner: ubuntu-24.04-arm }
+          - { image: "rockylinux/rockylinux:9", scenario: fresh }
           - { image: "ubuntu:24.04", scenario: update }
           - { image: "fedora:43", scenario: update }
           - { image: "archlinux:latest", scenario: update }
           - { image: "ubuntu:22.04", scenario: refuse }
+          - { image: "almalinux:8", scenario: refuse }
           - { image: "alpine:3.22", scenario: refuse }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

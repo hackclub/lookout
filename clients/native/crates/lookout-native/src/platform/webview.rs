@@ -26,6 +26,21 @@ mod wayland;
 
 use gpui_kit::gpui::{App, Bounds, Pixels, Window};
 
+/// The system has no web engine to embed: on Linux, WebKitGTK 4.1 isn't
+/// installed (RHEL/AlmaLinux/Rocky 9 don't ship it). Returned (inside the
+/// `anyhow::Error`) by [`PanelWebView::prepare`], so the panel can offer the
+/// browser instead of an error.
+#[derive(Debug)]
+pub struct EngineMissing(pub String);
+
+impl std::fmt::Display for EngineMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no web engine: {}", self.0)
+    }
+}
+
+impl std::error::Error for EngineMissing {}
+
 /// What the page did, delivered on the GPUI thread through a channel.
 pub enum WebEvent {
     /// The document finished loading (the iframe's `load`).
@@ -119,13 +134,14 @@ impl PanelWebView {
     pub fn prepare(url: &str, dark: bool, background: (u8, u8, u8), window: &Window, cx: &mut App) -> anyhow::Result<PendingWebView> {
         #[cfg(not(feature = "webview"))]
         {
-            anyhow::bail!("built without the `webview` feature")
+            Err(EngineMissing("built without the `webview` feature".into()).into())
         }
         #[cfg(feature = "webview")]
         {
             let origin = origin_of(url).ok_or_else(|| anyhow::anyhow!("panel URL has no origin"))?;
             #[cfg(target_os = "linux")]
             let parent = {
+                linux::load_webkit()?;
                 let parent = linux::Parent::new(window)?;
                 linux::ensure_gtk(cx, matches!(parent, linux::Parent::Wayland))?;
                 parent
@@ -434,6 +450,35 @@ mod linux {
     use wry::raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle};
 
     static PUMPING: AtomicBool = AtomicBool::new(false);
+
+    /// Load WebKitGTK before anything calls into it.
+    ///
+    /// The packaged binary doesn't name WebKitGTK (or JavaScriptCore and
+    /// libsoup 3, which it brings) as a needed library, so Lookout starts
+    /// where it isn't installed, such as RHEL/AlmaLinux/Rocky 9. Its calls
+    /// into them are bound lazily, on first use, so loading the library
+    /// globally here is what they bind to (packaging/linux/packages.sh sets
+    /// this up and checks it). In a development build the library is already
+    /// linked, and this just finds it.
+    pub fn load_webkit() -> anyhow::Result<()> {
+        static LOADED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        let loaded = LOADED.get_or_init(|| {
+            // SAFETY: a constant, NUL-terminated name; dlerror is read on the
+            // same thread straight after the failure it describes.
+            unsafe {
+                if !libc::dlopen(c"libwebkit2gtk-4.1.so.0".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL).is_null() {
+                    return Ok(());
+                }
+                let e = libc::dlerror();
+                Err(if e.is_null() {
+                    "libwebkit2gtk-4.1.so.0 couldn't be loaded".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(e).to_string_lossy().into_owned()
+                })
+            }
+        });
+        loaded.clone().map_err(|e| super::EngineMissing(e).into())
+    }
 
     /// Initialise GTK with the window's display backend once, and pump its main loop from GPUI
     /// while any webview is alive (plus a moment after, so teardown runs).

@@ -555,7 +555,9 @@ jobs:
           - platform: windows-11-arm
             target: aarch64-pc-windows-msvc
             label: windows-aarch64
-          # glibc 2.39 is the packages' floor, the same as the Tauri .deb's.
+          # Built on glibc 2.39, but the binary only needs 2.34 (RHEL 9):
+          # packaging/linux/packages.sh checks. The .deb still needs 24.04's
+          # libraries; the rpm runs on RHEL 9 too.
           - platform: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             label: linux-x86_64
@@ -611,6 +613,8 @@ jobs:
             dpkg-dev \
             rpm \
             zstd \
+            patchelf \
+            binutils \
             file
 
       - name: Install Rust stable
@@ -670,8 +674,9 @@ jobs:
           docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-deb.sh:/verify.sh:ro" \
             -e "DEB=$deb" -e PKG=lookout ubuntu:24.04 bash /verify.sh
           rpm=$(find "$dir" -name '*.rpm' -printf '%f\n')
-          # One rpm, two families that name their packages differently.
-          for image in fedora:43 opensuse/tumbleweed; do
+          # One rpm, two families that name their packages differently, and
+          # EL9: glibc 2.34 and no WebKitGTK 4.1.
+          for image in fedora:43 opensuse/tumbleweed almalinux:9; do
             docker run --rm -v "$PWD/$dir:/pkg:ro" -v "$PWD/scripts/verify-rpm.sh:/verify.sh:ro" \
               -e "RPMFILE=$rpm" "$image" bash /verify.sh
           done

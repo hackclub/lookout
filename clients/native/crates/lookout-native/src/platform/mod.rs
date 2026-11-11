@@ -18,6 +18,8 @@ pub mod vibrancy;
 pub mod webview;
 pub mod desktop_appearance;
 pub mod fullscreen;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod glibc_compat;
 
 use std::sync::Arc;
 

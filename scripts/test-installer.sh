@@ -34,7 +34,9 @@ if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq && apt-get install -y -qq curl ca-certificates procps >/dev/null
 elif command -v dnf >/dev/null; then
-  dnf install -y -q curl procps-ng >/dev/null
+  # EL images ship curl-minimal, which installing curl would conflict with.
+  command -v curl >/dev/null || dnf install -y -q curl >/dev/null
+  dnf install -y -q procps-ng gzip >/dev/null
 elif command -v zypper >/dev/null; then
   # Not awk: Tumbleweed's image has none, and the installer must cope.
   zypper --non-interactive -q install curl gzip >/dev/null
@@ -134,6 +136,13 @@ if [ "$rc" != 0 ] && [ "$MGR" = zypper ] && grep -q "nothing provides" "$out"; t
   # signed metadata -- can still be checked.
   zypper --non-interactive search -s lookout | grep -q lookout || fail "repository didn't enroll"
   echo "SKIP: the published rpm predates openSUSE-compatible dependencies; enrollment verified"
+  exit 0
+fi
+if [ "$rc" != 0 ] && [ "$MGR" = dnf ] && grep -Eq 'nothing provides (libwebkit2gtk-4\.1|libc\.so\.6\(GLIBC_2\.3[5-9])' "$out"; then
+  # Releases up to 0.4.2 need WebKitGTK 4.1 and glibc 2.39, which EL9 lacks.
+  # Again the installer's own part can still be checked.
+  dnf -q --disablerepo='*' --enablerepo=lookout list --available lookout | grep -q lookout || fail "repository didn't enroll"
+  echo "SKIP: the published rpm predates EL9 support; enrollment verified"
   exit 0
 fi
 [ "$rc" = 0 ] || fail "installer exited $rc"

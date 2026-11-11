@@ -13,10 +13,12 @@ set -eu
 HOST="https://pkg.lookout.hackclub.com"
 RELEASES="https://github.com/hackclub/lookout/releases/latest"
 KEY_FPR="1A6D22590D34B83E2D0B3C8DF4806E984D9DA365"
-# Lookout is built against glibc 2.39 (Ubuntu 24.04); the packages declare it,
-# but saying so up front beats a dependency error after the repo is added.
+# The oldest glibc each kind of package runs on; the packages declare it, but
+# saying so up front beats a dependency error after the repo is added. The
+# binary needs 2.34 (RHEL 9); the .deb also names Ubuntu 24.04's libraries.
 GLIBC_MIN_MAJOR=2
-GLIBC_MIN_MINOR=39
+GLIBC_MIN_MINOR=34
+GLIBC_MIN_MINOR_APT=39
 
 # Where each manager's repository lives. The package's own post-install
 # script writes the same files with the same contents, so whichever runs
@@ -147,13 +149,23 @@ Lookout package (it can lag behind the latest release):
     die "$NAME doesn't use glibc (it looks like a musl system), which Lookout
 needs. See $RELEASES"
   fi
+}
+
+# After pick_manager: how old a glibc can be depends on the package.
+check_glibc() {
   major=${glibc%%.*}
   minor=${glibc#*.}; minor=${minor%%.*}
   case "$major$minor" in *[!0-9]*|'') major=0; minor=0 ;; esac
-  if [ "$major" -lt "$GLIBC_MIN_MAJOR" ] || { [ "$major" -eq "$GLIBC_MIN_MAJOR" ] && [ "$minor" -lt "$GLIBC_MIN_MINOR" ]; }; then
-    die "Lookout needs glibc $GLIBC_MIN_MAJOR.$GLIBC_MIN_MINOR or newer, and $NAME has $glibc.
-That means Ubuntu 24.04, Linux Mint 22, Debian 13, Fedora 40, RHEL 10,
-openSUSE Tumbleweed or anything newer. Nothing was changed."
+  if [ "$MGR" = apt ]; then
+    need=$GLIBC_MIN_MINOR_APT
+    that="Ubuntu 24.04, Linux Mint 22, Debian 13 or anything newer"
+  else
+    need=$GLIBC_MIN_MINOR
+    that="Fedora 35, RHEL, AlmaLinux or Rocky Linux 9, openSUSE Tumbleweed or anything newer"
+  fi
+  if [ "$major" -lt "$GLIBC_MIN_MAJOR" ] || { [ "$major" -eq "$GLIBC_MIN_MAJOR" ] && [ "$minor" -lt "$need" ]; }; then
+    die "Lookout needs glibc $GLIBC_MIN_MAJOR.$need or newer, and $NAME has $glibc.
+That means $that. Nothing was changed."
   fi
 }
 
@@ -450,6 +462,7 @@ main() {
 
   check_platform
   pick_manager
+  check_glibc
   find_root
   BEFORE=$(installed_version)
   confirm
