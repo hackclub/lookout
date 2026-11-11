@@ -269,6 +269,15 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   light mode, Tauri's dark `rgba(26,26,26,.93)` in dark. Tauri kept the dark
   panel in light mode too, so its theme-coloured text was dark on dark (#209).
   `LOOKOUT_TRAY_POPUP=1` opens the popup at launch to preview it on Linux.
+- **Change source…** in the recorder's ⋯ header menu switches what's being
+  recorded mid-session (#51). The recording stays open: it keeps capturing
+  the old source while the picker is up ("Still recording until you
+  switch"), Back or Escape returns to it untouched, and picking calls the
+  engine's `recorder_switch_source`, which flushes the old source's partial
+  minute and starts the new one without a pause/resume round trip (a paused
+  recording resumes on the pick). A lost source uses the same flow. Tauri
+  only offered a new source after a loss, and closed and reopened the
+  recording to do it, which dropped any undelivered uploads.
 
 ## Known gaps and next steps
 

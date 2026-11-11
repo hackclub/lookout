@@ -30,16 +30,25 @@ use crate::ui::text::TextExt;
 
 #[derive(Clone)]
 pub enum MenuItem {
-    Item { id: String, label: String, icon_url: Option<String>, fallback: Icon },
+    /// `disabled`: shown dimmed, not hoverable or choosable (a native menu's
+    /// greyed-out item).
+    Item { id: String, label: String, icon_url: Option<String>, fallback: Icon, disabled: bool },
     Separator,
 }
 
 impl MenuItem {
     pub fn item(id: impl Into<String>, label: impl Into<String>, fallback: Icon) -> Self {
-        MenuItem::Item { id: id.into(), label: label.into(), icon_url: None, fallback }
+        MenuItem::Item { id: id.into(), label: label.into(), icon_url: None, fallback, disabled: false }
     }
+    pub fn disabled(mut self, on: bool) -> Self {
+        if let MenuItem::Item { disabled, .. } = &mut self {
+            *disabled = on;
+        }
+        self
+    }
+    /// Can be highlighted and chosen.
     fn is_item(&self) -> bool {
-        matches!(self, MenuItem::Item { .. })
+        matches!(self, MenuItem::Item { disabled: false, .. })
     }
 }
 
@@ -231,9 +240,16 @@ impl Render for MenuPopup {
                     .bg(if look == Look::Linux { t.popover_separator } else { t.border_default })
                     .map(|d| if look == Look::Linux { d.my(px(5.0)) } else { d.my(px(4.0)).mx(px(10.0)) })
                     .into_any_element(),
-                MenuItem::Item { id, label, icon_url, fallback } => {
-                    let highlighted = self.selection == Some(i);
-                    let fg = if highlighted { t.text_primary } else { t.text_secondary };
+                MenuItem::Item { id, label, icon_url, fallback, disabled } => {
+                    let disabled = *disabled;
+                    let highlighted = self.selection == Some(i) && !disabled;
+                    let fg = if disabled {
+                        t.text_quaternary
+                    } else if highlighted {
+                        t.text_primary
+                    } else {
+                        t.text_secondary
+                    };
                     let icon: AnyElement = match icon_url.as_deref().map(|u| images::get(u, cx)) {
                         Some(Remote::Ready(img_data, _)) => img(img_data).size(px(18.0)).rounded(px(5.0)).into_any_element(),
                         _ => fallback.el(15.0, fg).into_any_element(),
@@ -262,11 +278,12 @@ impl Render for MenuPopup {
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_color(t.text_primary)
+                                .text_color(if disabled { t.text_tertiary } else { t.text_primary })
                                 .map(|d| if look == Look::Linux { d.ts(14.5).w400() } else { d.ts(13.5).w500() })
                                 .child(SharedString::from(label.clone())),
                         )
-                        .on_hover(move |hov, _, cx| {
+                        .when(disabled, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                        .when(!disabled, |d| d.on_hover(move |hov, _, cx| {
                             me2.update(cx, |m, cx| {
                                 if *hov {
                                     m.selection = Some(i);
@@ -279,7 +296,7 @@ impl Render for MenuPopup {
                         .on_click(move |_, _, cx| {
                             let id = id.clone();
                             me3.update(cx, |m, cx| m.dismiss(Some(id), cx))
-                        })
+                        }))
                         .into_any_element()
                 }
             })
@@ -376,3 +393,16 @@ impl Render for MenuPopup {
 
 #[allow(unused)]
 fn _u(_: &Theme, _: &App) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disabled_item_is_not_choosable() {
+        assert!(MenuItem::item("a", "A", Icon::PlusBold).is_item());
+        assert!(!MenuItem::item("a", "A", Icon::PlusBold).disabled(true).is_item());
+        assert!(MenuItem::item("a", "A", Icon::PlusBold).disabled(false).is_item());
+        assert!(!MenuItem::Separator.disabled(true).is_item());
+    }
+}

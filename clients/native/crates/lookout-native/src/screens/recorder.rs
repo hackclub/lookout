@@ -132,6 +132,36 @@ impl RecorderView {
         self.model.read(cx).state.as_ref().filter(|s| s.token == self.token)
     }
 
+    /// "Change source…" in the ⋯ menu: `None` (no ⋯ button) while there's
+    /// no recording to change (loading, failed, finished); disabled
+    /// mid-action (a pause, a resume, the stop prompt).
+    pub fn change_source_offered(&self, cx: &App) -> Option<bool> {
+        let state = self.state(cx)?;
+        change_source_offered(state.phase)
+    }
+
+    /// Record `sel` from now on. The engine flushes the old source's partial
+    /// minute first and resumes a paused recording; the session, clock and
+    /// backlog carry over.
+    pub fn switch_source(&mut self, sel: Vec<Sel>, source: RecordingSource, cx: &mut Context<Self>) {
+        self.sources = sel;
+        // The last frame was of the old source; show the new one's live
+        // preview until the new loop sends frames.
+        self.model.update(cx, |m, cx| {
+            m.clear_preview();
+            cx.notify();
+        });
+        let core = app::state(cx).core.clone();
+        let fut = app::tokio(cx, async move { core.recorder_switch_source(source).await });
+        cx.spawn(async move |_, _| {
+            if let Err(e) = fut.await {
+                log::warn!("[recorder] switching source failed: {}", describe(&e));
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn action(&mut self, which: &'static str, cx: &mut Context<Self>) {
         let core = app::state(cx).core.clone();
         let fut = app::tokio(cx, async move {
@@ -272,6 +302,19 @@ impl Drop for RecorderView {
         // `recorder_close` on unmount: flush the partial minute, release the
         // camera; the session itself stays open, keeping its time.
         log::info!("[recorder] closing recording for {}…", &self.token[..8.min(self.token.len())]);
+    }
+}
+
+/// See [`RecorderView::change_source_offered`].
+fn change_source_offered(phase: RecorderPhase) -> Option<bool> {
+    match phase {
+        RecorderPhase::Loading | RecorderPhase::LoadError | RecorderPhase::Finished => None,
+        RecorderPhase::Recording | RecorderPhase::Paused => Some(true),
+        RecorderPhase::Pausing
+        | RecorderPhase::Resuming
+        | RecorderPhase::StopPausing
+        | RecorderPhase::StopPrompting
+        | RecorderPhase::StopFinishing => Some(false),
     }
 }
 
@@ -578,3 +621,28 @@ fn preview_frame(
 
 #[allow(unused)]
 fn _keep(_: AspectBox, _: SharedString) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_source_is_offered_whenever_there_is_a_recording() {
+        for p in [RecorderPhase::Loading, RecorderPhase::LoadError, RecorderPhase::Finished] {
+            assert_eq!(change_source_offered(p), None, "{p:?}");
+        }
+        for p in [RecorderPhase::Recording, RecorderPhase::Paused] {
+            assert_eq!(change_source_offered(p), Some(true), "{p:?}");
+        }
+        // Mid-action it stays put, disabled, rather than blinking out.
+        for p in [
+            RecorderPhase::Pausing,
+            RecorderPhase::Resuming,
+            RecorderPhase::StopPausing,
+            RecorderPhase::StopPrompting,
+            RecorderPhase::StopFinishing,
+        ] {
+            assert_eq!(change_source_offered(p), Some(false), "{p:?}");
+        }
+    }
+}

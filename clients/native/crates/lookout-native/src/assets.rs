@@ -62,6 +62,8 @@ static ICONS: &[(&str, &[u8])] = embed!(
     "selection-bold",
     "trash-bold",
     "arrow-counter-clockwise-bold",
+    "dots-three-bold",
+    "arrows-left-right-bold",
 );
 
 pub static FONTS: &[&[u8]] = &[

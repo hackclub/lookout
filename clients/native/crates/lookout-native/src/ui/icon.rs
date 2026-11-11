@@ -54,6 +54,8 @@ pub enum Icon {
     Selection,
     TrashBold,
     UndoBold,
+    DotsThreeBold,
+    ArrowsLeftRightBold,
 }
 
 impl Icon {
@@ -106,6 +108,8 @@ impl Icon {
         Icon::Selection,
         Icon::TrashBold,
         Icon::UndoBold,
+        Icon::DotsThreeBold,
+        Icon::ArrowsLeftRightBold,
     ];
 
     pub fn path(self) -> &'static str {
@@ -158,6 +162,8 @@ impl Icon {
             Icon::Selection => "icons/selection-bold.svg",
             Icon::TrashBold => "icons/trash-bold.svg",
             Icon::UndoBold => "icons/arrow-counter-clockwise-bold.svg",
+            Icon::DotsThreeBold => "icons/dots-three-bold.svg",
+            Icon::ArrowsLeftRightBold => "icons/arrows-left-right-bold.svg",
         }
     }
 

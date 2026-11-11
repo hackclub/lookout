@@ -340,6 +340,14 @@ impl Core {
         self.recorder.recorder_cancel_stop().await
     }
 
+    /// See [`Recorder::recorder_switch_source`].
+    pub async fn recorder_switch_source(
+        self: &Arc<Self>,
+        source: RecordingSource,
+    ) -> Result<RecorderState, RecorderError> {
+        self.recorder.recorder_switch_source(source).await
+    }
+
     pub async fn recorder_finish_stop(
         self: &Arc<Self>,
         name: Option<String>,

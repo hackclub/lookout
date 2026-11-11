@@ -1,11 +1,11 @@
 //! The recording session, as a state machine the shell only draws.
 //!
 //! A shell opens a recording with [`Core::recorder_open`], drives it with
-//! `recorder_pause` / `recorder_resume` / `recorder_begin_stop` /
-//! `recorder_cancel_stop` / `recorder_finish_stop`, closes it with
-//! [`Core::recorder_close`], and in between renders [`RecorderState`] —
-//! published as [`CoreEvent::RecorderState`] on every change and readable
-//! any time with [`Core::recorder_state`]. The shell holds no recording
+//! `recorder_pause` / `recorder_resume` / `recorder_switch_source` /
+//! `recorder_begin_stop` / `recorder_cancel_stop` / `recorder_finish_stop`,
+//! closes it with [`Core::recorder_close`], and in between renders
+//! [`RecorderState`] — published as [`CoreEvent::RecorderState`] on every
+//! change and readable any time with [`Core::recorder_state`]. The shell holds no recording
 //! logic of its own: not the order of operations behind a pause, not which
 //! tracked-seconds number to believe, not when the clock stops.
 //!
@@ -866,6 +866,107 @@ mod tests {
         let n = shell.titles.lock().unwrap().len();
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         assert_eq!(shell.titles.lock().unwrap().len(), n);
+    }
+
+    fn camera_2() -> RecordingSource {
+        RecordingSource::Camera {
+            device_id: "cam-2".into(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn switching_source_while_recording_flushes_then_records_the_new_one() {
+        let (server, shell, core, cfg) = setup("active").await;
+        core.recorder_open(cfg, camera()).await.unwrap();
+        wait_for(&core, 10, |s| s.capture_count == 1).await;
+
+        let state = core.recorder_switch_source(camera_2()).await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Recording);
+        assert_eq!(state.control_mode, ControlMode::Recording);
+        assert_eq!(state.source, camera_2());
+        assert!(state.clock.running);
+        assert!(core.has_capture_loop());
+        // The old camera closed before the new one opened.
+        assert_eq!(
+            shell.camera_starts.lock().unwrap().as_slice(),
+            &["cam-1".to_string(), "cam-2".to_string()]
+        );
+        assert_eq!(*shell.camera_stops.lock().unwrap(), 1);
+        // The old source's partial minute was flushed and credited (the
+        // mock credits 20s for a final capture)...
+        assert_eq!(state.tracked_seconds, 20);
+        // ...and the session never left active: no pause/resume round trip,
+        // no reload, and the recording was never closed.
+        assert_eq!(server.count("POST", "/api/sessions/tok/pause"), 0);
+        assert_eq!(server.count("POST", "/api/sessions/tok/resume"), 0);
+        assert_eq!(server.count("GET", "/api/sessions/tok"), 1);
+        assert!(shell.states().iter().all(|s| s.is_some()), "never closed");
+
+        // The new loop's seed lands after the flush.
+        let state = wait_for(&core, 10, |s| s.capture_count == 3).await;
+        assert_eq!(state.capture_error, None);
+        let reqs = server.requests();
+        let flush_at = reqs.iter().position(|r| r.body.contains("\"final\":true")).unwrap();
+        let last_confirm = reqs
+            .iter()
+            .rposition(|r| r.path == "/api/sessions/tok/screenshots")
+            .unwrap();
+        assert!(flush_at < last_confirm);
+        core.recorder_close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn switching_source_while_paused_resumes_on_the_new_one() {
+        let (server, shell, core, cfg) = setup("active").await;
+        core.recorder_open(cfg, camera()).await.unwrap();
+        wait_for(&core, 10, |s| s.capture_count == 1).await;
+        core.recorder_pause().await.unwrap();
+
+        let state = core.recorder_switch_source(camera_2()).await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Recording);
+        assert_eq!(state.source, camera_2());
+        assert_eq!(state.session_status.as_deref(), Some("active"));
+        assert_eq!(server.count("POST", "/api/sessions/tok/resume"), 1);
+        assert_eq!(
+            shell.camera_starts.lock().unwrap().as_slice(),
+            &["cam-1".to_string(), "cam-2".to_string()]
+        );
+        // The pause's flush credit is kept across the switch.
+        assert_eq!(state.tracked_seconds, 20);
+        core.recorder_close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn switching_source_clears_a_loss_and_resumes() {
+        let (_server, _shell, core, cfg) = setup("active").await;
+        core.recorder_open(cfg, pipewire(7)).await.unwrap();
+        core.emit(CoreEvent::ScreencastRevoked(crate::ScreencastRevoked { node_ids: vec![7] }));
+        wait_for(&core, 10, |s| s.source_lost.is_some() && !s.capturing).await;
+        assert!(matches!(core.recorder_resume().await, Err(RecorderError::SourceLost)));
+
+        let state = core.recorder_switch_source(camera()).await.unwrap();
+        assert_eq!(state.phase, RecorderPhase::Recording);
+        assert_eq!(state.control_mode, ControlMode::Recording);
+        assert!(state.source_lost.is_none());
+        assert_eq!(state.source, camera());
+        // A revoke for the old node no longer touches the recording.
+        core.emit(CoreEvent::ScreencastRevoked(crate::ScreencastRevoked { node_ids: vec![7] }));
+        assert!(core.recorder_state().unwrap().source_lost.is_none());
+        core.recorder_close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn switching_source_is_refused_mid_stop() {
+        let (_server, _shell, core, cfg) = setup("active").await;
+        core.recorder_open(cfg, camera()).await.unwrap();
+        wait_for(&core, 10, |s| s.capture_count == 1).await;
+        core.recorder_begin_stop().await.unwrap();
+        assert!(matches!(
+            core.recorder_switch_source(camera_2()).await,
+            Err(RecorderError::InvalidPhase { phase: RecorderPhase::StopPrompting })
+        ));
+        assert_eq!(core.recorder_state().unwrap().source, camera());
+        core.recorder_close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

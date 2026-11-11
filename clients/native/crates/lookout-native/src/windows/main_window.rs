@@ -105,6 +105,8 @@ fn direction(from: &Route, to: &Route) -> f32 {
 enum MenuPurpose {
     Add,
     Card { token: String },
+    /// The recorder's ⋯ menu.
+    Recorder(Entity<crate::screens::record::RecordPage>),
 }
 
 pub enum PageView {
@@ -142,7 +144,7 @@ impl PageView {
     fn header_actions(&self, cx: &App) -> Vec<AnyElement> {
         match self {
             PageView::Session(e) => e.read(cx).header_actions(e.clone()),
-            PageView::Record(e) => e.read(cx).header_actions(e.clone()),
+            PageView::Record(e) => e.read(cx).header_actions(e.clone(), cx),
             _ => Vec::new(),
         }
     }
@@ -453,7 +455,10 @@ impl MainWindow {
             Route::Record(token) => {
                 let token = token.clone();
                 let r = cx.new(|cx| RecordPage::new(token, window, cx));
-                self._subs.push(cx.subscribe(&r, |this, _, ev: &RecordEvent, cx| this.on_record_event(ev, cx)));
+                self._subs.push(cx.subscribe(&r, |this, page, ev: &RecordEvent, cx| match ev {
+                    RecordEvent::Menu { anchor, can_change_source } => this.open_recorder_menu(page, *anchor, *can_change_source, cx),
+                    _ => this.on_record_event(ev, cx),
+                }));
                 self._subs.push(cx.observe(&r, |_, _, cx| cx.notify()));
                 PageView::Record(r)
             }
@@ -632,7 +637,28 @@ impl MainWindow {
                     self.open_tip("source", &t, cx);
                 }
             }
+            RecordEvent::Menu { .. } => {}
         }
+    }
+
+    /// The recorder's ⋯ menu, hung from its header button like the + menu.
+    /// Clicking ⋯ while it is open closes it.
+    fn open_recorder_menu(
+        &mut self,
+        page: Entity<crate::screens::record::RecordPage>,
+        anchor: Bounds<Pixels>,
+        can_change_source: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((m, _)) = &self.menu {
+            m.update(cx, |m, cx| m.dismiss(None, cx));
+            return;
+        }
+        let off = px(self.frame_offset);
+        let anchor = Bounds { origin: point(anchor.origin.x - off, anchor.origin.y - off), size: anchor.size };
+        let items = vec![MenuItem::item("change-source", "Change source…", Icon::ArrowsLeftRightBold).disabled(!can_change_source)];
+        self.pending_menu = Some((items, anchor, false, MenuPurpose::Recorder(page)));
+        cx.notify();
     }
 
     fn on_gallery_event(&mut self, ev: &GalleryEvent, cx: &mut Context<Self>) {
@@ -820,6 +846,7 @@ impl MainWindow {
                 label: p.label(),
                 icon_url: p.icon_url.clone(),
                 fallback: Icon::ArrowSquareOutBold,
+                disabled: false,
             })
             .collect();
         items.push(MenuItem::Separator);
@@ -870,6 +897,11 @@ impl MainWindow {
                         })
                         .detach();
                     }
+                }
+            }
+            MenuPurpose::Recorder(page) => {
+                if choice == "change-source" {
+                    page.update(cx, |p, cx| p.menu_change_source(cx));
                 }
             }
             MenuPurpose::Card { token } => match choice.as_str() {
@@ -1102,7 +1134,7 @@ impl MainWindow {
         }
         match dir {
             NavigationDirection::Back => {
-                if self.route.is_gallery() {
+                if self.route.is_gallery() || self.cancel_source_switch(cx) {
                     return;
                 }
                 let settings_sub = self.slots.iter().rev().find(|s| !s.leaving).and_then(|s| match &s.page {
@@ -1171,6 +1203,24 @@ impl MainWindow {
         });
     }
 
+    /// The record page while its picker is changing the open recording's
+    /// source.
+    fn source_switch(&self, cx: &App) -> Option<Entity<crate::screens::record::RecordPage>> {
+        match self.slots.iter().rev().find(|s| !s.leaving).map(|s| &s.page) {
+            Some(PageView::Record(r)) if r.read(cx).switching() => Some(r.clone()),
+            _ => None,
+        }
+    }
+
+    /// Back during a source change: to the recorder, not out of the page
+    /// (which would close the recording). Whether there was one to cancel.
+    fn cancel_source_switch(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(page) = self.source_switch(cx) else { return false };
+        page.update(cx, |p, cx| p.cancel_switch(cx));
+        cx.notify();
+        true
+    }
+
     /// The record page is showing the live recorder (not the source picker).
     fn in_recorder(&self, cx: &App) -> bool {
         match self.slots.iter().rev().find(|s| !s.leaving).map(|s| &s.page) {
@@ -1213,13 +1263,26 @@ impl MainWindow {
             Route::Record(_) => {
                 // The record page names its step: the source question, or
                 // "Recording" once capture runs.
-                let title = match current.map(|s| &s.page) {
-                    Some(PageView::Record(r)) => r.read(cx).header_title(),
-                    _ => "Recording",
+                let (title, subtitle) = match current.map(|s| &s.page) {
+                    Some(PageView::Record(r)) => (r.read(cx).header_title(), r.read(cx).header_subtitle(cx)),
+                    _ => ("Recording", None),
                 };
                 // No way out mid-capture: leaving the page closes the recorder.
-                let on_back = if self.in_recorder(cx) { None } else { back(self) };
-                HeaderNav { title: title.into(), subtitle: None, on_back, app_icon: false }
+                // Changing source, Back returns to the recorder instead.
+                let on_back = if self.in_recorder(cx) {
+                    None
+                } else if self.source_switch(cx).is_some() {
+                    Some(Rc::new(|window: &mut Window, cx: &mut App| {
+                        if let Some(h) = window.root::<MainWindow>().flatten() {
+                            h.update(cx, |mw, cx| {
+                                mw.cancel_source_switch(cx);
+                            });
+                        }
+                    }) as Rc<dyn Fn(&mut Window, &mut App)>)
+                } else {
+                    back(self)
+                };
+                HeaderNav { title: title.into(), subtitle: subtitle.map(Into::into), on_back, app_icon: false }
             }
             Route::Session(_) => HeaderNav { title: "Timelapse".into(), subtitle: None, on_back: back(self), app_icon: false },
             Route::EditorOpen(_) => HeaderNav { title: "Lookout".into(), subtitle: Some("Editing in another window".into()), on_back: None, app_icon: true },
@@ -1327,7 +1390,9 @@ impl MainWindow {
             if crate::ui::input::any_input_focused(window, cx) || self.in_recorder(cx) {
                 return;
             }
-            self.back(cx);
+            if !self.cancel_source_switch(cx) {
+                self.back(cx);
+            }
             return;
         }
         // Alt+←/→ (Windows, Linux), ⌘[ / ⌘] (macOS): browser history keys.

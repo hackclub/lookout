@@ -166,13 +166,21 @@ impl RecorderModel {
         self.state.as_ref().map(|s| s.control_mode == ControlMode::Paused).unwrap_or(false)
     }
 
+    /// Drop the preview frame (it shows a source that's no longer recorded).
+    pub fn clear_preview(&mut self) {
+        if let Some(p) = self.preview.take() {
+            self.retired.push(p);
+        }
+    }
+
     fn apply(&mut self, msg: CoreMsg, cx: &mut Context<Self>) {
         match msg {
             CoreMsg::Event(CoreEvent::RecorderState(s)) => {
-                if s.is_none() {
-                    if let Some(p) = self.preview.take() {
-                        self.retired.push(p);
-                    }
+                // Closed, or switched to another source: the frame is stale.
+                // (A switch's flush can still send one of the old source.)
+                let same_source = matches!((&s, &self.state), (Some(a), Some(b)) if a.source == b.source);
+                if !same_source {
+                    self.clear_preview();
                 }
                 self.state = s;
                 cx.emit(RecorderEvent::State);

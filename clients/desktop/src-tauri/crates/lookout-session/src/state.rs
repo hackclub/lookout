@@ -404,5 +404,15 @@ impl Recording {
             self.phase = RecorderPhase::Paused;
         }
     }
+
+    /// Point the recording at a different source. A loss or a capture
+    /// error belonged to the old source, so both go with it; the session,
+    /// its clock and its counts are untouched. The caller has already
+    /// stopped the old source's loop and released its camera.
+    pub fn switch_source(&mut self, source: RecordingSource) {
+        self.source = source;
+        self.source_lost = None;
+        self.capture_error = None;
+    }
 }
 

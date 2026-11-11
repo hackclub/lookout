@@ -945,6 +945,61 @@ impl Recorder {
         self.recorder_state().ok_or(RecorderError::NoRecording)
     }
 
+    /// Record from a different source without closing the recording, so
+    /// the session keeps its clock, its counts and its upload backlog
+    /// (closing drops the backlog, and with it any minutes an outage was
+    /// still holding).
+    ///
+    /// From `Recording`: the old source's loop is stopped AND AWAITED, so
+    /// its partial minute flushes as a `final` capture while the session
+    /// is still active, then the new source's loop starts. No pause or
+    /// resume round trip: the session stays active throughout, and only
+    /// the seconds between the flush and the new seed go uncredited.
+    ///
+    /// From `Paused` (a lost source included): the recording resumes on
+    /// the new source. Picking a source is the go-ahead to record it.
+    pub async fn recorder_switch_source(
+        self: &Arc<Self>,
+        source: RecordingSource,
+    ) -> Result<RecorderState, RecorderError> {
+        let _action = self.action_lock.lock().await;
+        let phase = self.require_phase(&[RecorderPhase::Recording, RecorderPhase::Paused])?;
+        lookout_session::log_line!("[recorder] switching source");
+        if phase == RecorderPhase::Recording {
+            let now_ms = self.now_ms();
+            self.with_recording(|rec| {
+                rec.action_error = None;
+                // The flush's credit lands under the clock as it was at
+                // the click, as with a pause.
+                rec.clock.hold(now_ms);
+            });
+            self.recorder_publish();
+            self.stop_capturing().await;
+            let finished = self
+                .with_recording(|rec| {
+                    if rec.phase != RecorderPhase::Finished {
+                        rec.switch_source(source);
+                    }
+                    rec.phase == RecorderPhase::Finished
+                })
+                .unwrap_or(true);
+            // The server may have ended the session while the old loop
+            // flushed; there is nothing to switch to then.
+            if !finished {
+                self.start_capturing().await;
+            }
+            self.recorder_publish();
+        } else {
+            // Paused means nothing is capturing; a camera left open by a
+            // loss is released here, once.
+            self.release_source();
+            self.with_recording(|rec| rec.switch_source(source));
+            self.recorder_publish();
+            self.resume_inner().await?;
+        }
+        self.recorder_state().ok_or(RecorderError::NoRecording)
+    }
+
     /// Finish the stop: name the session (optional, non-fatal), stop it
     /// (retrying on 5xx), and finish the recording. With `edit`, the
     /// timelapse is held unpublished after compiling so the user can cut it
