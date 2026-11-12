@@ -121,6 +121,13 @@ pub(crate) fn list_onscreen_window_rects() -> Vec<OnScreenWindowRect> {
             continue;
         }
 
+        // Skip fully transparent windows. They draw nothing, so blacking
+        // one out would hide whatever is underneath, and counting one as
+        // "in front" would let a filtered window show through it.
+        if dict_f64(dict, "kCGWindowAlpha").is_some_and(|a| a <= 0.0) {
+            continue;
+        }
+
         rects.push(OnScreenWindowRect {
             app_name,
             x: bounds.origin.x,
@@ -157,6 +164,10 @@ pub(crate) fn list_onscreen_window_rects() -> Vec<OnScreenWindowRect> {
         if w.is_minimized().unwrap_or(false) {
             continue;
         }
+        #[cfg(target_os = "windows")]
+        if w.id().is_ok_and(is_click_through_overlay) {
+            continue;
+        }
         let width = w.width().unwrap_or(0) as f64;
         let height = w.height().unwrap_or(0) as f64;
         if width < 50.0 || height < 50.0 {
@@ -173,6 +184,25 @@ pub(crate) fn list_onscreen_window_rects() -> Vec<OnScreenWindowRect> {
         });
     }
     rects
+}
+
+/// True for a click-through overlay window (`WS_EX_LAYERED` +
+/// `WS_EX_TRANSPARENT`): the full-screen, see-through windows that in-game
+/// overlays (Discord, Steam, NVIDIA, ...) float over a game. They paint
+/// almost nothing, so redaction treats them as absent: blacking out a
+/// filtered app's overlay would black out the game under it, and an
+/// unfiltered app's overlay must not shield a filtered window beneath it.
+#[cfg(target_os = "windows")]
+fn is_click_through_overlay(window_id: u32) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    // xcap's window id is the HWND.
+    let hwnd = HWND(window_id as usize as *mut _);
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let mask = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+    ex_style & mask == mask
 }
 
 pub(crate) fn should_exclude_window(app_name: &str, title: &str) -> bool {
@@ -223,6 +253,19 @@ pub(crate) fn dict_i32(dict: &CFDictionary, key: &str) -> Option<i32> {
     let mut value: i32 = 0;
     let ok =
         unsafe { (*cf_number).value(CFNumberType::IntType, &mut value as *mut _ as *mut c_void) };
+    if !ok {
+        return None;
+    }
+    Some(value)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn dict_f64(dict: &CFDictionary, key: &str) -> Option<f64> {
+    let cf_number = get_cf_dictionary_get_value(dict, key)? as *const CFNumber;
+    let mut value: f64 = 0.0;
+    let ok = unsafe {
+        (*cf_number).value(CFNumberType::Float64Type, &mut value as *mut _ as *mut c_void)
+    };
     if !ok {
         return None;
     }
