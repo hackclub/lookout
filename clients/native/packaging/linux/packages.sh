@@ -47,7 +47,7 @@ install -Dm644 "$here/com.hackclub.lookout.desktop" "$stage/usr/share/applicatio
 # Retain the Tauri icon name for existing pinned launchers.
 install -Dm644 "$root/assets/app-icon.png" "$stage/usr/share/icons/hicolor/128x128/apps/lookout.png"
 install -Dm644 "$root/assets/app-icon.png" "$stage/usr/share/icons/hicolor/128x128/apps/com.hackclub.lookout.png"
-legacy="$repo/clients/desktop/src-tauri/linux"
+legacy="$here/repo"
 install -Dm644 "$legacy/lookout-archive-keyring.asc" "$stage/usr/share/lookout/lookout-archive-keyring.asc"
 
 # Resolve the ELF's actual linked dependencies, including ABI version floors.

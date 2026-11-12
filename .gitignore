@@ -13,17 +13,9 @@ packages/server/public/session/
 .env
 *.local
 
-# Rust / Tauri
-clients/desktop/src-tauri/target/
-# Lookout Native (GPUI)
+# Rust: the recording engine and Lookout Native (GPUI)
+crates/target/
 clients/native/target/
-clients/desktop/src-tauri/gen/
-# Written by the release workflow so signCommand only applies to signed
-# CI builds; a dev machine has no signing credentials.
-clients/desktop/src-tauri/tauri.signing.conf.json
-# SwiftPM build output for the native tray. Its index database is a 64MB file
-# that was committed once already; keep it out for good.
-clients/desktop/src-tauri/swift/*/.build/
 
 # Env files, including the editor/tooling backups that are easy to commit by
 # accident (.env itself is covered above).

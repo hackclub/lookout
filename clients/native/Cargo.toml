@@ -1,9 +1,9 @@
 # Lookout Phoenix — the native (GPUI) Lookout desktop app.
 #
-# A workspace of its own so the GPUI dependency tree never touches the Tauri
-# build in clients/desktop. The recording engine is the same Rust the Tauri
-# shell links: lookout-core and the three platform-free crates under
-# clients/desktop/src-tauri/crates, pulled in by path.
+# A workspace of its own so the GPUI dependency tree stays out of the engine's
+# (and the browser recorder's wasm) build. The recording engine is lookout-core
+# and the three platform-free crates under crates/ at the repo root, pulled in
+# by path.
 [workspace]
 members = ["crates/lookout-native", "crates/lookout-dev-server", "crates/lookout-update", "crates/lookout-update-tool"]
 resolver = "2"

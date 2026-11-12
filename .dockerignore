@@ -6,7 +6,8 @@
 .vscode
 .idea
 node_modules
-clients/desktop/src-tauri/target
+crates/target
+clients/native/target
 docs
 *.md
 .DS_Store

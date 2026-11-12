@@ -45,7 +45,7 @@ describe("readUrlOptions", () => {
 
 describe("desktopHandoffUrl", () => {
   it("matches the shape the desktop app parses", () => {
-    // Contract with clients/desktop/src-tauri/src/lib.rs — changing this
+    // Contract with the desktop app (clients/native, deep links) — changing this
     // string breaks the handoff for every already-installed copy.
     expect(desktopHandoffUrl(TOKEN)).toBe(`lookout://session/?token=${TOKEN}`);
   });

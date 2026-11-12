@@ -55,16 +55,6 @@ updates:
       semver-patch-days: 7
 
   - package-ecosystem: "npm"
-    directory: "/clients/desktop"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 7
-      semver-major-days: 7
-      semver-minor-days: 7
-      semver-patch-days: 7
-
-  - package-ecosystem: "npm"
     directory: "/clients/react"
     schedule:
       interval: "weekly"
@@ -86,7 +76,7 @@ updates:
 
   # Cargo / Rust supply-chain coverage — same 7-day cooldown applies.
   - package-ecosystem: "cargo"
-    directory: "/clients/desktop/src-tauri"
+    directory: "/crates"
     schedule:
       interval: "weekly"
     cooldown:

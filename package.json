@@ -10,7 +10,6 @@
     "clients/react",
     "clients/web",
     "clients/hosted",
-    "clients/desktop",
     "clients/playground"
   ],
   "scripts": {

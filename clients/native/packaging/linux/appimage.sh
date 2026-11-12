@@ -105,7 +105,7 @@ install -Dm755 "$bin" "$appdir/usr/bin/lookout"
 desktop="$appdir/usr/share/applications/com.hackclub.lookout.desktop"
 install -Dm644 "$here/com.hackclub.lookout.desktop" "$desktop"
 echo "X-AppImage-Version=$version" >> "$desktop"
-icon="$repo/clients/desktop/src-tauri/icons/icon.png"   # 512px; assets/app-icon.png is its 128px copy
+icon="$root/assets/app-icon-512.png"   # assets/app-icon.png is its 128px copy
 size=512
 if [ ! -f "$icon" ]; then icon="$root/assets/app-icon.png"; size=128; fi
 install -Dm644 "$icon" "$appdir/usr/share/icons/hicolor/${size}x${size}/apps/com.hackclub.lookout.png"

@@ -9,7 +9,7 @@ set -euo pipefail
 
 KEY_NAME="Lookout Archive Signing Key"
 KEY_EMAIL="lookout@hackclub.com"
-PUBKEY_DEST="$(cd "$(dirname "$0")/.." && pwd)/clients/desktop/src-tauri/linux/lookout-archive-keyring.asc"
+PUBKEY_DEST="$(cd "$(dirname "$0")/.." && pwd)/clients/native/packaging/linux/repo/lookout-archive-keyring.asc"
 
 if grep -q "BEGIN PGP PUBLIC KEY BLOCK" "$PUBKEY_DEST" 2>/dev/null; then
   echo "error: $PUBKEY_DEST already holds a key -- delete it deliberately to rotate" >&2

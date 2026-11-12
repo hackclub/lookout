@@ -215,7 +215,7 @@ that exists.
 
 One key, generated once by [`scripts/apt-keygen.sh`](../scripts/apt-keygen.sh),
 signs both repositories. Its public half is committed at
-`clients/desktop/src-tauri/linux/lookout-archive-keyring.asc` on purpose: it
+`clients/native/packaging/linux/repo/lookout-archive-keyring.asc` on purpose: it
 ships inside the packages as the trusted key, and having it in git is what lets
 a locally built package enrol correctly.
 

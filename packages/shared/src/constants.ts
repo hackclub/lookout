@@ -182,8 +182,8 @@ export const CLIP_FIRST_CUT_DELAY_MS = 8_000;
  *  a multiple of 60) until the next confirm landed — read by users as the
  *  recorder hanging. This slack absorbs normal upload/confirm latency;
  *  a genuine stall still freezes the display, just this much later.
- *  Mirrored by the desktop tray ticker (MAX_TRAY_INTERPOLATION_SECS in
- *  clients/desktop/src-tauri/src/lib.rs) — keep the two in step.
+ *  Mirrored by the desktop app's TIMER_INTERPOLATION_SLACK_SECS
+ *  (crates/lookout-session) — keep the two in step.
  *  Default: 15 */
 export const TIMER_INTERPOLATION_SLACK_S = 15;
 

@@ -15,7 +15,7 @@ name: Takeover rehearsal
 # storage layout and native-state.json are uploaded per platform.
 #
 # Needs a release.yml run with lookout-native-* artifacts (e.g. a manual run
-# with "native only"); by default the newest successful one on this branch.
+# with "skip tests"); by default the newest successful one on this branch.
 
 on:
   workflow_dispatch:

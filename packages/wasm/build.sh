@@ -7,7 +7,7 @@
 #   cargo install wasm-bindgen-cli --version <version>
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-workspace="$here/../../clients/desktop/src-tauri"
+workspace="$here/../../crates"
 cd "$workspace"
 cargo build -p lookout-web --target wasm32-unknown-unknown --profile wasm-release
 mkdir -p "$here/dist"

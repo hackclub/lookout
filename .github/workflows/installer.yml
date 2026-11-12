@@ -15,13 +15,13 @@ on:
     paths:
       - packages/server/public/install.sh
       - scripts/test-installer.sh
-      - clients/desktop/src-tauri/linux/**
+      - clients/native/packaging/linux/repo/**
       - .github/workflows/installer.yml
   pull_request:
     paths:
       - packages/server/public/install.sh
       - scripts/test-installer.sh
-      - clients/desktop/src-tauri/linux/**
+      - clients/native/packaging/linux/repo/**
       - .github/workflows/installer.yml
   schedule:
     # Weekly: distributions move under the installer even when it doesn't.
@@ -42,7 +42,7 @@ jobs:
         run: |
           shellcheck -s sh packages/server/public/install.sh scripts/test-installer.sh
           # Sourcing /etc/default/lookout is the point of those lines.
-          shellcheck -s sh -e SC1090,SC1091 clients/desktop/src-tauri/linux/*.sh
+          shellcheck -s sh -e SC1090,SC1091 clients/native/packaging/linux/repo/*.sh
 
       # The installer embeds the key rather than fetching it. If it drifted
       # from the one the packages ship and the repository is signed with,
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           sed -n '/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/,/^-----END PGP PUBLIC KEY BLOCK-----$/p' \
             packages/server/public/install.sh > embedded.asc
-          diff -u clients/desktop/src-tauri/linux/lookout-archive-keyring.asc embedded.asc
+          diff -u clients/native/packaging/linux/repo/lookout-archive-keyring.asc embedded.asc
           fpr=$(gpg --batch --show-keys --with-colons embedded.asc | awk -F: '/^fpr:/ {print $10; exit}')
           grep -q "KEY_FPR=\"$fpr\"" packages/server/public/install.sh
 
@@ -62,10 +62,10 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'baseurl=%s/rpm' packages/server/public/install.sh
-          grep -q 'REPO_URL="https://pkg.lookout.hackclub.com/rpm"' clients/desktop/src-tauri/linux/rpm-postinst.sh
+          grep -q 'REPO_URL="https://pkg.lookout.hackclub.com/rpm"' clients/native/packaging/linux/repo/rpm-postinst.sh
           hdr='# Added by the lookout package. Delete it to stop receiving updates; it will'
-          for f in packages/server/public/install.sh clients/desktop/src-tauri/linux/postinst.sh \
-                   clients/desktop/src-tauri/linux/rpm-postinst.sh; do
+          for f in packages/server/public/install.sh clients/native/packaging/linux/repo/postinst.sh \
+                   clients/native/packaging/linux/repo/rpm-postinst.sh; do
             grep -qF "$hdr" "$f" || { echo "::error::$f has a different repository header"; exit 1; }
           done
 

@@ -14,21 +14,17 @@ RUN npm run build -w packages/server
 # vite/tsup and the whole React toolchain out of that tree is the difference
 # between shipping them and not. Only the built assets cross over.
 # The recorder engine, compiled to WebAssembly (@lookout/wasm), which
-# @lookout/react loads. Only lookout-web and the crates under it build here;
-# the desktop app's own sources are stand-ins so Cargo can read the
-# workspace without them (and a desktop UI change doesn't bust this cache).
+# @lookout/react loads. Only lookout-web and the crates under it build here.
 FROM rust:1-slim-bookworm AS wasm
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && rustup target add wasm32-unknown-unknown
 WORKDIR /app
-COPY clients/desktop/src-tauri/Cargo.toml clients/desktop/src-tauri/Cargo.lock clients/desktop/src-tauri/
+COPY crates/Cargo.lock crates/
 COPY packages/wasm/install-bindgen.sh packages/wasm/
 RUN packages/wasm/install-bindgen.sh /usr/local/bin
-COPY clients/desktop/src-tauri/crates clients/desktop/src-tauri/crates
-RUN mkdir -p clients/desktop/src-tauri/src \
-  && touch clients/desktop/src-tauri/src/lib.rs clients/desktop/src-tauri/src/main.rs
+COPY crates crates
 COPY packages/wasm/build.sh packages/wasm/
 RUN bash packages/wasm/build.sh
 

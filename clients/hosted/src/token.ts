@@ -37,7 +37,7 @@ export function readUrlOptions(search: string): UrlOptions {
 /**
  * The deep link that hands a session to the installed desktop app.
  * Must stay byte-identical to what the desktop app parses — see
- * `handle_deep_link_urls` in clients/desktop/src-tauri/src/lib.rs.
+ * `handle_deep_links` in clients/native/crates/lookout-native/src/windows/main_window.rs.
  */
 export function desktopHandoffUrl(token: string): string {
   return `lookout://session/?token=${encodeURIComponent(token)}`;

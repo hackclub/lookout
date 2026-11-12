@@ -14,12 +14,12 @@ on:
     branches: ["native/**"]
     paths:
       - "clients/native/**"
-      - "clients/desktop/src-tauri/crates/**"
+      - "crates/**"
       - ".github/workflows/native-ci.yml"
   pull_request:
     paths:
       - "clients/native/**"
-      - "clients/desktop/src-tauri/crates/**"
+      - "crates/**"
       - ".github/workflows/native-ci.yml"
   workflow_dispatch:
 

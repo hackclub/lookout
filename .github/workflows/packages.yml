@@ -292,7 +292,7 @@ jobs:
           echo pkg.lookout.hackclub.com > repo/CNAME
           # One key signs both repositories; served at the root so the install
           # docs have a single URL to point at.
-          cp clients/desktop/src-tauri/linux/lookout-archive-keyring.asc repo/
+          cp clients/native/packaging/linux/repo/lookout-archive-keyring.asc repo/
           # Redundant for an Actions deploy, which serves files as-is; kept in
           # case the Pages source is ever switched back to a branch.
           touch repo/.nojekyll

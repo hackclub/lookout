@@ -6,16 +6,12 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      native:
-        description: "Also build Lookout Native (clients/native) artifacts"
-        type: boolean
-        default: false
-      native_only:
-        description: "Only build Lookout Native: skip the test suite and the Tauri build (unsigned unless \"sign\" is set, nothing published)"
+      skip_tests:
+        description: "Skip the test suite and only build (unsigned unless \"sign\" is set; nothing is published)"
         type: boolean
         default: false
       sign:
-        description: "Sign (and notarize on macOS) every platform's build even though this isn't a tagged release: Windows and macOS, Tauri and Lookout Native (tests the signing setup; still publishes nothing)"
+        description: "Sign (and notarize on macOS) the Windows and macOS builds even though this isn't a tagged release (tests the signing setup; still publishes nothing)"
         type: boolean
         default: false
 
@@ -28,512 +24,25 @@ jobs:
   # tests pass. Uses `workflow_call` from .github/workflows/tests.yml so
   # the same jobs run identically on push, PR, and release.
   tests:
-    if: ${{ !inputs.native_only }}
+    if: ${{ !inputs.skip_tests }}
     uses: ./.github/workflows/tests.yml
-
-  build:
-    needs: tests
-    if: ${{ !inputs.native_only }}
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macOS (universal binary for both Intel and Apple Silicon)
-          - platform: macos-latest
-            args: --target universal-apple-darwin
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            os_label: macos
-          # Windows
-          - platform: windows-latest
-            args: ""
-            rust_targets: ""
-            os_label: windows
-          - platform: windows-latest
-            args: --target aarch64-pc-windows-msvc
-            rust_targets: aarch64-pc-windows-msvc
-            os_label: windows
-
-    runs-on: ${{ matrix.platform }}
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libxdo-dev \
-            libx11-dev \
-            libxcb-randr0-dev \
-            libxcb-shm0-dev \
-            libpipewire-0.3-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            libgbm-dev \
-            xdg-utils \
-            rpm \
-            zstd
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: lts/*
-          cache: npm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          targets: ${{ matrix.rust_targets }}
-
-      # Cache key is platform-based so it's shared with tests.yml's
-      # Linux-native cache (same shared-key pattern). For mac/Windows
-      # and cross-compile targets, each gets its own namespace.
-      - name: Rust cache
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: "./clients/desktop/src-tauri -> target"
-          shared-key: rust-${{ matrix.platform }}-${{ matrix.args || 'native' }}
-
-      # @lookout/react, which the desktop frontend bundles, loads the recorder
-      # from @lookout/wasm; build it before react.
-      - name: Install wasm toolchain
-        shell: bash
-        run: |
-          rustup target add wasm32-unknown-unknown
-          packages/wasm/install-bindgen.sh
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build workspace dependencies
-        shell: bash
-        run: |
-          npm run build -w packages/shared
-          npm run build -w packages/wasm
-          npm run build -w clients/react
-
-      # A placeholder key here fails silently: the package installs fine and
-      # then never updates.
-      - name: Require the apt repository key
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
-        run: |
-          key=clients/desktop/src-tauri/linux/lookout-archive-keyring.asc
-          if ! grep -q "BEGIN PGP PUBLIC KEY BLOCK" "$key"; then
-            echo "::error::$key is still a placeholder. Run scripts/apt-keygen.sh once and commit the public half, or this release ships a .deb that never self-updates." >&2
-            exit 1
-          fi
-          echo "OK: the package will ship a repository key"
-
-      # Smart App Control evaluates every PE image it loads, not just the one
-      # the user double-clicked. Signing target/release/bundle AFTER the build
-      # only ever reached the NSIS installer -- the app binary was already
-      # sealed inside the archive, unsigned, so Windows blocked it on launch
-      # with "we could not verify its publisher". That shipped in 0.3.11.
-      #
-      # bundle.windows.signCommand fixes the ordering: tauri-bundler signs the
-      # app binary and any sidecar BEFORE they go into the archive, then signs
-      # the installer it produces, then writes the updater .sig over the final
-      # signed bytes. A non-zero exit from the command fails the build.
-      #
-      # The config is generated here rather than committed so a plain
-      # `tauri build` on a dev machine -- which has no signing credentials --
-      # keeps working untouched.
-      - name: Configure Windows code signing
-        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
-        shell: bash
-        env:
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        run: |
-          set -euo pipefail
-          cargo install artifact-signing-cli --version 0.11.0 --locked
-          command -v artifact-signing-cli >/dev/null || {
-            echo "::error::artifact-signing-cli installed but is not on PATH." >&2
-            exit 1
-          }
-
-          # artifact-signing-cli defaults --sign-tool-path to one hardcoded SDK
-          # version. Resolve whatever this runner actually ships instead, so a
-          # runner image update cannot silently break signing.
-          signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
-            -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -V | tail -1)
-          if [ -z "$signtool" ]; then
-            echo "::error::No x64 signtool.exe found under the Windows 10 SDK. artifact-signing-cli would fall back to a hardcoded path that does not exist on this runner." >&2
-            exit 1
-          fi
-
-          # find returns an MSYS path (/c/...). MSYS rewrites those on the way
-          # into a native exe, but this one is written to a JSON file that
-          # tauri reads from pwsh, where no rewriting happens -- so convert it
-          # here. -m gives C:/... rather than C:\..., which Windows accepts and
-          # which needs no escaping to survive the JSON below.
-          command -v cygpath >/dev/null || {
-            echo "::error::cygpath is unavailable, so the signtool path cannot be made native." >&2
-            exit 1
-          }
-          signtool=$(cygpath -m "$signtool")
-          test -f "$signtool"
-          echo "using signtool: $signtool"
-
-          cat > "$GITHUB_WORKSPACE/clients/desktop/src-tauri/tauri.signing.conf.json" <<CONFEOF
-          {
-            "bundle": {
-              "windows": {
-                "signCommand": {
-                  "cmd": "artifact-signing-cli",
-                  "args": [
-                    "-e", "https://eus.codesigning.azure.net",
-                    "-a", "lookout",
-                    "-c", "lookout",
-                    "--sign-tool-path", "$signtool",
-                    "%1"
-                  ]
-                }
-              }
-            }
-          }
-          CONFEOF
-          cat "$GITHUB_WORKSPACE/clients/desktop/src-tauri/tauri.signing.conf.json"
-
-          # tauri-bundler captures this command's stdout and stderr and reports
-          # only "failed to run artifact-signing-cli", so a credential or
-          # tooling problem is invisible from inside the build -- and it
-          # surfaces four minutes in, after the Rust compile. Sign a throwaway
-          # binary here, where the output is shown, and fail before any of that.
-          probe="$(mktemp -d)/probe.exe"
-          cp ~/.cargo/bin/artifact-signing-cli.exe "$probe"
-          probe=$(cygpath -m "$probe")
-          echo "--- preflight: signing $probe"
-          if ! artifact-signing-cli \
-              -e https://eus.codesigning.azure.net \
-              -a lookout -c lookout \
-              --sign-tool-path "$signtool" "$probe"; then
-            echo "::error::artifact-signing-cli could not sign a probe binary. The output above is the real reason the build would fail; tauri only reports 'failed to run artifact-signing-cli'." >&2
-            exit 1
-          fi
-          "$signtool" verify //pa "$probe"
-          echo "OK: the signer authenticates and produces a verifiable signature"
-
-      - name: Build app (with signing)
-        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign)
-        run: npm run tauri build -- ${{ matrix.args }} ${{ runner.os == 'Windows' && format('--config {0}/clients/desktop/src-tauri/tauri.signing.conf.json', github.workspace) || '' }}
-        working-directory: clients/desktop
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Read by artifact-signing-cli via bundle.windows.signCommand.
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          # `[profile.release] debug = true` in Cargo.toml exists to emit the
-          # Windows .pdb. On MSVC that debug info lands in a SEPARATE file, and
-          # on macOS in a .dSYM outside the .app — but on Linux it is embedded
-          # straight into the ELF. Measured on 0.3.7: a 136MB .deb and .rpm
-          # against a 6MB Windows installer and a 20MB universal macOS dmg.
-          #
-          # Two costs. Linux users download 136MB per update through the
-          # updater, and the rpm bundler spends 76 MINUTES single-threaded
-          # xz-compressing it (06:24:56 -> 07:41:03 on the 0.3.7 build), which
-          # is 85% of a 90-minute job. Turning debug off for Linux only keeps
-          # the .pdb that this setting was added for.
-          CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
-
-      - name: Build app (without signing)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') && !inputs.sign }}
-        run: npm run tauri build -- ${{ matrix.args }}
-        working-directory: clients/desktop
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          VITE_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          # `[profile.release] debug = true` in Cargo.toml exists to emit the
-          # Windows .pdb. On MSVC that debug info lands in a SEPARATE file, and
-          # on macOS in a .dSYM outside the .app — but on Linux it is embedded
-          # straight into the ELF. Measured on 0.3.7: a 136MB .deb and .rpm
-          # against a 6MB Windows installer and a 20MB universal macOS dmg.
-          #
-          # Two costs. Linux users download 136MB per update through the
-          # updater, and the rpm bundler spends 76 MINUTES single-threaded
-          # xz-compressing it (06:24:56 -> 07:41:03 on the 0.3.7 build), which
-          # is 85% of a 90-minute job. Turning debug off for Linux only keeps
-          # the .pdb that this setting was added for.
-          CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Linux' && 'false' || 'true' }}
-
-      # A wrong name in the .deb's Depends makes the package UNINSTALLABLE,
-      # which is worse than the missing-dependency bug the field was added to
-      # fix — and it cannot be caught by building, only by installing. So do
-      # that here, in a clean container, before the artifact reaches anyone.
-      #
-      # Every name is read back OUT of the package rather than assumed, so this
-      # can't fail spuriously when the product or binary name changes — a
-      # verification step that cries wolf would just get deleted.
-      - name: Verify the .deb installs on a clean Ubuntu
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          deb=$(find clients/desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
-          if [ -z "$deb" ]; then echo "no .deb produced — nothing to verify"; exit 0; fi
-          pkg=$(dpkg-deb -f "$deb" Package)
-          echo "verifying $deb  ($(du -h "$deb" | cut -f1), package '$pkg')"
-          echo "--- declared dependencies ---"
-          dpkg-deb -f "$deb" Depends Recommends || true
-          docker run --rm \
-            -v "$PWD/$(dirname "$deb")":/pkg:ro \
-            -v "$PWD/scripts/verify-deb.sh":/verify.sh:ro \
-            -e "DEB=$(basename "$deb")" -e "PKG=$pkg" \
-            ubuntu:24.04 bash /verify.sh
-          echo "OK: the .deb installs, its dependencies resolve, the binary links, and apt enrollment behaves"
-
-      - name: Build Arch Linux package (.pkg.tar.zst)
-        if: runner.os == 'Linux'
-        run: |
-          if [ -d "clients/desktop/src-tauri/target/release/bundle/deb" ]; then
-            cd clients/desktop/src-tauri/target/release/bundle/deb
-            for deb in *.deb; do
-              if [ -f "$deb" ]; then
-                echo "Building Arch package from $deb"
-                DEB_FILE=$(basename "$deb")
-                
-                # Extract version from deb file name (e.g., lookout_0.0.26_amd64.deb -> 0.0.26)
-                PKGVER=$(echo "$DEB_FILE" | grep -oP '([0-9]+\.[0-9]+\.[0-9]+)' | head -1)
-                PKGVER=${PKGVER:-1.0.0}
-                
-                # Determine architecture
-                if [[ "$DEB_FILE" == *"arm64"* || "$DEB_FILE" == *"aarch64"* ]]; then
-                  ARCH="aarch64"
-                else
-                  ARCH="x86_64"
-                fi
-                
-                mkdir -p arch_pkg
-                cd arch_pkg
-                ar x "../$DEB_FILE"
-                
-                if [ -f "data.tar.xz" ]; then
-                  tar -xf data.tar.xz
-                elif [ -f "data.tar.gz" ]; then
-                  tar -xf data.tar.gz
-                fi
-                
-                rm -f data.tar.* control.tar.* debian-binary
-                
-                SIZE=$(du -sb . | awk '{print $1}')
-                
-                echo "pkgname = lookout-bin" > .PKGINFO
-                echo "pkgver = ${PKGVER}-1" >> .PKGINFO
-                echo "pkgdesc = Lookout desktop app" >> .PKGINFO
-                echo "url = https://github.com/hackclub/lookout" >> .PKGINFO
-                echo "builddate = $(date +%s)" >> .PKGINFO
-                echo "packager = GitHub Actions" >> .PKGINFO
-                echo "size = ${SIZE}" >> .PKGINFO
-                echo "arch = ${ARCH}" >> .PKGINFO
-                echo "license = MIT" >> .PKGINFO
-                echo "depend = cairo" >> .PKGINFO
-                echo "depend = desktop-file-utils" >> .PKGINFO
-                echo "depend = gdk-pixbuf2" >> .PKGINFO
-                echo "depend = glib2" >> .PKGINFO
-                echo "depend = gtk3" >> .PKGINFO
-                echo "depend = hicolor-icon-theme" >> .PKGINFO
-                echo "depend = libsoup3" >> .PKGINFO
-                echo "depend = pango" >> .PKGINFO
-                echo "depend = webkit2gtk-4.1" >> .PKGINFO
-                # GStreamer, spelled out. The .deb and .rpm both declare these
-                # (see tauri.conf.json > bundle.linux) and this list has to say
-                # the same thing in Arch's names, because Arch will not say it
-                # for us: webkit2gtk-4.1 lists gst-plugins-good, gst-plugins-bad
-                # and gst-libav as *optdepends*, so pacman never pulls them in.
-                # Without them WebKitGTK has no demuxer and no H.264 decoder,
-                # and the first <video> the app loads has nothing to play it.
-                # pacman has no "recommends", so what the .deb only recommends
-                # (x264enc, from -ugly) is a hard dependency here or it is
-                # nothing at all.
-                echo "depend = gstreamer" >> .PKGINFO
-                echo "depend = gst-plugins-base" >> .PKGINFO
-                echo "depend = gst-plugins-good" >> .PKGINFO
-                echo "depend = gst-plugins-bad" >> .PKGINFO
-                echo "depend = gst-plugins-ugly" >> .PKGINFO
-                echo "depend = gst-libav" >> .PKGINFO
-                # pipewiresrc — screen capture, same story as above.
-                echo "depend = gst-plugin-pipewire" >> .PKGINFO
-                
-                tar --zstd -cf "../lookout_${PKGVER}_${ARCH}.pkg.tar.zst" .PKGINFO *
-                cd ..
-                rm -rf arch_pkg
-              fi
-            done
-          fi
-
-      # The archlinux image is x86_64 only, so the aarch64 package goes
-      # unchecked. Its .PKGINFO comes from the same lines as this one.
-      - name: Verify the Arch package installs
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: |
-          set -euo pipefail
-          dir=clients/desktop/src-tauri/target/release/bundle/deb
-          pkg=$(find "$dir" -maxdepth 1 -name '*.pkg.tar.zst' | head -1)
-          if [ -z "$pkg" ]; then echo "no .pkg.tar.zst produced — nothing to verify"; exit 0; fi
-          echo "verifying $pkg  ($(du -h "$pkg" | cut -f1))"
-          docker run --rm \
-            -v "$PWD/$dir":/pkg:ro \
-            -v "$PWD/scripts/verify-arch.sh":/verify.sh:ro \
-            -e "PKGFILE=$(basename "$pkg")" \
-            archlinux:latest bash /verify.sh
-
-      # 0.3.11 shipped a signed installer wrapped around an UNSIGNED app
-      # binary, and nothing in this pipeline noticed. The installer carrying a
-      # signature says nothing about its payload, so reach inside the archive
-      # and assert every executable it will drop on disk is signed too.
-      - name: Verify the installer and its payload are signed
-        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
-        shell: bash
-        working-directory: clients/desktop
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" \
-            -name signtool.exe -path '*/x64/*' 2>/dev/null | sort -V | tail -1)
-          test -n "$signtool"
-
-          checked=0
-          for exe in \
-            src-tauri/target/release/bundle/nsis/*-setup.exe \
-            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe; do
-            echo "=== installer: $exe"
-            # Double slashes keep Git Bash from mangling the flags into paths.
-            "$signtool" verify //pa //v "$exe"
-
-            payload=$(mktemp -d)
-            7z x -y -o"$payload" "$exe" > /dev/null
-            # Names are read back OUT of the archive rather than assumed, so a
-            # mainBinaryName change cannot make this pass vacuously. The NSIS
-            # plugin DLLs in $PLUGINSDIR are stock and never ours to sign.
-            inner=$(find "$payload" -name '*.exe' -not -path '*PLUGINSDIR*')
-            if [ -z "$inner" ]; then
-              echo "::error::$exe has no payload executable. The bundle layout changed and this check can no longer prove anything." >&2
-              exit 1
-            fi
-            while read -r f; do
-              echo "--- payload: $(basename "$f")"
-              "$signtool" verify //pa "$f"
-              checked=$((checked + 1))
-            done <<< "$inner"
-            rm -rf "$payload"
-          done
-
-          if [ "$checked" -eq 0 ]; then
-            echo "::error::No NSIS installer matched. Windows artifacts went unverified -- check the bundle path before releasing." >&2
-            exit 1
-          fi
-          echo "OK: installer and $checked payload executable(s) carry a valid signature"
-
-      # signCommand now signs the installer DURING bundling, so the .sig the
-      # bundler writes afterwards already covers the final bytes. This step is
-      # kept as a backstop: it re-signs over whatever is on disk, so if that
-      # ordering ever changes the uploaded .sig still matches the uploaded exe
-      # and auto-update keeps verifying. Re-signing identical bytes is a no-op.
-      - name: Regenerate updater signatures (Windows)
-        if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
-        shell: bash
-        working-directory: clients/desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          shopt -s nullglob
-          signed=0
-          for exe in \
-            src-tauri/target/release/bundle/nsis/*-setup.exe \
-            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe; do
-            echo "Re-signing updater signature for $exe"
-            npm run --silent tauri -- signer sign "$exe"
-            signed=$((signed + 1))
-          done
-          if [ "$signed" -eq 0 ]; then
-            echo "::error::No NSIS installer matched the updater re-signing globs. The uploaded .sig would be stale (generated over the unsigned exe) and auto-update would fail verification. Check the NSIS bundle path/filename." >&2
-            exit 1
-          fi
-          echo "Re-signed $signed updater signature(s)."
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.platform }}-${{ matrix.args || 'native' }}
-          path: |
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.dmg
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.app.tar.gz
-            clients/desktop/src-tauri/target/release/bundle/**/*.dmg
-            clients/desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
-            clients/desktop/src-tauri/target/release/bundle/**/*.deb
-            clients/desktop/src-tauri/target/release/bundle/**/*.rpm
-            clients/desktop/src-tauri/target/release/bundle/**/*.msi
-            clients/desktop/src-tauri/target/release/bundle/**/*.exe
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.msi
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.exe
-            clients/desktop/src-tauri/target/release/bundle/**/*.pkg.tar.zst
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.app.tar.gz.sig
-            clients/desktop/src-tauri/target/release/bundle/**/*.app.tar.gz.sig
-            clients/desktop/src-tauri/target/release/bundle/**/*.exe.sig
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.exe.sig
-            clients/desktop/src-tauri/target/release/bundle/**/*.msi.sig
-            clients/desktop/src-tauri/target/*/release/bundle/**/*.msi.sig
-
-      # Preserve MSVC debug symbols (.pdb) so crash offsets from Windows
-      # (esp. ARM64 alignment faults) can be symbolized later. The .pdb is a
-      # build artifact only — it is NOT shipped to users or attached to the
-      # public release.
-      - name: Upload Windows debug symbols (.pdb)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: pdb-${{ matrix.platform }}-${{ matrix.args || 'native' }}
-          if-no-files-found: warn
-          path: |
-            clients/desktop/src-tauri/target/release/*.pdb
-            clients/desktop/src-tauri/target/*/release/*.pdb
 
   # Lookout Native (clients/native, GPUI): builds the Lookout-native_*
   # artifacts that native-updates (below) signs into update.json, plus a .dmg
-  # for first installs on macOS, plus the Linux repository packages. Tagged
-  # releases always build native; manual runs can opt in with "native".
+  # for first installs on macOS, plus the Linux repository packages.
   # The bundling itself lives in
   # clients/native/packaging/ so it runs the same way on a dev machine.
   # Untagged (manual) runs build unsigned artifacts for testing unless `sign`
   # is set; only tags stamp the tag's version and publish. A manual run with
-  # `native_only` skips the tests and the Tauri build and only runs this job;
-  # download the lookout-native-* artifacts from the run page.
+  # `skip_tests` skips the tests; download the lookout-native-* artifacts from
+  # the run page.
   native-build:
     needs: tests
-    # `native_only` skips the tests; a skipped need would skip this job too
+    # `skip_tests` skips the tests; a skipped need would skip this job too
     # unless the condition says otherwise.
     if: >-
       ${{ !cancelled()
-      && (needs.tests.result == 'success' || (inputs.native_only && needs.tests.result == 'skipped'))
-      && (startsWith(github.ref, 'refs/tags/v') || vars.NATIVE_RELEASE == 'true' || inputs.native || inputs.native_only) }}
+      && (needs.tests.result == 'success' || (inputs.skip_tests && needs.tests.result == 'skipped')) }}
     permissions:
       contents: read
     strategy:
@@ -543,7 +52,7 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             label: darwin-aarch64
-          # Cross-built on Apple Silicon, like the Tauri universal binary.
+          # Cross-built on Apple Silicon.
           - platform: macos-latest
             target: x86_64-apple-darwin
             label: darwin-x86_64
@@ -649,7 +158,7 @@ jobs:
 
       - name: Require the repository key for Linux releases
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
-        run: grep -q 'BEGIN PGP PUBLIC KEY BLOCK' clients/desktop/src-tauri/linux/lookout-archive-keyring.asc
+        run: grep -q 'BEGIN PGP PUBLIC KEY BLOCK' clients/native/packaging/linux/repo/lookout-archive-keyring.asc
 
       - name: Verify native migration and installer unit tests
         # Tagged releases only: this compiles the whole dependency tree a second
@@ -702,8 +211,7 @@ jobs:
         working-directory: clients/native
         run: cargo build --release -p lookout-native --target ${{ matrix.target }}
 
-      # Same signer, account and preflight as the Tauri job above. sign.cmd
-      # signs lookout.exe, which is also the installer (src/installer/).
+      # Azure Artifact Signing. sign.cmd signs lookout.exe, which is also the installer (src/installer/).
       - name: Configure Windows code signing
         if: (startsWith(github.ref, 'refs/tags/v') || inputs.sign) && runner.os == 'Windows'
         shell: bash
@@ -776,7 +284,7 @@ jobs:
       # Skipped when the token isn't available (forks, Dependabot).
       #
       # SENTRY_AUTH_TOKEN must be an org token for the `hack-club` Sentry org,
-      # where `lookout-native` (and `lookout-desktop`) live: an org token
+      # where `lookout-native` lives: an org token
       # always overrides SENTRY_ORG. Never fails the release: a missing symbol
       # upload only means unsymbolicated crash reports.
       - name: Upload debug symbols to Sentry
@@ -807,159 +315,38 @@ jobs:
           if-no-files-found: warn
           path: clients/native/target/${{ matrix.target }}/release/*.pdb
 
+  # The draft release, with the Linux packages (the apt/dnf/pacman repositories
+  # take them from here). native-updates adds the macOS and Windows builds.
   release:
-    needs: [build, native-build]
+    needs: native-build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Download all artifacts
+      - name: Download the Linux packages
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          pattern: lookout-native-linux-*
+          merge-multiple: true
+          path: linux
 
-      - name: Display artifacts
-        run: ls -R artifacts
-
-      - name: Get version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Rename artifacts with OS labels
+      - name: Create the draft release
         run: |
-          mkdir -p release-assets
-          # Lookout Native's artifacts (lookout-native-*) are published by the
-          # native-updates job, never mixed into the Tauri assets / latest.json.
-          find artifacts -type f -not -path 'artifacts/lookout-native-*' \( \
-            -name "*.dmg" -o \
-            -name "*.app.tar.gz" -o \
-            -name "*.deb" -o \
-            -name "*.rpm" -o \
-            -name "*.msi" -o \
-            -name "*.exe" -o \
-            -name "*.pkg.tar.zst" -o \
-            -name "*.app.tar.gz.sig" -o \
-            -name "*.exe.sig" -o \
-            -name "*.msi.sig" \
-          \) | while read -r file; do
-            FILENAME=$(basename "$file")
-            # Determine OS label from artifact directory
-            case "$file" in
-              *macos*) OS="macos" ;;
-              *ubuntu*) OS="linux" ;;
-              *windows*) OS="windows" ;;
-              *) OS="unknown" ;;
-            esac
-            # Normalize RPM names to match underscore convention used by other artifacts
-            # Lookout-0.0.16-1.x86_64.rpm -> Lookout_0.0.16_x86_64.rpm
-            if [[ "$FILENAME" == *.rpm ]]; then
-              # Strip "Lookout-", version, release number; extract arch
-              RPM_REST="${FILENAME#Lookout-}"       # 0.0.16-1.x86_64.rpm
-              RPM_VER="${RPM_REST%%-[0-9].*}"        # 0.0.16
-              RPM_ARCH="${RPM_REST##*-[0-9].}"       # x86_64.rpm
-              FILENAME="Lookout_${RPM_VER}_${RPM_ARCH}"
-            fi
-            # Add OS label: Lookout_0.0.16_x64-setup.exe -> Lookout_linux-0.0.16_x64-setup.exe
-            if [[ "$FILENAME" == *"_"* ]] && [[ "$FILENAME" != *"${OS}-"* ]]; then
-              PREFIX="${FILENAME%%_*}"
-              SUFFIX="${FILENAME#*_}"
-              NEW_NAME="${PREFIX}_${OS}-${SUFFIX}"
-            elif [[ "$FILENAME" != *"${OS}"* ]]; then
-              # Files without underscores (e.g. Lookout.app.tar.gz) — prepend OS
-              NEW_NAME="${OS}-${FILENAME}"
-            else
-              NEW_NAME="$FILENAME"
-            fi
-            echo "Renaming: $FILENAME -> $NEW_NAME"
-            cp "$file" "release-assets/$NEW_NAME"
-          done
-          # Native packages replace Tauri in the existing repositories.
-          cp artifacts/lookout-native-linux-*/*.deb release-assets/
-          cp artifacts/lookout-native-linux-*/*.rpm release-assets/
-          cp artifacts/lookout-native-linux-*/*.pkg.tar.zst release-assets/
-          ls -la release-assets/
-
-      - name: Generate update manifest (latest.json)
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          BASE_URL="https://github.com/hackclub/lookout/releases/download/v${VERSION}"
-
-          # Read signatures from .sig files
-          MAC_SIG=""
-          WIN_X64_SIG=""
-          WIN_ARM_SIG=""
-          for sig_file in release-assets/*.sig; do
-            [ -f "$sig_file" ] || continue
-            SIG_CONTENT=$(cat "$sig_file")
-            FILENAME=$(basename "$sig_file")
-            case "$FILENAME" in
-              *macos*.app.tar.gz.sig) MAC_SIG="$SIG_CONTENT" ;;
-              *windows*aarch64*setup.exe.sig|*windows*arm*setup.exe.sig) WIN_ARM_SIG="$SIG_CONTENT" ;;
-              *windows*setup.exe.sig) WIN_X64_SIG="$SIG_CONTENT" ;;
-            esac
-          done
-
-          # Find actual updatable artifact filenames
-          MAC_FILE=$(ls release-assets/*macos*.app.tar.gz 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "")
-          WIN_X64_FILE=$(ls release-assets/*windows*setup.exe 2>/dev/null | grep -v -e aarch64 -e arm64 | head -1 | xargs basename 2>/dev/null || echo "")
-          WIN_ARM_FILE=$(find release-assets -maxdepth 1 -name '*windows*setup.exe' | grep -e aarch64 -e arm64 | head -1 | xargs -r basename 2>/dev/null || echo "")
-
-          # Build platforms JSON dynamically (only include platforms with artifacts)
-          PLATFORMS="{"
-          FIRST=true
-
-          add_platform() {
-            local key="$1" sig="$2" file="$3"
-            [ -z "$sig" ] || [ -z "$file" ] && return
-            if [ "$FIRST" = true ]; then FIRST=false; else PLATFORMS="$PLATFORMS,"; fi
-            PLATFORMS="$PLATFORMS \"$key\": { \"signature\": \"$sig\", \"url\": \"$BASE_URL/$file\" }"
-          }
-
-          add_platform "darwin-universal" "$MAC_SIG" "$MAC_FILE"
-          add_platform "darwin-x86_64" "$MAC_SIG" "$MAC_FILE"
-          add_platform "darwin-aarch64" "$MAC_SIG" "$MAC_FILE"
-          add_platform "windows-x86_64" "$WIN_X64_SIG" "$WIN_X64_FILE"
-          add_platform "windows-aarch64" "$WIN_ARM_SIG" "$WIN_ARM_FILE"
-
-          PLATFORMS="$PLATFORMS }"
-
-          cat > release-assets/latest.json << ENDJSON
-          {
-            "version": "v${VERSION}",
-            "notes": "See the assets to download and install.\n(You may need to click \"Show all\" after expanding the dropdown to see one compatible with your system)",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": ${PLATFORMS}
-          }
-          ENDJSON
-
-          echo "Generated latest.json:"
-          cat release-assets/latest.json
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
+          set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
+          ls -la linux
+          gh release create "$TAG" --draft --title "Lookout ${TAG}" \
+            --notes "Download Lookout for your computer below."
+          gh release upload "$TAG" linux/*.deb linux/*.rpm linux/*.pkg.tar.zst --clobber
 
-          # Create draft release
-          gh release create "$TAG" \
-            --title "Lookout v${VERSION}" \
-            --notes "See the assets to download and install.\n(You may need to click \"Show all\" after expanding the dropdown to see one compatible with your system)" \
-            --draft
-
-          # Upload all renamed artifacts
-          for file in release-assets/*; do
-            echo "Uploading: $file"
-            gh release upload "$TAG" "$file" --clobber
-          done
-
-  # Lookout Native ("update v2"): signed update.json + zstd patches for the
-  # GPUI app. A no-op until a build job uploads native artifacts, so the
-  # Tauri release above is unaffected. Contract for that build job:
+  # Lookout Native's updates: signed update.json + zstd patches, and
+  # latest.json for anyone still on the old Tauri app. Contract with
+  # native-build:
   #   actions/upload-artifact name `lookout-native-<anything>`, files named
   #   Lookout-native_<version>_darwin-aarch64.app.tar.gz   (tar of Lookout.app/)
   #   Lookout-native_<version>_darwin-x86_64.app.tar.gz
@@ -1074,22 +461,20 @@ jobs:
           publish beta "$REPO_URL/channel-beta" out-beta channel-beta \
             || echo "::warning::The beta channel (channel-beta) couldn't be updated: published releases are immutable here."
 
-      # Moves Tauri users onto Lookout Native. The Tauri updater reads latest.json,
-      # so pointing its macOS and Windows (x64, Arm64) entries at the native artifacts makes
-      # the Tauri app install native as an ordinary update. Both formats fit as is:
-      # - macOS: Tauri swaps in the Lookout.app inside the .app.tar.gz and relaunches
+      # Moves people still on the old Tauri app (v0.3.x) onto Lookout Native.
+      # Their updater reads releases/latest/download/latest.json, so it lists
+      # the native macOS and Windows (x64, Arm64) builds and the Tauri app
+      # installs them as an ordinary update:
+      # - macOS: it swaps in the Lookout.app inside the .app.tar.gz and relaunches
       #   Contents/MacOS/lookout, which native has too (same bundle id).
-      # - Windows: Tauri runs the setup.exe with `/S /UPDATE /R /ARGS`, the flags the
-      #   native installer already takes. It installs to the same %LOCALAPPDATA%\Lookout
-      #   and the same Uninstall\Lookout registry key, replacing the Tauri install.
-      # First launch imports the Tauri app's localStorage (store.rs import::from_tauri).
+      # - Windows: it runs the setup.exe with `/S /UPDATE /R /ARGS` (or /P on
+      #   older builds), flags the native installer takes as a silent update. It
+      #   installs to the same %LOCALAPPDATA%\Lookout and Uninstall\Lookout key.
+      # First launch imports the Tauri app's sign-ins (store.rs import::from_tauri).
       # Signatures: the same minisign key, base64-wrapped the way Tauri expects.
-      # Stable tags only, and only when the NATIVE_TAKEOVER repo variable is 'true'.
-      - name: Point the Tauri updater (latest.json) at Lookout Native
-        if: >-
-          steps.native.outputs.present == 'true'
-          && vars.NATIVE_TAKEOVER == 'true'
-          && !contains(github.ref_name, '-')
+      # Stable tags only: Tauri builds have no beta channel.
+      - name: Write latest.json for the old Tauri app
+        if: steps.native.outputs.present == 'true' && !contains(github.ref_name, '-')
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -1099,9 +484,9 @@ jobs:
           VERSION="${TAG#v}"
           TOOL=clients/native/target/release/lookout-update-tool
           BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
-
-          gh release download "$TAG" --pattern latest.json --dir takeover --clobber
-          cp takeover/latest.json takeover/latest.tauri.json
+          mkdir -p takeover
+          jq -n --arg v "v$VERSION" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $v, notes: "Lookout is now a native app.", pub_date: $d, platforms: {}}' > takeover/latest.json
 
           entry() { # tauri-key native-file
             local f="native/$2"
@@ -1122,20 +507,9 @@ jobs:
           entry darwin-x86_64 "Lookout-native_${VERSION}_darwin-x86_64.app.tar.gz"
           entry windows-x86_64 "Lookout-native_${VERSION}_windows-x86_64-setup.exe"
           entry windows-aarch64 "Lookout-native_${VERSION}_windows-aarch64-setup.exe"
-          # Tauri builds look up darwin-<arch>, never darwin-universal.
-          jq 'del(.platforms["darwin-universal"])' takeover/latest.json > takeover/next.json
-          mv takeover/next.json takeover/latest.json
 
-          echo "latest.json now:"; cat takeover/latest.json
-          # Keep the Tauri-only manifest on the release too, to roll back by re-uploading it.
+          echo "latest.json:"; cat takeover/latest.json
           gh release upload "$TAG" takeover/latest.json --clobber
-
-          # Nothing points at the Tauri builds any more, and the release can't be
-          # changed once published (so no rollback to them either): take them off
-          # the page so the only downloads are the native ones.
-          for a in $(gh release view "$TAG" --json assets --jq '.assets[].name | select(startswith("Lookout_macos-") or startswith("Lookout_windows-") or startswith("macos-Lookout.app.tar.gz"))'); do
-            gh release delete-asset "$TAG" "$a" --yes
-          done
 
       # Short names for the downloads people click, so they get Lookout.dmg rather
       # than Lookout-native_0.4.1_darwin-aarch64.dmg, and stable links work:

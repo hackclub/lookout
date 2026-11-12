@@ -50,11 +50,6 @@ jobs:
       R2_BUCKET_NAME: test-bucket
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: admin-secret
-      # Subprocess test that spawns `cargo test --test legacy_client` against
-      # a real Fastify server. Skipping in CI keeps the matrix fast — the
-      # cross-language compat is already covered by Rust unit tests below,
-      # which run the same legacy structs against the same JSON shape.
-      SKIP_RUST_SUBPROCESS: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -124,13 +119,13 @@ jobs:
         run: npm test -w packages/shared
 
   # ──────────────────────────────────────────────────────────────────
-  # Desktop client: Rust unit + serde compat tests.
+  # Recording engine (crates/): Rust unit + serde compat tests.
   # The 4-way matrix (legacy/new struct × legacy/new JSON) here is the
-  # load-bearing proof that the currently-shipped binary can still
-  # deserialize what the new server emits.
+  # load-bearing proof that shipped clients can still deserialize what
+  # the new server emits.
   # ──────────────────────────────────────────────────────────────────
-  desktop-rust:
-    name: Desktop Rust tests
+  engine-rust:
+    name: Engine Rust tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -139,11 +134,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libxdo-dev \
             libx11-dev \
             libxcb-randr0-dev \
             libxcb-shm0-dev \
@@ -174,17 +164,11 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
-      # Cache key is platform-based (not workflow-based) so the registry
-      # + git deps populated by tests.yml are reused by release.yml's
-      # Linux-native build, and vice versa. The key matches the entry in
-      # release.yml's matrix for ubuntu-24.04 + native target.
-      # Underlying key includes hashFiles('Cargo.lock') + rustc version,
-      # so any lockfile change naturally invalidates the cache.
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: "./clients/desktop/src-tauri -> target"
-          shared-key: rust-ubuntu-24.04-native
+          workspaces: "./crates -> target"
+          shared-key: rust-ubuntu-24.04-engine
 
       # Release, not debug. The clip encoders are unsafe FFI against
       # VideoToolbox / Media Foundation / GStreamer, and that is exactly the
@@ -192,10 +176,8 @@ jobs:
       # project has already been bitten by once (a datatype-misalignment crash
       # that only showed up in a release build). Testing debug binaries proves
       # the wrong artifact.
-      # --workspace: the capture engine lives in crates/lookout-core and has
-      # its own unit tests; without the flag only the Tauri shell would run.
       - name: cargo test --workspace --lib --release
-        working-directory: clients/desktop/src-tauri
+        working-directory: crates
         run: cargo test --workspace --lib --release
 
   # ──────────────────────────────────────────────────────────────────
@@ -203,8 +185,8 @@ jobs:
   # cfg code that no other job compiles. A check (not full test run)
   # catches API drift in the `windows` crate bindings.
   # ──────────────────────────────────────────────────────────────────
-  desktop-rust-windows:
-    name: Desktop Rust check (Windows)
+  engine-rust-windows:
+    name: Engine Rust check (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -215,18 +197,18 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: "./clients/desktop/src-tauri -> target"
+          workspaces: "./crates -> target"
           shared-key: rust-windows-check
 
       # Release profile, matching what actually ships (see the Linux job).
       # This is the only job that compiles the Windows-only Media Foundation
       # encoder at all, so it should compile it the way users get it.
-      - name: cargo check --release
-        working-directory: clients/desktop/src-tauri
-        run: cargo check --release
+      - name: cargo check --workspace --release
+        working-directory: crates
+        run: cargo check --workspace --release --locked
 
   # ──────────────────────────────────────────────────────────────────
-  # Type-check the rest of the workspace (React/web clients). Catches
+  # Type-check the JS workspace (React SDK, web and hosted clients). Catches
   # regressions in the shared types or the credit-mode client wiring.
   # ──────────────────────────────────────────────────────────────────
   clients-typecheck:
@@ -251,7 +233,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: "./clients/desktop/src-tauri -> target"
+          workspaces: "./crates -> target"
           shared-key: rust-wasm
 
       - name: Install wasm-bindgen
@@ -265,10 +247,6 @@ jobs:
           npm run build -w packages/shared
           npm run build -w packages/wasm
           npm run build -w clients/react
-
-      - name: Type-check desktop frontend
-        working-directory: clients/desktop
-        run: npx tsc --noEmit
 
       # Vitest hook tests for the user-facing recording timer. Pinned to
       # the SDK + web — desktop uses the SDK build so coverage transits.

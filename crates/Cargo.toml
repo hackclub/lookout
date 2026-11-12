@@ -1,0 +1,27 @@
+# The recording engine: capture, clips, uploads and the API client.
+# Lookout Native (clients/native) links lookout-core by path, and
+# packages/wasm builds lookout-web for the browser recorder (@lookout/react).
+[workspace]
+members = ["lookout-core", "lookout-session", "lookout-protocol", "lookout-recorder", "lookout-web"]
+resolver = "2"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+# Release tests run the clip encoders (unsafe FFI) the way they ship.
+[profile.release]
+debug = true
+
+# The browser build of lookout-web: small and stripped, LTO across the
+# shared crates. `packages/wasm/build.sh` selects it.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+panic = "abort"

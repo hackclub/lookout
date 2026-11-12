@@ -10,7 +10,7 @@
 # --version <same>` works just as well.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-lock="$here/../../clients/desktop/src-tauri/Cargo.lock"
+lock="$here/../../crates/Cargo.lock"
 dest="${1:-$HOME/.cargo/bin}"
 
 version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' "$lock")"

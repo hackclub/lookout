@@ -1,7 +1,7 @@
 //! Lookout — native desktop client (internal codename "Lookout Phoenix").
 //!
-//! A GPUI rewrite of the Tauri app in `clients/desktop`, driving the same
-//! Rust recording engine (`lookout-core`) in-process.
+//! A GPUI rewrite of the old Tauri app, driving the Rust recording engine
+//! (`lookout-core`, in `crates/` at the repo root) in-process.
 
 // Release builds are Windows GUI apps: without this, Windows opens a console
 // window beside Lookout, and every `lookout://` link (a second launch that

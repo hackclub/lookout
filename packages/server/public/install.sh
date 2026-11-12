@@ -32,7 +32,7 @@ ZYPP_REPO=/etc/zypp/repos.d/lookout.repo
 # The repository's public key, embedded rather than downloaded: the script is
 # already the thing being trusted, so fetching the key separately could only
 # add a second place for it to be swapped. CI checks this block against
-# clients/desktop/src-tauri/linux/lookout-archive-keyring.asc.
+# clients/native/packaging/linux/repo/lookout-archive-keyring.asc.
 write_key() {
   cat <<'KEY'
 -----BEGIN PGP PUBLIC KEY BLOCK-----

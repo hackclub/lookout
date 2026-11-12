@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate assets/app-icon-macos.png from the full-bleed Tauri icon.icns.
+"""Regenerate assets/app-icon-macos.png from the full-bleed icon-full-bleed.icns.
 
 Puts the artwork on Apple's macOS icon grid (824px rounded square inset 100px
 in 1024, radius 185.4, template shadow 0 10px 10px 30% black). macOS before 26
 draws .icns files as-is, so full-bleed art shows as a square there.
 
-Usage: python3 make-icon.py clients/desktop/src-tauri/icons/icon.icns clients/native/assets/app-icon-macos.png
+Usage: python3 make-icon.py clients/native/packaging/macos/icon-full-bleed.icns clients/native/assets/app-icon-macos.png
 (needs Pillow)
 """
 import sys

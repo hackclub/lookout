@@ -1,10 +1,10 @@
 # Lookout Native ("Lookout Phoenix")
 
 A native rewrite of the Lookout desktop app in Rust with [GPUI](https://gpui.rs)
-(through `gpui-kit` 0.8.1 / `gpui-pre` 0.3.10). It replaces the Tauri shell in
-`clients/desktop` and drives the **same recording engine** in-process:
-`lookout-core` and the three platform-free crates under
-`clients/desktop/src-tauri/crates`.
+(through `gpui-kit` 0.8.1 / `gpui-pre` 0.3.10). It replaced the Tauri app
+(removed after v0.4.2; see the `v0.3.14` tag) and drives the recording engine
+in-process: `lookout-core` and the three platform-free crates under `crates/`
+at the repo root.
 
 The north star is that people can't tell it apart from the Tauri app: every
 screen, string, colour token and animation was ported from the original
@@ -135,9 +135,8 @@ package-repo path and the UpdateDrawer.
 Release side: the `native-build` job in `.github/workflows/release.yml`
 builds the `Lookout-native_*` artifacts (see Packaging), and `native-updates`
 runs `lookout-update-tool manifest … --sign` over them (key from
-`TAURI_SIGNING_PRIVATE_KEY`). Both are off until the repository variable
-`NATIVE_RELEASE` is `true` (or "native" is ticked on a manual run), and
-`latest.json` is untouched either way.
+`TAURI_SIGNING_PRIVATE_KEY`). It also writes `latest.json`, which the old
+Tauri app's updater reads, pointing at the native macOS and Windows builds.
 
 Local end-to-end test (debug builds read the overrides):
 
