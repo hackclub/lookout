@@ -85,6 +85,6 @@ xcb = { version = "1.7", features = ["randr"] }
 # (pw_cursor.rs) and the compositor's focus over D-Bus (compositor.rs).
 # Both already in the tree via xcap and ashpd.
 pipewire = "0.10"
-zbus = "5"
+zbus = "6"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
