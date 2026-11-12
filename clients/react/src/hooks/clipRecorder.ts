@@ -87,6 +87,28 @@ function pickMimeCandidate(): MimeCandidate | null {
   return null;
 }
 
+/** EBML ID of a WebM Cluster — the element that carries encoded frames. */
+const WEBM_CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75];
+
+/**
+ * Whether a WebM recording holds any frames at all.
+ *
+ * Firefox's MediaRecorder can stop() cleanly yet hand back nothing but the
+ * container header (~217 bytes: EBML + Segment + Info + Tracks, no Cluster)
+ * when the canvas track delivered no frames during the clip — see Mozilla
+ * bug 1344524. Such a clip is undecodable; uploaded, it costs the minute
+ * anyway and fails the session's compile. Exported for tests.
+ */
+export async function webmHasFrames(blob: Blob): Promise<boolean> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const [a, b, c, d] = WEBM_CLUSTER_ID;
+  for (let i = 0; i + 3 < bytes.length; i++) {
+    if (bytes[i] === a && bytes[i + 1] === b && bytes[i + 2] === c && bytes[i + 3] === d)
+      return true;
+  }
+  return false;
+}
+
 function canvasCaptureSupported(): boolean {
   return (
     typeof HTMLCanvasElement !== "undefined" &&
@@ -180,10 +202,17 @@ class MediaRecorderClipEngine implements ClipEngine {
     ]);
     this.stream.getTracks().forEach((t) => t.stop());
     if (this.parts.length === 0) return null;
-    return {
-      blob: new Blob(this.parts, { type: this.contentType }),
-      format: this.format,
-    };
+    const blob = new Blob(this.parts, { type: this.contentType });
+    // A header-only WebM is "no output": cut() turns it into this tick's
+    // JPEG fallback instead of uploading a clip nothing can decode.
+    if (this.format === "webm" && !(await webmHasFrames(blob))) {
+      console.warn(
+        `[lookout] MediaRecorder clip held no frames (${blob.size} bytes) — ` +
+          "falling back to a JPEG for this capture.",
+      );
+      return null;
+    }
+    return { blob, format: this.format };
   }
 
   cancel(): void {
