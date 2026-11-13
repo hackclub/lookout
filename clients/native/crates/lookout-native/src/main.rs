@@ -33,6 +33,7 @@ mod player;
 mod screens;
 mod services;
 mod smoke;
+mod startup;
 mod store;
 mod theme;
 mod ui;
@@ -44,6 +45,7 @@ use std::borrow::Cow;
 use gpui_kit::gpui::App;
 
 fn main() {
+    startup::begin();
     // WebKitGTK's DMA-BUF renderer aborts the whole app (SIGABRT inside
     // gtk_main_iteration, LOOKOUT-NATIVE-G) when the panel webview lives in
     // an offscreen window on Wayland, at least on AMD/Ubuntu 26.04. That view
@@ -97,6 +99,7 @@ fn main() {
     // Only the primary instance reports (a link hand-off exits at once), and
     // before the updater so a crash while installing one is caught too.
     let _sentry = crash::init();
+    startup::mark("crash reporter");
     #[cfg(target_os = "linux")]
     if let Some(f) = display_failure {
         platform::startup_failure::exit(f);
@@ -105,6 +108,7 @@ fn main() {
     // Before any window: roll back a version that never became healthy, or
     // install a staged update and relaunch (exits in both cases).
     updater::boot(&initial_urls);
+    startup::mark("updater");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -148,7 +152,9 @@ fn main() {
         // First launch: the onboarding window comes first, and the app
         // proper starts once it's finished.
         let launch = Launch { rt: rt.clone(), initial_urls: initial_urls.clone(), forwarded: forwarded.clone(), open_rx: open_rx.clone() };
+        startup::mark("app setup");
         if windows::onboarding::wanted(cx) {
+            startup::skip();
             // Links (a `lookout://` launch, or ones clicked meanwhile) wait
             // for the onboarding: each one brings it forward, and they open
             // once it's finished.
@@ -208,6 +214,7 @@ fn start_app(launch: Launch, cx: &mut App) {
         Ok(main) => main,
         Err(e) => windows::window_open_failed("main window", &e),
     };
+    startup::mark("main window");
     smoke::start(cx);
     smoke::start_tour(cx);
     cx.set_global(windows::MainHandle(main));

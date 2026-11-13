@@ -172,6 +172,8 @@ pub struct MainWindow {
     /// A system material (vibrancy / Mica) is behind the window, so the
     /// window background is left unpainted.
     vibrant: bool,
+    /// Launch timing has been handed its first-frame callback.
+    first_frame_timed: bool,
     history: Vec<Route>,
     /// Pages left by going back, for Forward (mouse button / Alt+→ / ⌘]).
     /// Top of the stack is the next page.
@@ -359,6 +361,7 @@ impl MainWindow {
         let update_pill = cx.new(|cx| crate::ui::update_pill::UpdatePill::new(updater, is_windows(), cx));
         let mut mw = Self {
             vibrant: crate::platform::vibrancy::apply(window),
+            first_frame_timed: false,
             route: Route::Gallery,
             history: Vec::new(),
             forward: Vec::new(),
@@ -1425,6 +1428,10 @@ impl Focusable for MainWindow {
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.first_frame_timed {
+            self.first_frame_timed = true;
+            window.on_next_frame(|_, _| crate::startup::first_frame());
+        }
         if crate::smoke::enabled() {
             crate::smoke::frame();
             window.request_animation_frame();
