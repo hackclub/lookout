@@ -332,57 +332,101 @@ mod imp {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::*;
-    use std::cell::RefCell;
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent, MouseButton as TMouse, MouseButtonState};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, TranslateMessage, WM_APP,
+        WM_USER,
+    };
 
-    thread_local! {
-        static ICON: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-    }
+    /// Posted to the tray thread: apply the latest pending state.
+    const WM_TRAY_APPLY: u32 = WM_APP + 0x4c;
 
+    /// The icon lives on its own thread with its own message loop. Every
+    /// tooltip change (once a second while recording) is a synchronous
+    /// `Shell_NotifyIconW` round trip to Explorer, which blocks for seconds
+    /// when Explorer isn't answering; on the main thread that froze the app
+    /// (LOOKOUT-NATIVE-B hang reports). Updates coalesce: only the latest
+    /// state is applied.
     pub struct Imp {
-        tx: flume::Sender<TrayAction>,
+        thread_id: Option<u32>,
+        pending: Arc<Mutex<Option<TrayState>>>,
     }
 
     impl Imp {
         pub fn new(tx: flume::Sender<TrayAction>, _state: Arc<Mutex<TrayState>>, _rt: tokio::runtime::Handle, _cx: &mut App) -> Self {
-            let tx2 = tx.clone();
             TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
                 if let TrayIconEvent::Click { button: TMouse::Left, button_state: MouseButtonState::Up, rect, .. } = ev {
                     let b = Bounds {
                         origin: gpui_kit::gpui::point(gpui_kit::gpui::px(rect.position.x as f32), gpui_kit::gpui::px(rect.position.y as f32)),
                         size: gpui_kit::gpui::size(gpui_kit::gpui::px(rect.size.width as f32), gpui_kit::gpui::px(rect.size.height as f32)),
                     };
-                    let _ = tx2.send(TrayAction::Toggle(Some(b)));
+                    let _ = tx.send(TrayAction::Toggle(Some(b)));
                 }
             }));
-            Self { tx }
-        }
-
-        pub fn apply(&self, s: &TrayState) {
-            let _ = &self.tx;
-            let s = s.clone();
-            ICON.with(|cell| {
-                let mut cell = cell.borrow_mut();
-                if !s.visible {
-                    *cell = None;
-                    return;
-                }
-                let tip = tooltip(&s.text, s.paused);
-                match cell.as_ref() {
-                    Some(icon) => {
-                        let _ = icon.set_tooltip(Some(tip));
-                    }
-                    None => {
-                        let img = image::load_from_memory(crate::assets::APP_ICON_PNG).map(|i| i.into_rgba8()).ok();
-                        if let Some(img) = img {
-                            let (w, h) = img.dimensions();
-                            if let Ok(icon) = Icon::from_rgba(img.into_raw(), w, h) {
-                                *cell = TrayIconBuilder::new().with_icon(icon).with_tooltip(tip).build().ok();
+            let pending: Arc<Mutex<Option<TrayState>>> = Arc::default();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<u32>(1);
+            let thread_pending = pending.clone();
+            let spawned = std::thread::Builder::new().name("lookout-tray".into()).spawn(move || {
+                // SAFETY: plain Win32 calls on this thread's own message queue.
+                unsafe {
+                    // Create the queue before anyone posts to it.
+                    let mut msg = MSG::default();
+                    let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+                    let _ = ready_tx.send(windows::Win32::System::Threading::GetCurrentThreadId());
+                    let mut icon: Option<TrayIcon> = None;
+                    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                        if msg.hwnd.is_invalid() && msg.message == WM_TRAY_APPLY {
+                            let next = thread_pending.lock().take();
+                            if let Some(s) = next {
+                                apply(&mut icon, &s);
                             }
+                            continue;
                         }
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
                     }
                 }
             });
+            let thread_id = match spawned {
+                Ok(_) => ready_rx.recv().ok(),
+                Err(e) => {
+                    log::warn!("[tray] couldn't start the tray thread: {e}");
+                    None
+                }
+            };
+            Self { thread_id, pending }
+        }
+
+        pub fn apply(&self, s: &TrayState) {
+            let Some(thread_id) = self.thread_id else { return };
+            *self.pending.lock() = Some(s.clone());
+            // SAFETY: posts a private message to our own tray thread.
+            if let Err(e) = unsafe { PostThreadMessageW(thread_id, WM_TRAY_APPLY, Default::default(), Default::default()) } {
+                log::warn!("[tray] couldn't reach the tray thread: {e}");
+            }
+        }
+    }
+
+    /// Runs on the tray thread.
+    fn apply(icon: &mut Option<TrayIcon>, s: &TrayState) {
+        if !s.visible {
+            *icon = None;
+            return;
+        }
+        let tip = tooltip(&s.text, s.paused);
+        match icon.as_ref() {
+            Some(icon) => {
+                let _ = icon.set_tooltip(Some(tip));
+            }
+            None => {
+                let img = image::load_from_memory(crate::assets::APP_ICON_PNG).map(|i| i.into_rgba8()).ok();
+                if let Some(img) = img {
+                    let (w, h) = img.dimensions();
+                    if let Ok(i) = Icon::from_rgba(img.into_raw(), w, h) {
+                        *icon = TrayIconBuilder::new().with_icon(i).with_tooltip(tip).build().ok();
+                    }
+                }
+            }
         }
     }
 }
