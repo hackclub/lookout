@@ -269,7 +269,7 @@ pub fn window_corner_radius(window: &Window) -> f32 {
     }
 }
 
-pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
+pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<MainWindow>> {
     let csd = is_linux() && crate::platform::desktop_appearance::client_frames();
     let (w, h) = if csd { (WIN_W + 2.0 * WINDOW_MARGIN, WIN_H + 2.0 * WINDOW_MARGIN) } else { (WIN_W, WIN_H) };
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
@@ -316,7 +316,6 @@ pub fn open(cx: &mut App) -> WindowHandle<MainWindow> {
         cx.set_global(t);
         cx.new(|cx| MainWindow::new(window, cx))
     })
-    .expect("open main window")
 }
 
 impl MainWindow {

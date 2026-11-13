@@ -32,10 +32,30 @@ pub fn reopen(cx: &mut App) {
     };
     if h.update(cx, |_, window, _| window.activate_window()).is_err() {
         log::info!("[app] reopened with the main window closed: opening a new one");
-        let main = main_window::open(cx);
-        cx.set_global(MainHandle(main));
+        match main_window::open(cx) {
+            Ok(main) => cx.set_global(MainHandle(main)),
+            Err(e) => log::error!("[app] couldn't reopen the main window: {e:#}"),
+        }
     }
     cx.activate(true);
+}
+
+/// A window Lookout can't run without didn't open: tell the user and exit
+/// instead of panicking. No GPU that can draw the window is the machine's
+/// problem (LOOKOUT-NATIVE-1D), so it's only a warning in Sentry; anything
+/// else is ours and stays an error.
+pub fn window_open_failed(what: &str, e: &anyhow::Error) -> ! {
+    use crate::platform::startup_failure as sf;
+    let err = format!("{e:#}");
+    if sf::is_gpu_error(&err) {
+        sentry::capture_message(&format!("[app] no GPU can draw the {what}: {err}"), sentry::Level::Warning);
+        sf::exit(sf::gpu(&err));
+    }
+    log::error!("[app] couldn't open the {what}: {err}");
+    sf::exit(sf::Failure {
+        title: "Lookout couldn't open its window",
+        body: format!("Something went wrong opening the {what}, so Lookout can't start. It's been reported.\n\nDetails: {err}"),
+    })
 }
 
 /// System Settings' "Quit & Reopen" after a privacy permission is turned on:

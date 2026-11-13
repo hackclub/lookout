@@ -68,6 +68,10 @@ fn main() {
     }
     #[cfg(windows)]
     installer::ops::remove_leftovers();
+    // GPUI panics when the display server it picks can't be reached
+    // (LOOKOUT-NATIVE-13); check first, while still single-threaded.
+    #[cfg(target_os = "linux")]
+    let display_failure = platform::startup_failure::preflight_display();
     // Before any window exists: macOS 26 would otherwise freeze every window
     // after its first frame (see platform/macos_occlusion.rs).
     #[cfg(target_os = "macos")]
@@ -93,6 +97,10 @@ fn main() {
     // Only the primary instance reports (a link hand-off exits at once), and
     // before the updater so a crash while installing one is caught too.
     let _sentry = crash::init();
+    #[cfg(target_os = "linux")]
+    if let Some(f) = display_failure {
+        platform::startup_failure::exit(f);
+    }
     crash::self_test();
     // Before any window: roll back a version that never became healthy, or
     // install a staged update and relaunch (exits in both cases).
@@ -196,7 +204,10 @@ struct Launch {
 
 /// Open the main window and wire the tray, relaunch restore and deep links.
 fn start_app(launch: Launch, cx: &mut App) {
-    let main = windows::main_window::open(cx);
+    let main = match windows::main_window::open(cx) {
+        Ok(main) => main,
+        Err(e) => windows::window_open_failed("main window", &e),
+    };
     smoke::start(cx);
     smoke::start_tour(cx);
     cx.set_global(windows::MainHandle(main));

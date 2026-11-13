@@ -156,6 +156,11 @@ fn open_window(cx: &mut App, done: Box<dyn FnOnce(&mut App)>, at_launch: bool) {
         cx.new(|cx| Onboarding::new(done, at_launch, window, cx))
     });
     if let Err(e) = opened {
+        // No GPU can draw a window here: the main window would fail the same
+        // way, so explain and exit now (LOOKOUT-NATIVE-1C).
+        if crate::platform::startup_failure::is_gpu_error(&format!("{e:#}")) {
+            super::window_open_failed("welcome window", &e);
+        }
         // Never strand someone without a window: go straight to the app.
         log::error!("[onboarding] couldn't open the window: {e:#}");
         if let Some(done) = fallback.take() {
