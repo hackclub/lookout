@@ -80,6 +80,11 @@ drop the patch and switch `ui/video.rs` to its API.
   (`gpui-pre-windows/src/events.rs`), and closing an active window sends a
   final `WM_ACTIVATE`, so the task can run after `remove_window`. Upstream
   logs "window not found" at error level, which Sentry reported as an issue.
+- Same for every other platform callback `Window::new` installs (frame
+  requests, input, resize/move, appearance, hover, tab and a11y callbacks):
+  `.ok()` instead of `.log_err()` on `handle.update`. macOS and Windows deliver
+  frame requests and input after the window closed, or while it's on the
+  update stack (nested event loops), which was LOOKOUT-NATIVE-19/-Y/-D.
 
 ## Windows robustness (LOOKOUT-NATIVE-9 / -A, testers' freezes and exits)
 

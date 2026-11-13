@@ -1769,7 +1769,7 @@ impl Window {
                     while activation_receiver.recv().await.is_ok() {
                         handle
                             .update(&mut async_cx, |_, window, _| window.refresh())
-                            .log_err();
+                            .ok();
                     }
                 })
                 .detach();
@@ -1780,7 +1780,7 @@ impl Window {
                     while deactivation_receiver.recv().await.is_ok() {
                         handle
                             .update(&mut async_cx, |_, window, _| window.refresh())
-                            .log_err();
+                            .ok();
                     }
                 })
                 .detach();
@@ -1793,7 +1793,7 @@ impl Window {
                             .update(&mut async_cx, |_, window, cx| {
                                 window.handle_a11y_action(request, cx);
                             })
-                            .log_err();
+                            .ok();
                     }
                 })
                 .detach();
@@ -1809,6 +1809,13 @@ impl Window {
                 });
             }
         }));
+        // Lookout patch: every platform callback below (and the a11y tasks
+        // above) ignores `handle.update` failing with "window not found"
+        // (`.ok()` where upstream has `.log_err()`). That error only means the
+        // window was removed, or is mid-update on this thread's stack, when
+        // the OS delivered a frame request, input, resize... after closing or
+        // from a nested event loop. There's nothing to do then, and upstream's
+        // error-level log became Sentry issues LOOKOUT-NATIVE-19/-Y/-D.
         platform_window.on_request_frame(Box::new({
             let mut cx = cx.to_async();
             let invalidator = invalidator.clone();
@@ -1867,7 +1874,7 @@ impl Window {
 
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
-                    .log_err();
+                    .ok();
 
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
@@ -1898,7 +1905,7 @@ impl Window {
                             .update(&mut cx, |_, window, _| {
                                 window.platform_window.schedule_frame();
                             })
-                            .log_err();
+                            .ok();
                         // The demand that entered this branch (a deferred forced
                         // render or pending next-frame callbacks) is still
                         // unserved; platforms that stop requesting frames for
@@ -1930,7 +1937,7 @@ impl Window {
                                 callback(window, cx);
                             }
                         })
-                        .log_err();
+                        .ok();
                 }
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
@@ -1958,12 +1965,12 @@ impl Window {
                                 window.present();
                                 arena_clear_needed.clear(cx);
                             })
-                            .log_err();
+                            .ok();
                     })
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
-                        .log_err();
+                        .ok();
                 }
 
                 handle
@@ -1974,7 +1981,7 @@ impl Window {
                             window.platform_window.schedule_frame();
                         }
                     })
-                    .log_err();
+                    .ok();
 
                 // Platforms that stop requesting frames for idle windows only
                 // deliver another request after a wakeup. If demand remains
@@ -2001,27 +2008,27 @@ impl Window {
         platform_window.on_visual_viewport_changed(Box::new({
             let mut cx = cx.to_async();
             move || {
-                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).log_err();
+                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).ok();
             }
         }));
         platform_window.on_insets_changed(Box::new({
             let mut cx = cx.to_async();
             move |_| {
-                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).log_err();
+                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).ok();
             }
         }));
         platform_window.on_resize(Box::new({
             let mut cx = cx.to_async();
             move |_, _| {
                 update_window_or_defer(&mut cx, handle, |window, cx| window.bounds_changed(cx))
-                    .log_err();
+                    .ok();
             }
         }));
         platform_window.on_moved(Box::new({
             let mut cx = cx.to_async();
             move || {
                 update_window_or_defer(&mut cx, handle, |window, cx| window.bounds_changed(cx))
-                    .log_err();
+                    .ok();
             }
         }));
         platform_window.on_display_changed(Box::new({
@@ -2057,7 +2064,7 @@ impl Window {
                     .spawn(async move {
                         handle
                             .update(&mut cx, |_, window, cx| window.appearance_changed(cx))
-                            .log_err();
+                            .ok();
                     })
                     .detach();
             }
@@ -2068,7 +2075,7 @@ impl Window {
                 update_window_or_defer(&mut cx, handle, |window, cx| {
                     window.button_layout_changed(cx)
                 })
-                .log_err();
+                .ok();
             }
         }));
         platform_window.on_active_status_change(Box::new({
@@ -2112,7 +2119,7 @@ impl Window {
                     window.hovered.set(active);
                     window.refresh();
                 })
-                .log_err();
+                .ok();
             }
         }));
         platform_window.on_input({
@@ -2133,7 +2140,7 @@ impl Window {
                 }
                 handle
                     .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
-                    .log_err()
+                    .ok()
                     .unwrap_or(DispatchEventResult::default())
             })
         });
@@ -2154,7 +2161,7 @@ impl Window {
                         }
                         None
                     })
-                    .log_err()
+                    .ok()
                     .unwrap_or(None)
             })
         });
@@ -2165,7 +2172,7 @@ impl Window {
                     .update(&mut cx, |_, _window, cx| {
                         SystemWindowTabController::move_tab_to_new_window(cx, handle.window_id());
                     })
-                    .log_err();
+                    .ok();
             })
         });
         platform_window.on_merge_all_windows({
@@ -2175,7 +2182,7 @@ impl Window {
                     .update(&mut cx, |_, _window, cx| {
                         SystemWindowTabController::merge_all_windows(cx, handle.window_id());
                     })
-                    .log_err();
+                    .ok();
             })
         });
         platform_window.on_select_next_tab({
@@ -2185,7 +2192,7 @@ impl Window {
                     .update(&mut cx, |_, _window, cx| {
                         SystemWindowTabController::select_next_tab(cx, handle.window_id());
                     })
-                    .log_err();
+                    .ok();
             })
         });
         platform_window.on_select_previous_tab({
@@ -2195,7 +2202,7 @@ impl Window {
                     .update(&mut cx, |_, _window, cx| {
                         SystemWindowTabController::select_previous_tab(cx, handle.window_id())
                     })
-                    .log_err();
+                    .ok();
             })
         });
         platform_window.on_toggle_tab_bar({
@@ -2206,7 +2213,7 @@ impl Window {
                         let tab_bar_visible = window.platform_window.tab_bar_visible();
                         SystemWindowTabController::set_visible(cx, tab_bar_visible);
                     })
-                    .log_err();
+                    .ok();
             })
         });
 
