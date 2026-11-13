@@ -131,8 +131,6 @@ where
 pub struct RecorderModel {
     pub state: Option<RecorderState>,
     pub preview: Option<std::sync::Arc<RenderImage>>,
-    /// Superseded preview images, released from the atlas next frame.
-    pub retired: Vec<std::sync::Arc<RenderImage>>,
     pub tray_text: String,
     pub tray_paused: bool,
 }
@@ -151,7 +149,7 @@ impl EventEmitter<RecorderEvent> for RecorderModel {}
 
 impl RecorderModel {
     pub fn new() -> Self {
-        Self { state: None, preview: None, retired: Vec::new(), tray_text: "00:00".into(), tray_paused: false }
+        Self { state: None, preview: None, tray_text: "00:00".into(), tray_paused: false }
     }
 
     /// Whether the menu-bar / tray indicator should be visible.
@@ -167,9 +165,9 @@ impl RecorderModel {
     }
 
     /// Drop the preview frame (it shows a source that's no longer recorded).
-    pub fn clear_preview(&mut self) {
+    pub fn clear_preview(&mut self, cx: &mut Context<Self>) {
         if let Some(p) = self.preview.take() {
-            self.retired.push(p);
+            retire_preview(p, cx);
         }
     }
 
@@ -180,7 +178,7 @@ impl RecorderModel {
                 // (A switch's flush can still send one of the old source.)
                 let same_source = matches!((&s, &self.state), (Some(a), Some(b)) if a.source == b.source);
                 if !same_source {
-                    self.clear_preview();
+                    self.clear_preview(cx);
                 }
                 self.state = s;
                 cx.emit(RecorderEvent::State);
@@ -189,7 +187,7 @@ impl RecorderModel {
             CoreMsg::Event(CoreEvent::PreviewFrame(frame)) => {
                 if let Some(img) = decode_preview(&frame.preview_base64) {
                     if let Some(p) = self.preview.replace(img) {
-                        self.retired.push(p);
+                        retire_preview(p, cx);
                     }
                     cx.emit(RecorderEvent::Preview);
                     cx.notify();
@@ -211,6 +209,16 @@ impl RecorderModel {
             }
         }
     }
+}
+
+/// Free a superseded preview frame: its pixels, and its texture in the
+/// sprite atlas of every window that painted it (a `RenderImage` stays
+/// uploaded until `drop_image`). Deferred so it also leaves the atlas of a
+/// window that is mid-update right now. These frames used to pile up for
+/// the whole session (a full-size frame each), until allocating the next
+/// decode failed (LOOKOUT-NATIVE-1B).
+fn retire_preview(image: std::sync::Arc<RenderImage>, cx: &mut Context<RecorderModel>) {
+    cx.defer(move |cx| cx.drop_image(image, None));
 }
 
 fn decode_preview(b64: &str) -> Option<std::sync::Arc<RenderImage>> {

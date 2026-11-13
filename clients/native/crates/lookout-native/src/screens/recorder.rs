@@ -148,7 +148,7 @@ impl RecorderView {
         // The last frame was of the old source; show the new one's live
         // preview until the new loop sends frames.
         self.model.update(cx, |m, cx| {
-            m.clear_preview();
+            m.clear_preview(cx);
             cx.notify();
         });
         let core = app::state(cx).core.clone();
