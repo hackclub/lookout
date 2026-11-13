@@ -108,6 +108,11 @@ if (existsSync(publicDir)) {
     if (hasRecorder && (path === "/session" || path.startsWith("/session/"))) {
       return reply.sendFile("session/index.html");
     }
+    // Update instructions for people on old versions (hack.club/updatelookout
+    // and the in-app announcement point here).
+    if (path === "/update" || path === "/update/") {
+      return reply.sendFile("update.html");
+    }
     return reply.sendFile("index.html");
   });
 } else {

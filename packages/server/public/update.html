@@ -1,0 +1,1422 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Update Lookout</title>
+    <meta name="description" content="How to update Lookout to the latest version on macOS, Windows and Linux." />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+      :root {
+        --ink: #1d1d1f;
+        --ink-2: #6e6e73;
+        --ink-3: #86868b;
+        --ink-4: #c7c7cc;
+        --line: rgba(0, 0, 0, 0.07);
+        --fill: #f5f5f7;
+        --fill-2: #ebebed;
+        --spring: cubic-bezier(0.3, 1.25, 0.5, 1);
+        --travel: cubic-bezier(0.45, 0, 0.1, 1);
+        --arrive: cubic-bezier(0.25, 0.8, 0.25, 1);
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      html { scroll-behavior: smooth; }
+      @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+      body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--ink);
+        background: #fff;
+        -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      a { color: inherit; }
+      button { font: inherit; color: inherit; }
+      .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+      /* ---------- nav (matches the download page) ---------- */
+
+      nav {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+        backdrop-filter: saturate(180%) blur(20px);
+        -webkit-backdrop-filter: saturate(180%) blur(20px);
+        background: rgba(255, 255, 255, 0.72);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+      }
+      nav .inner {
+        max-width: 1140px; margin: 0 auto; padding: 0 24px; height: 52px;
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      nav .name { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; text-decoration: none; }
+      nav .right { display: flex; align-items: center; gap: 20px; }
+      nav .gh { font-size: 14px; font-weight: 500; color: var(--ink-2); text-decoration: none; transition: color 0.2s; }
+      nav .gh:hover { color: var(--ink); }
+
+      /* ---------- buttons ---------- */
+
+      .btn {
+        position: relative;
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        height: 48px; padding: 0 26px;
+        border: 0; border-radius: 999px;
+        font-size: 15px; font-weight: 600; letter-spacing: -0.01em;
+        text-decoration: none; white-space: nowrap;
+        cursor: pointer;
+        transition: transform 0.45s var(--spring), background 0.2s, box-shadow 0.2s;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .btn:active { transform: scale(0.96); transition-duration: 0.12s; }
+      .btn svg { width: 17px; height: 17px; flex: none; }
+      .btn-dark { background: var(--ink); color: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 6px 16px -6px rgba(0, 0, 0, 0.35); }
+      .btn-dark:hover { background: #000; }
+      .btn-light { background: var(--fill); color: var(--ink); }
+      .btn-light:hover { background: var(--fill-2); }
+      .btn-sm { height: 40px; padding: 0 18px; font-size: 14px; }
+      .btn-sm svg { width: 15px; height: 15px; }
+
+      .link {
+        color: var(--ink-2);
+        text-decoration: underline; text-decoration-color: var(--ink-4);
+        text-underline-offset: 3px;
+        transition: color 0.15s, text-decoration-color 0.15s;
+      }
+      .link:hover { color: var(--ink); text-decoration-color: var(--ink-3); }
+
+      /* ---------- command box (matches the download page) ---------- */
+
+      .cmd {
+        position: relative; display: flex; align-items: center;
+        background: var(--fill); border: 1px solid var(--line); border-radius: 14px;
+        padding: 13px 52px 13px 16px; text-align: left;
+      }
+      .cmd code {
+        flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap;
+        font-family: var(--mono); font-size: 13px; color: var(--ink);
+        scrollbar-width: none;
+      }
+      .cmd code::-webkit-scrollbar { display: none; }
+      .copy {
+        position: absolute; right: 9px; top: 50%; translate: 0 -50%;
+        display: grid; place-items: center; width: 32px; height: 32px;
+        border: 0; border-radius: 9px; background: transparent; color: var(--ink-3); cursor: pointer;
+        transition: color 0.15s, background 0.15s, transform 0.4s var(--spring);
+      }
+      .copy:hover { color: var(--ink); background: var(--fill-2); }
+      .copy:active { transform: scale(0.9); }
+      .copy svg { width: 16px; height: 16px; grid-area: 1 / 1; transition: opacity 0.2s, transform 0.35s var(--spring); }
+      .copy .tick { opacity: 0; transform: scale(0.4); }
+      .copy.done { color: var(--ink); }
+      .copy.done .sheet { opacity: 0; transform: scale(0.4); }
+      .copy.done .tick { opacity: 1; transform: scale(1); }
+
+      /* ---------- hero ---------- */
+
+      main { flex: 1; }
+
+      .hero {
+        max-width: 1140px; margin: 0 auto;
+        padding: 112px 24px 40px;
+        display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 640px);
+        gap: 40px; align-items: center;
+      }
+      .copy-col { max-width: 420px; }
+      .app-icon {
+        display: block; width: 72px; height: 72px; border-radius: 22.37%;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.05), 0 8px 20px -8px rgba(0, 0, 0, 0.3);
+        margin-bottom: 28px;
+      }
+      h1 {
+        font-size: clamp(38px, 5.2vw, 54px); line-height: 1.04; font-weight: 700;
+        letter-spacing: -0.045em; margin-bottom: 18px;
+      }
+      .lede { font-size: 18px; line-height: 1.5; color: var(--ink-2); margin-bottom: 30px; max-width: 400px; }
+      .cta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+      .cta-sub { margin-top: 14px; font-size: 13px; color: var(--ink-3); line-height: 1.6; min-height: 21px; }
+      .cta-linux { display: none; max-width: 420px; }
+      .cta-linux .hint { margin-top: 12px; font-size: 13px; color: var(--ink-3); line-height: 1.5; }
+      body[data-os="linux"] .cta-linux { display: block; }
+      body[data-os="linux"] .cta-dl { display: none; }
+
+      /* ---------- the stage (faux product) ---------- */
+
+      .stage-wrap { position: relative; width: 100%; }
+      .stage {
+        position: absolute; left: 0; top: 0; transform-origin: 0 0;
+        overflow: hidden;
+        /* The window runs off the stage: fade it out there rather than
+           cutting it on an invisible line in the middle of a white page. */
+        -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent);
+        mask-image: linear-gradient(to bottom, #000 80%, transparent);
+      }
+      .stage[data-foot="both"] {
+        -webkit-mask-image: linear-gradient(to bottom, transparent, #000 20%, #000 94%, transparent);
+        mask-image: linear-gradient(to bottom, transparent, #000 20%, #000 94%, transparent);
+      }
+      /* the camera: everything in a scene is drawn at real size, then zoomed */
+      .cam { position: absolute; left: 0; top: 0; width: 100%; height: 100%; transform-origin: 0 0; }
+      .stage * { -webkit-user-select: none; user-select: none; }
+
+      .replay {
+        position: absolute; right: 12px; bottom: 12px; z-index: 5;
+        display: inline-flex; align-items: center; gap: 6px;
+        height: 30px; padding: 0 12px;
+        border: 0; border-radius: 999px;
+        background: rgba(255, 255, 255, 0.86); color: var(--ink-2);
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 4px 12px -4px rgba(0, 0, 0, 0.18);
+        backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        font-size: 12px; font-weight: 600; cursor: pointer;
+        opacity: 0; pointer-events: none; transform: translateY(4px);
+        transition: opacity 0.3s, transform 0.4s var(--spring), color 0.15s;
+      }
+      .replay svg { width: 12px; height: 12px; }
+      .replay.on { opacity: 1; pointer-events: auto; transform: none; }
+      .replay:hover { color: var(--ink); }
+      .replay:active { transform: scale(0.94); }
+
+      /* The old desktop app, rebuilt from its own tokens
+         (clients/native/docs/ui-spec.md: theme.ts light values, Gallery,
+         SessionCard, AnnouncementBanner, UpdatePill). */
+      .lk {
+        --bg: #f4f4f5;
+        --surface: #fff;
+        --t1: rgba(0, 0, 0, 0.85);
+        --t2: rgba(0, 0, 0, 0.65);
+        --t3: rgba(0, 0, 0, 0.45);
+        --b1: rgba(0, 0, 0, 0.12);
+        --b2: rgba(0, 0, 0, 0.22);
+        position: absolute; width: 480px; height: 640px;
+        transform-origin: 50% 50%; /* close shrinks about its centre */
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+        color: var(--t1);
+      }
+      .lk-win {
+        position: absolute; inset: 0; overflow: hidden;
+        border-radius: 12px; background: var(--bg);
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1), 0 24px 44px -14px rgba(50, 50, 93, 0.24), 0 12px 24px -12px rgba(0, 0, 0, 0.16);
+      }
+      .lk-body { position: absolute; inset: 0; display: flex; flex-direction: column; }
+      .lk-bar { height: 32px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 6px 0 14px; }
+      .lk-lights { display: flex; gap: 8px; }
+      .lk-lights i { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.12); }
+      .lk-lights i:nth-child(1) { background: #ff5f57; }
+      .lk-lights i:nth-child(2) { background: #febc2e; }
+      .lk-lights i:nth-child(3) { background: #28c840; }
+      .lk[data-os="win"] .lk-bar { display: none; }
+
+      /* Windows keeps its own title bar above the 480×640 webview: the
+         title is "Lookout v<version>", and Mica tints the window. */
+      .lk[data-os="win"] { height: 672px; }
+      .lk[data-os="win"] .lk-win { border-radius: 8px; --bg: #f3f3f3; }
+      .lk[data-os="win"] .lk-body { top: 32px; }
+      .wtb {
+        display: none; position: absolute; left: 0; right: 0; top: 0; height: 32px;
+        align-items: center; padding-left: 10px; gap: 8px;
+        font: 12px "Segoe UI", -apple-system, Inter, sans-serif; color: #1a1a1a;
+      }
+      .lk[data-os="win"] .wtb { display: flex; }
+      .wtb img { width: 16px; height: 16px; border-radius: 3px; }
+      .wtb .caps { margin-left: auto; display: flex; height: 100%; }
+      .wtb .caps span { width: 46px; display: grid; place-items: center; }
+      .wtb .caps span.off { opacity: 0.35; }
+      .wtb .caps svg { stroke: currentColor; fill: none; stroke-width: 1; }
+
+      .lk-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 0; flex: none; }
+      .lk-title { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+      .lk-actions { display: flex; gap: 4px; color: var(--t2); }
+      .lk-actions span { width: 40px; height: 40px; display: grid; place-items: center; }
+      .lk-actions svg { fill: currentColor; display: block; }
+
+      .lk-banner-wrap { padding: 16px 16px 0; flex: none; overflow: hidden; }
+      .lk-banner {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 8px 12px; border-radius: 8px;
+        background: #f59e0b1a; border: 1px solid #f59e0b;
+      }
+      .lk-lines { flex: 1; min-width: 0; display: grid; }
+      .lk-lines i { display: block; height: 16.8px; position: relative; }
+      .lk-lines i::before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 7px; border-radius: 4px; background: rgba(180, 110, 0, 0.16); }
+      .lk-open {
+        flex: none; display: grid; place-items: center; width: 54px; height: 30px;
+        border-radius: 8px; border: 1px solid var(--b2);
+      }
+      .lk-open i { width: 28px; height: 7px; border-radius: 4px; background: rgba(0, 0, 0, 0.12); }
+
+      .lk-list { padding: 16px; display: grid; gap: 12px; }
+      .lk-scroll { flex: 1; min-height: 0; overflow: hidden; }
+      .lk-scroll[data-scrolled] { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px); mask-image: linear-gradient(to bottom, transparent 0, #000 20px); }
+      .lk-card { background: var(--surface); border: 1px solid var(--b1); border-radius: 10px; overflow: hidden; position: relative; }
+      .lk-thumb { position: relative; aspect-ratio: 16 / 9; background: rgba(0, 0, 0, 0.04); }
+      .lk-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      .lk-badge {
+        position: absolute; top: 8px; right: 8px;
+        font-size: 10px; font-weight: 600; color: #fff; padding: 2px 8px; border-radius: 999px;
+        background: #22c55e; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+      }
+      .lk-x {
+        position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; border-radius: 50%;
+        display: grid; place-items: center; color: #000;
+        background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(0, 0, 0, 0.1);
+      }
+      .lk-info { padding: 12px; }
+      .lk-sk { background: rgba(0, 0, 0, 0.05); border-radius: 8px; }
+      .lk-sk-card { background: none; border: 0; border-radius: 10px; }
+      .lk-sk-thumb { aspect-ratio: 16 / 9; border-radius: 0; }
+      .lk-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+      .lk-meta { font-size: 11px; color: var(--t3); }
+
+      /* UpdatePill: 22px capsule, 11px/500 label, 12px ring or the power glyph */
+      .lk-pill {
+        position: relative;
+        display: inline-flex; align-items: center; gap: 6px;
+        height: 22px; padding: 0 10px; border-radius: 999px;
+        border: 1px solid var(--b1); background: var(--surface); color: var(--t2);
+        font-size: 11px; font-weight: 500; white-space: nowrap;
+        transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      }
+      .lk-pill[data-solid] { border-color: transparent; background: rgba(0, 0, 0, 0.136); color: var(--t1); }
+      .lk-pill[data-solid][data-hover] { background: rgba(0, 0, 0, 0.162); }
+      .lk-pill .slot { display: grid; align-items: center; }
+      .lk-pill .slot > * { grid-area: 1 / 1; justify-self: start; width: max-content; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.18s ease; }
+      .lk-pill svg { display: block; flex: none; }
+      .lk-pill .ring circle:last-child { transition: stroke-dashoffset 0.2s ease; }
+      .lk-pill-anchor { position: relative; }
+      .lk[data-os="mac"] [data-win-pill] { display: none; }
+      .lk[data-os="win"] .lk-pill-anchor { position: absolute; left: 8px; bottom: 8px; z-index: 3; }
+      .lk-pill-anchor .lk-pill { opacity: 0; }
+
+      /* tabular rolling digits (NumberFlow-ish) */
+      .roll { display: inline-flex; font-variant-numeric: tabular-nums; }
+      .roll .d { display: inline-block; height: 1.25em; overflow: hidden; line-height: 1.25em; }
+      .roll .d > span { display: flex; flex-direction: column; transition: transform 0.45s cubic-bezier(0.25, 0.8, 0.25, 1); }
+
+      .cursor { position: absolute; left: 0; top: 0; width: 32px; height: 32px; z-index: 10; pointer-events: none; will-change: transform; }
+      .cursor svg { display: block; }
+
+      /* The new app's first window: "Welcome to the new Lookout"
+         (clients/native/src/windows/onboarding.rs: 420×620, the icon in a
+         212pt box at y 234, seven stickers in fixed slots around it). */
+      .nw {
+        position: absolute; width: 420px; height: 620px; overflow: hidden;
+        border-radius: 12px; background: #f6f6f6;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1), 0 24px 44px -14px rgba(50, 50, 93, 0.24), 0 12px 24px -12px rgba(0, 0, 0, 0.16);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+        color: rgba(0, 0, 0, 0.85);
+        opacity: 0; visibility: hidden;
+      }
+      .nw .lk-lights { position: absolute; left: 14px; top: 14px; }
+      .nw[data-os="win"] { border-radius: 8px; background: #f3f3f3; height: 652px; }
+      .nw[data-os="win"] .lk-lights { display: none; }
+      .nw-body { position: absolute; left: 0; right: 0; top: 0; height: 620px; }
+      .nw[data-os="win"] .nw-body { top: 32px; }
+      .nw .wtb { display: none; }
+      .nw[data-os="win"] .wtb { display: flex; }
+      .nw-icon, .nw-st { position: absolute; will-change: transform; }
+      .nw-icon img, .nw-st img { display: block; width: 100%; height: 100%; object-fit: contain; }
+      /* die-cut white edge and a soft shadow, like ui/sticker.rs bakes */
+      .nw-st img {
+        filter: drop-shadow(2px 0 0 #fff) drop-shadow(-2px 0 0 #fff) drop-shadow(0 2px 0 #fff) drop-shadow(0 -2px 0 #fff)
+                drop-shadow(0 2.5px 3px rgba(0, 0, 0, 0.26));
+      }
+      .nw-copy { position: absolute; left: 52px; right: 52px; top: 424px; text-align: center; }
+      .nw-title { font-size: 21px; font-weight: 700; line-height: 1.25; }
+      .nw-sub { font-size: 13px; color: rgba(0, 0, 0, 0.65); margin-top: 6px; }
+      .nw-links { font-size: 12px; color: rgba(0, 0, 0, 0.45); margin-top: 10px; }
+      .nw-links i { font-style: normal; margin: 0 6px; }
+      .nw-dots { position: absolute; left: 0; right: 0; top: 518px; display: flex; justify-content: center; gap: 9px; }
+      .nw-dots i { width: 6px; height: 6px; border-radius: 50%; background: rgba(0, 0, 0, 0.15); }
+      .nw-dots i:first-child { background: rgba(0, 0, 0, 0.85); }
+      .nw-btn {
+        position: absolute; left: 136px; top: 548px; width: 148px; height: 32px; border-radius: 999px;
+        display: grid; place-items: center; background: #3b82f6; color: #fff; font-size: 13px; font-weight: 600;
+      }
+
+      /* The Linux story: the installer run in Ghostty, as it ships on GNOME —
+         a libadwaita dark header bar titled with the running command,
+         Ghostty's default colours (#282c34 / #ffffff), its built-in
+         JetBrains Mono, and its 2px window padding. */
+      .term {
+        position: absolute; border-radius: 12px; overflow: hidden;
+        background: #282c34; color: #ffffff;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 24px 44px -14px rgba(50, 50, 93, 0.3), 0 12px 24px -12px rgba(0, 0, 0, 0.3);
+        font-family: "JetBrains Mono", var(--mono);
+        font-variant-ligatures: none;
+      }
+      .term-bar {
+        position: relative; height: 46px; display: flex; align-items: center; justify-content: center;
+        background: #2e2e32; box-shadow: inset 0 -1px rgba(0, 0, 0, 0.36);
+        font-family: "Adwaita Sans", Cantarell, Inter, system-ui, sans-serif;
+        font-size: 13.5px; font-weight: 700; color: #ffffff;
+      }
+      .term-bar .ttl { max-width: calc(100% - 260px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .term-bar .end { position: absolute; right: 9px; top: 0; bottom: 0; display: flex; align-items: center; gap: 6px; }
+      .term-bar .end span { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; color: #fff; }
+      .term-bar .end span.x { width: 24px; height: 24px; border-radius: 50%; background: rgba(255, 255, 255, 0.1); margin-left: 6px; }
+      .term-bar .end svg { display: block; fill: currentColor; }
+      .term-view { position: absolute; left: 0; right: 0; top: 48px; bottom: 0; overflow: hidden; }
+      .term-text {
+        padding: 0 4px; font-size: 13px; line-height: 1.3;
+        white-space: pre-wrap; word-break: break-all;
+      }
+      .term-text .dim { color: rgba(255, 255, 255, 0.55); }
+      .term-text b { color: #fff; font-weight: 700; }
+      .term-text .u { color: #8ae234; font-weight: 700; }
+      .term-text .p { color: #729fcf; font-weight: 700; }
+      .caret { display: inline-block; width: 1ch; height: 1.3em; vertical-align: top; background: #ffffff; animation: blink 1.2s steps(1) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+
+      /* ---------- sections ---------- */
+
+      .section { max-width: 1140px; margin: 0 auto; padding: 72px 24px 0; }
+      .section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 28px; }
+      h2 { font-size: clamp(28px, 3.4vw, 36px); line-height: 1.1; font-weight: 700; letter-spacing: -0.035em; }
+      .section-head p { font-size: 16px; color: var(--ink-2); margin-top: 8px; }
+
+      /* OS switcher: a sliding thumb under the active segment */
+      .seg {
+        position: relative; display: inline-flex; padding: 4px; gap: 0;
+        background: var(--fill); border-radius: 999px;
+      }
+      .seg-thumb {
+        position: absolute; top: 4px; bottom: 4px; left: 0; border-radius: 999px; background: #fff;
+        box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.1), 0 4px 10px -4px rgba(0, 0, 0, 0.12);
+        transition: transform 0.5s var(--spring), width 0.5s var(--spring);
+      }
+      .seg button {
+        position: relative; z-index: 1;
+        display: inline-flex; align-items: center; gap: 7px;
+        height: 36px; padding: 0 16px; border: 0; background: none; border-radius: 999px;
+        font-size: 14px; font-weight: 600; color: var(--ink-3); cursor: pointer;
+        transition: color 0.2s;
+      }
+      .seg button .os-short { display: none; }
+      .seg button svg { width: 15px; height: 15px; fill: currentColor; }
+      .seg button[aria-selected="true"] { color: var(--ink); }
+      .seg button:not([aria-selected="true"]):hover { color: var(--ink-2); }
+
+      .panels { position: relative; }
+      .panel { display: none; }
+      .panel.on { display: grid; animation: rise 0.5s var(--arrive) both; }
+      @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
+      .ways { grid-template-columns: 1.25fr 1fr; gap: 16px; align-items: start; }
+      .card {
+        position: relative; border-radius: 28px; background: var(--fill); padding: 32px;
+        display: flex; flex-direction: column;
+      }
+      .card.white { background: #fff; box-shadow: 0 0 0 1px var(--line), 0 24px 48px -28px rgba(50, 50, 93, 0.22); }
+      .card h3 { font-size: 22px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; margin-bottom: 8px; }
+      .card > p { font-size: 15px; line-height: 1.55; color: var(--ink-2); }
+      .card .actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 22px; }
+      .card:not(.white) .btn-light { background: #fff; box-shadow: 0 0 0 1px var(--line); }
+      .card:not(.white) .btn-light:hover { background: #fafafa; }
+      .card .aside { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.55; color: var(--ink-3); }
+
+      .steps { list-style: none; margin-top: 22px; display: grid; gap: 18px; counter-reset: s; }
+      .steps li { display: grid; grid-template-columns: 30px 1fr; gap: 14px; counter-increment: s; font-size: 15px; line-height: 1.55; color: var(--ink-2); }
+      .steps li::before {
+        content: counter(s);
+        width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+        background: var(--ink); color: #fff; font-size: 13px; font-weight: 700;
+      }
+      .steps li b { color: var(--ink); font-weight: 600; }
+      .steps li > div { padding-top: 3px; }
+      .steps .cmd { margin-top: 10px; }
+      kbd {
+        font: 600 12px/1 Inter, sans-serif; color: var(--ink);
+        display: inline-flex; align-items: center; min-width: 22px; height: 22px; padding: 0 6px; justify-content: center;
+        background: #fff; border-radius: 6px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1), 0 1px 0 rgba(0, 0, 0, 0.1);
+        vertical-align: 1px;
+      }
+
+      /* the real pill, inline in a sentence */
+      .inline-pill {
+        display: inline-flex; align-items: center; gap: 6px; vertical-align: 1px;
+        height: 22px; padding: 0 10px; border-radius: 999px; margin: 0 2px;
+        background: rgba(0, 0, 0, 0.136); color: rgba(0, 0, 0, 0.85);
+        font: 500 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; white-space: nowrap;
+      }
+
+      .mini-tabs { display: flex; gap: 4px; margin: 14px 0 10px; flex-wrap: wrap; }
+      .mini-tabs button {
+        height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: none;
+        font-size: 13px; font-weight: 500; color: var(--ink-3); cursor: pointer; transition: color 0.15s, background 0.15s;
+      }
+      .mini-tabs button[aria-selected="true"] { background: #fff; color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+      .card.white .mini-tabs button[aria-selected="true"] { background: var(--fill); box-shadow: none; }
+      .mini-panel { display: none; }
+      .mini-panel.on { display: block; }
+
+      /* which version */
+      .which { grid-template-columns: 1fr; }
+      .which-row {
+        display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap;
+        border-radius: 28px; background: var(--fill); padding: 26px 32px;
+      }
+      .which-row p { font-size: 16px; line-height: 1.55; color: var(--ink-2); max-width: 560px; }
+      .which-row p b { color: var(--ink); font-weight: 600; }
+      .which-row .now { font-size: 14px; color: var(--ink-3); }
+      .which-row .now b { color: var(--ink); }
+      .which .cmd { min-width: min(100%, 300px); background: #fff; }
+
+      /* FAQ */
+      .faq { max-width: 760px; }
+      .qa { border-bottom: 1px solid var(--line); }
+      .qa button {
+        width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px;
+        padding: 22px 0; border: 0; background: none; cursor: pointer; text-align: left;
+        font-size: 17px; font-weight: 600; letter-spacing: -0.015em;
+      }
+      .qa button svg { width: 14px; height: 14px; flex: none; color: var(--ink-3); transition: transform 0.4s var(--spring); }
+      .qa[data-open] button svg { transform: rotate(180deg); }
+      .qa .a { overflow: hidden; height: 0; transition: height 0.4s var(--travel); }
+      .qa .a p { padding: 0 40px 22px 0; font-size: 15px; line-height: 1.6; color: var(--ink-2); }
+
+      .reveal { opacity: 0; transform: translateY(14px); transition: opacity 0.8s var(--arrive), transform 0.8s var(--arrive); }
+      .reveal.in { opacity: 1; transform: none; }
+
+      footer { padding: 88px 24px 44px; text-align: center; font-size: 12px; line-height: 1.6; color: var(--ink-3); }
+      footer a { color: var(--ink-2); text-decoration: none; }
+      footer a:hover { color: var(--ink); }
+      footer .sep { margin: 0 8px; color: var(--ink-4); }
+      footer .legal { margin-top: 8px; }
+
+      @media (max-width: 960px) {
+        .hero { grid-template-columns: 1fr; padding-top: 96px; gap: 36px; }
+        .copy-col { max-width: 560px; }
+        .ways { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 600px) {
+        .hero { padding-left: 16px; padding-right: 16px; }
+        .section { padding: 56px 16px 0; }
+        .card { padding: 24px; border-radius: 24px; }
+        .which-row { padding: 22px 24px; border-radius: 24px; }
+        .seg button { padding: 0 12px; }
+        .seg button .os-long { display: none; }
+        .seg button .os-short { display: inline; }
+        .lede { font-size: 17px; }
+        .qa .a p { padding-right: 8px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .reveal { opacity: 1; transform: none; transition: none; }
+        .panel.on { animation: none; }
+      }
+    </style>
+  </head>
+  <body data-os="mac">
+    <nav>
+      <div class="inner">
+        <a class="name" href="/">Lookout</a>
+        <div class="right">
+          <a href="https://github.com/hackclub/lookout" class="gh">GitHub</a>
+          <a href="/" class="gh">Download</a>
+        </div>
+      </div>
+    </nav>
+
+    <main>
+      <section class="hero">
+        <div class="copy-col">
+          <img src="/icon.png" alt="" class="app-icon" width="72" height="72" />
+          <h1>Time to update Lookout</h1>
+          <p class="lede">
+            If you're on an older version of Lookout, you can update by reading the following. The
+            latest version is <span id="latest-v">0.4.2</span>.
+          </p>
+
+          <div class="cta-dl">
+            <div class="cta">
+              <a id="hero-dl" class="btn btn-dark" href="https://github.com/hackclub/lookout/releases/latest">
+                <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M228,144v64a12,12,0,0,1-12,12H40a12,12,0,0,1-12-12V144a12,12,0,0,1,24,0v52H204V144a12,12,0,0,1,24,0Zm-108.49,8.49a12,12,0,0,0,17,0l40-40a12,12,0,0,0-17-17L140,115V32a12,12,0,0,0-24,0v83L96.49,95.51a12,12,0,0,0-17,17Z"/></svg>
+                <span id="hero-dl-label">Download the new version</span>
+              </a>
+              <a class="btn btn-light" href="#how">How to update</a>
+            </div>
+            <div class="cta-sub" id="hero-sub"></div>
+          </div>
+
+          <div class="cta-linux">
+            <div class="cmd"><code>curl -fsSL https://lookout.hackclub.com/install.sh | sh</code></div>
+            <p class="hint">Run it in a terminal. It updates Lookout in place, then future versions come with your system updates.</p>
+          </div>
+        </div>
+
+        <div class="stage-wrap" id="stage-wrap" aria-hidden="true">
+          <div class="stage" id="stage"></div>
+          <button class="replay" id="replay" type="button" tabindex="-1">
+            <svg viewBox="0 0 256 256" fill="currentColor"><path d="M244,56v48a12,12,0,0,1-12,12H184a12,12,0,1,1,0-24H201.1l-19-17.38c-.13-.12-.26-.24-.38-.37A76,76,0,1,0,127,204h1a75.53,75.53,0,0,0,52.15-20.72,12,12,0,0,1,16.49,17.45A99.45,99.45,0,0,1,128,228h-1.37A100,100,0,1,1,198.51,57.06L220,76.72V56a12,12,0,0,1,24,0Z"/></svg>
+            Replay
+          </button>
+        </div>
+        <p class="sr" id="stage-desc"></p>
+      </section>
+
+      <section class="section reveal" id="how">
+        <div class="section-head">
+          <div>
+            <h2>How to update</h2>
+          </div>
+          <div class="seg" role="tablist" aria-label="Operating system" id="seg">
+            <span class="seg-thumb" id="seg-thumb"></span>
+            <button role="tab" data-os="mac" aria-selected="true">
+              <svg viewBox="0 0 256 256" aria-hidden="true"><path d="M128.23,30A40,40,0,0,1,167,0h1a8,8,0,0,1,0,16h-1a24,24,0,0,0-23.24,18,8,8,0,1,1-15.5-4ZM223.3,169.59a8.07,8.07,0,0,0-2.8-3.4C203.53,154.53,200,134.64,200,120c0-17.670,13.47-33.06,21.5-40.67a8,8,0,0,0,0-11.62C208.82,55.74,187.82,48,168,48a72.23,72.23,0,0,0-40,12.13,71.56,71.56,0,0,0-90.71,9.09A74.63,74.63,0,0,0,16,123.4a127,127,0,0,0,40.14,89.73A39.8,39.8,0,0,0,83.59,224h87.68a39.840,39.840,0,0,0,29.12-12.57,125,125,0,0,0,17.82-24.6C225.23,174,224.33,172,223.3,169.59Z"/></svg>
+              <span class="os-long">macOS</span><span class="os-short">Mac</span>
+            </button>
+            <button role="tab" data-os="win" aria-selected="false">
+              <svg viewBox="0 0 256 256" aria-hidden="true"><path d="M104,144v51.64a8,8,0,0,1-8,8,8.54,8.54,0,0,1-1.430-.13l-64-11.64A8,8,0,0,1,24,184V144a8,8,0,0,1,8-8H96A8,8,0,0,1,104,144Zm-2.87-89.78a8,8,0,0,0-6.56-1.73l-64,11.64A8,8,0,0,0,24,72v40a8,8,0,0,0,8,8H96a8,8,0,0,0,8-8V60.36A8,8,0,0,0,101.13,54.22ZM208,136H128a8,8,0,0,0-8,8v57.45a8,8,0,0,0,6.57,7.88l80,14.54A7.610,7.610,0,0,0,208,224a8,8,0,0,0,8-8V144A8,8,0,0,0,208,136Zm5.13-102.14a8,8,0,0,0-6.56-1.73l-80,14.55A8,8,0,0,0,120,54.55V112a8,8,0,0,0,8,8h80a8,8,0,0,0,8-8V40A8,8,0,0,0,213.13,33.86Z"/></svg>
+              <span>Windows</span>
+            </button>
+            <button role="tab" data-os="linux" aria-selected="false">
+              <svg viewBox="0 0 256 256" aria-hidden="true"><path d="M161.22,209.74a4,4,0,0,1-3.31,6.26H98.1a4,4,0,0,1-3.31-6.26,40,40,0,0,1,66.43,0Zm68.93,3.37a8.29,8.29,0,0,1-6.43,2.89H184.56a4,4,0,0,1-3.76-2.65,56,56,0,0,0-105.590,0A4,4,0,0,1,71.45,216H32.23a8.2,8.2,0,0,1-6.42-2.93A8,8,0,0,1,25.75,203c.06-.07,7.64-9.78,15.12-28.72C47.77,156.8,56,127.64,56,88a72,72,0,0,1,144,0c0,39.64,8.23,68.8,15.13,86.28,7.48,18.94,15.06,28.65,15.13,28.74A8,8,0,0,1,230.15,213.11ZM88,100a12,12,0,1,0,12-12A12,12,0,0,0,88,100Zm79.16,32.42a8,8,0,0,0-10.73-3.58L128,143.06,99.58,128.84a8,8,0,0,0-7.15,14.32l32,16a8,8,0,0,0,7.15,0l32-16A8,8,0,0,0,167.16,132.42ZM168,100a12,12,0,1,0-12,12A12,12,0,0,0,168,100Z"/></svg>
+              <span>Linux</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="panels">
+          <!-- macOS -->
+          <div class="panel ways" data-os="mac">
+            <div class="card white">
+              <h3>Update within Lookout</h3>
+              <ol class="steps">
+                <li><div><b>Finish your recording.</b> You can only update when you're on the home page.</div></li>
+                <li><div><b>Click <span class="inline-pill">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>Restart to Complete Update</span></b>
+                  at the top right of the window once the download finishes.</div></li>
+                <li><div><b>No button?</b> Quit Lookout with <kbd>⌘</kbd> <kbd>Q</kbd> and open it again. It downloads the update once more and installs it by itself.</div></li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>Install directly</h3>
+              <div class="actions">
+                <a class="btn btn-dark btn-sm" data-dl="mac-arm" href="https://github.com/hackclub/lookout/releases/latest/download/Lookout.dmg">
+                  <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M228,144v64a12,12,0,0,1-12,12H40a12,12,0,0,1-12-12V144a12,12,0,0,1,24,0v52H204V144a12,12,0,0,1,24,0Zm-108.49,8.49a12,12,0,0,0,17,0l40-40a12,12,0,0,0-17-17L140,115V32a12,12,0,0,0-24,0v83L96.49,95.51a12,12,0,0,0-17,17Z"/></svg>
+                  Apple Silicon
+                </a>
+                <a class="btn btn-light btn-sm" data-dl="mac-intel" href="https://github.com/hackclub/lookout/releases/latest/download/Lookout-Intel.dmg">Intel Mac</a>
+              </div>
+              <p class="aside">Rest assured, your timelapses won't be gone after the update.</p>
+            </div>
+          </div>
+
+          <!-- Windows -->
+          <div class="panel ways" data-os="win">
+            <div class="card white">
+              <h3>Update within Lookout</h3>
+              <ol class="steps">
+                <li><div><b>Finish your recording.</b> You can only update when you're on the home page.</div></li>
+                <li><div><b>Click <span class="inline-pill">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>Restart to Complete Update</span></b>
+                  at the bottom left of the window once the download finishes.</div></li>
+                <li><div><b>No button?</b> Close Lookout's window and open Lookout again from the Start menu. It downloads the update once more and installs it by itself.</div></li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>Install directly</h3>
+              <div class="actions">
+                <a class="btn btn-dark btn-sm" data-dl="win-x64" href="https://github.com/hackclub/lookout/releases/latest/download/Lookout-Setup.exe">
+                  <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M228,144v64a12,12,0,0,1-12,12H40a12,12,0,0,1-12-12V144a12,12,0,0,1,24,0v52H204V144a12,12,0,0,1,24,0Zm-108.49,8.49a12,12,0,0,0,17,0l40-40a12,12,0,0,0-17-17L140,115V32a12,12,0,0,0-24,0v83L96.49,95.51a12,12,0,0,0-17,17Z"/></svg>
+                  Download for Windows
+                </a>
+                <a class="btn btn-light btn-sm" data-dl="win-arm" href="https://github.com/hackclub/lookout/releases/latest/download/Lookout-Setup-ARM.exe">Windows on ARM</a>
+              </div>
+              <p class="aside">Rest assured, your timelapses won't be gone after the update.</p>
+            </div>
+          </div>
+
+          <!-- Linux -->
+          <div class="panel ways" data-os="linux">
+            <div class="card white">
+              <h3>Run the installer again</h3>
+              <ol class="steps">
+                <li><div><b>Paste this into a terminal.</b>
+                  <div class="cmd"><code>curl -fsSL https://lookout.hackclub.com/install.sh | sh</code></div>
+                </div></li>
+                <li><div><b>Say yes when it asks.</b> If your copy is from before Lookout had a package repository, it adds one, then updates Lookout in place.</div></li>
+                <li><div><b>Quit Lookout from the tray icon</b> and open it again.</div></li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>If your Lookout was installed through a package manager or the command line</h3>
+              <p>Follow these instructions:</p>
+              <div class="mini-tabs" role="tablist" data-group="up">
+                <button role="tab" aria-selected="true" data-k="apt">Debian &amp; Ubuntu</button>
+                <button role="tab" aria-selected="false" data-k="dnf">Fedora</button>
+                <button role="tab" aria-selected="false" data-k="pacman">Arch</button>
+              </div>
+              <div class="mini-panel on" data-group="up" data-k="apt"><div class="cmd"><code>sudo apt update &amp;&amp; sudo apt upgrade</code></div></div>
+              <div class="mini-panel" data-group="up" data-k="dnf"><div class="cmd"><code>sudo dnf upgrade</code></div></div>
+              <div class="mini-panel" data-group="up" data-k="pacman"><div class="cmd"><code>sudo pacman -Syu</code></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal">
+        <div class="section-head">
+          <div>
+            <h2>Which version do I have?</h2>
+          </div>
+        </div>
+        <div class="panels">
+          <div class="panel which" data-os="mac">
+            <div class="which-row">
+              <p>Click <b>Lookout</b> in the menu bar, then <b>About Lookout</b>.</p>
+              <p class="now">Anything from <b class="v-min">0.4.1</b> up is the new app.</p>
+            </div>
+          </div>
+          <div class="panel which" data-os="win">
+            <div class="which-row">
+              <p>It's in the window's title bar, next to the name: <b>Lookout v0.3.10</b>.</p>
+              <p class="now">Anything from <b class="v-min">0.4.1</b> up is the new app.</p>
+            </div>
+          </div>
+          <div class="panel which" data-os="linux">
+            <div class="which-row">
+              <div style="flex: 1; min-width: min(100%, 280px)">
+                <p>Ask your package manager.</p>
+                <div class="mini-tabs" role="tablist" data-group="ver">
+                  <button role="tab" aria-selected="true" data-k="apt">Debian &amp; Ubuntu</button>
+                  <button role="tab" aria-selected="false" data-k="dnf">Fedora</button>
+                  <button role="tab" aria-selected="false" data-k="pacman">Arch</button>
+                </div>
+                <div class="mini-panel on" data-group="ver" data-k="apt"><div class="cmd"><code>apt policy lookout</code></div></div>
+                <div class="mini-panel" data-group="ver" data-k="dnf"><div class="cmd"><code>rpm -q lookout</code></div></div>
+                <div class="mini-panel" data-group="ver" data-k="pacman"><div class="cmd"><code>pacman -Q lookout-bin</code></div></div>
+              </div>
+              <p class="now">Anything from <b class="v-min">0.4.1</b> up is the new app.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal">
+        <div class="section-head"><h2>Questions</h2></div>
+        <div class="faq">
+          <div class="qa">
+            <button type="button" aria-expanded="false">Will I lose my timelapses?
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>No, your timelapses won't be gone after the update.</p></div>
+          </div>
+          <div class="qa">
+            <button type="button" aria-expanded="false">Can I update while recording?
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>No. Finish your recording first, then update from the home page.</p></div>
+          </div>
+          <div class="qa">
+            <button type="button" aria-expanded="false">The update isn't installing.
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>Download the new version from this page and install it directly.</p></div>
+          </div>
+          <div class="qa">
+            <button type="button" aria-expanded="false">Will I have to do this again?
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>No. New versions of Lookout update themselves when you quit. On Linux, they come with your system updates.</p></div>
+          </div>
+          <div class="qa">
+            <button type="button" aria-expanded="false">Why do I need to update?
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>Older versions are outdated and might cause instability.</p></div>
+          </div>
+          <div class="qa">
+            <button type="button" aria-expanded="false">Still stuck?
+              <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216.49,104.49l-80,80a12,12,0,0,1-17,0l-80-80a12,12,0,0,1,17-17L128,159l71.51-71.52a12,12,0,0,1,17,17Z"/></svg>
+            </button>
+            <div class="a"><p>Open an issue on <a class="link" href="https://github.com/hackclub/lookout/issues">GitHub</a> and we'll help you out.</p></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div>
+        <a href="https://hackclub.com/privacy-and-terms">Privacy &amp; Terms</a>
+        <span class="sep">&middot;</span>
+        <a href="https://hackclub.com/conduct">Code of Conduct</a>
+        <span class="sep">&middot;</span>
+        <a href="https://hackclub.com/imprint">Imprint</a>
+      </div>
+      <div class="legal">
+        &copy; 2026 Hack Club. Registered under The Hack Foundation, a 501(c)(3) nonprofit (EIN: 81-2908499).
+      </div>
+    </footer>
+
+    <script>
+      (() => {
+        const REL = "https://github.com/hackclub/lookout/releases/latest/download/";
+        const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+        const $ = (s, r = document) => r.querySelector(s);
+        const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+        // ---------- platform ----------
+        const ua = navigator.userAgent;
+        let os = "mac";
+        if (/Windows/i.test(ua)) os = "win";
+        else if (/Linux|X11|CrOS/i.test(ua) && !/Android/i.test(ua)) os = "linux";
+        const detected = os;
+        let latest = "0.4.2";
+
+        const ICON_DL = $("#hero-dl svg").outerHTML;
+
+        async function heroDownload() {
+          const btn = $("#hero-dl"), label = $("#hero-dl-label"), sub = $("#hero-sub");
+          if (detected === "mac") {
+            let intel = false;
+            try {
+              const h = await navigator.userAgentData?.getHighEntropyValues?.(["architecture"]);
+              intel = h?.architecture === "x86";
+            } catch {}
+            btn.href = REL + (intel ? "Lookout-Intel.dmg" : "Lookout.dmg");
+            label.textContent = "Download for Mac";
+            sub.innerHTML = intel
+              ? `For Intel Macs. <a class="link" href="${REL}Lookout.dmg">Apple Silicon</a>`
+              : `For Apple Silicon. <a class="link" href="${REL}Lookout-Intel.dmg">Intel Mac</a>`;
+          } else if (detected === "win") {
+            let arm = false;
+            try {
+              const h = await navigator.userAgentData?.getHighEntropyValues?.(["architecture"]);
+              arm = h?.architecture === "arm";
+            } catch {}
+            btn.href = REL + (arm ? "Lookout-Setup-ARM.exe" : "Lookout-Setup.exe");
+            label.textContent = "Download for Windows";
+            sub.innerHTML = arm
+              ? `For Windows on ARM. <a class="link" href="${REL}Lookout-Setup.exe">Intel and AMD</a>`
+              : `For Intel and AMD. <a class="link" href="${REL}Lookout-Setup-ARM.exe">Windows on ARM</a>`;
+          } else {
+            sub.innerHTML = `Also for <a class="link" href="${REL}Lookout.dmg">Mac</a> and <a class="link" href="${REL}Lookout-Setup.exe">Windows</a>`;
+          }
+        }
+
+        async function fetchLatest() {
+          try {
+            const r = await fetch("https://api.github.com/repos/hackclub/lookout/releases/latest");
+            if (!r.ok) return;
+            const j = await r.json();
+            const v = String(j.tag_name || "").replace(/^v/, "");
+            if (!/^\d+\.\d+\.\d+$/.test(v)) return;
+            latest = v;
+            document.title = `Update Lookout to ${v}`;
+            $("#latest-v").textContent = v;
+          } catch {}
+        }
+
+        // ---------- copy buttons ----------
+        const ICON_COPY = `<svg class="sheet" viewBox="0 0 256 256" fill="currentColor"><path d="M216,32H88a8,8,0,0,0-8,8V80H40a8,8,0,0,0-8,8V216a8,8,0,0,0,8,8H168a8,8,0,0,0,8-8V176h40a8,8,0,0,0,8-8V40A8,8,0,0,0,216,32ZM160,208H48V96H160Zm48-48H176V88a8,8,0,0,0-8-8H96V48H208Z"/></svg><svg class="tick" viewBox="0 0 256 256" fill="currentColor"><path d="M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"/></svg>`;
+        $$(".cmd").forEach((box) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "copy";
+          b.setAttribute("aria-label", "Copy to clipboard");
+          b.innerHTML = ICON_COPY;
+          let t;
+          b.addEventListener("click", () => {
+            navigator.clipboard.writeText(box.querySelector("code").textContent).then(() => {
+              b.classList.add("done");
+              clearTimeout(t);
+              t = setTimeout(() => b.classList.remove("done"), 1600);
+            });
+          });
+          box.appendChild(b);
+        });
+
+        // ---------- mini tabs ----------
+        $$(".mini-tabs").forEach((tabs) => {
+          const group = tabs.dataset.group;
+          tabs.addEventListener("click", (e) => {
+            const btn = e.target.closest("button");
+            if (!btn) return;
+            $$("button", tabs).forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+            $$(`.mini-panel[data-group="${group}"]`).forEach((p) => p.classList.toggle("on", p.dataset.k === btn.dataset.k));
+          });
+        });
+
+        // ---------- FAQ ----------
+        $$(".qa").forEach((qa) => {
+          const btn = $("button", qa), a = $(".a", qa);
+          btn.addEventListener("click", () => {
+            const open = !qa.hasAttribute("data-open");
+            btn.setAttribute("aria-expanded", String(open));
+            if (open) {
+              qa.setAttribute("data-open", "");
+              a.style.height = a.scrollHeight + "px";
+              a.addEventListener("transitionend", () => { if (qa.hasAttribute("data-open")) a.style.height = "auto"; }, { once: true });
+            } else {
+              a.style.height = a.scrollHeight + "px";
+              a.getBoundingClientRect();
+              qa.removeAttribute("data-open");
+              a.style.height = "0px";
+            }
+          });
+        });
+
+        // ---------- reveal ----------
+        const io = new IntersectionObserver((es) => es.forEach((e) => {
+          if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+        }), { rootMargin: "0px 0px -10% 0px" });
+        $$(".reveal").forEach((el) => io.observe(el));
+
+        // ---------- OS switcher ----------
+        const seg = $("#seg"), thumb = $("#seg-thumb");
+        function placeThumb(animate) {
+          const btn = $(`button[data-os="${os}"]`, seg);
+          if (!animate) thumb.style.transition = "none";
+          thumb.style.width = btn.offsetWidth + "px";
+          thumb.style.transform = `translateX(${btn.offsetLeft}px)`;
+          if (!animate) { thumb.getBoundingClientRect(); thumb.style.transition = ""; }
+        }
+        function setOS(next, fromUser) {
+          os = next;
+          $$("button", seg).forEach((b) => b.setAttribute("aria-selected", String(b.dataset.os === os)));
+          $$(".panel").forEach((p) => p.classList.toggle("on", p.dataset.os === os));
+          placeThumb(fromUser);
+          if (fromUser) scene.start(os);
+        }
+        seg.addEventListener("click", (e) => {
+          const b = e.target.closest("button");
+          if (b && b.dataset.os !== os) setOS(b.dataset.os, true);
+        });
+        addEventListener("resize", () => placeThumb(false));
+
+        // =====================================================================
+        // The hero scene: the old app's own update pill, played out.
+        // Built at design size, scaled to fit its column.
+        // =====================================================================
+
+        const SVG_GEAR = `<svg width="14" height="14" viewBox="0 0 256 256"><path d="M237.94,107.21a8,8,0,0,0-3.890-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.830-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A111.92,111.92,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.890,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.890,5.4l29.83,17,.12,33.63a8,8,0,0,0,2.830,6.08,111.910,111.910,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.910,7.910,0,0,0,3.9,1,8.090,8.090,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.890-5.4A106.47,106.47,0,0,0,237.94,107.21ZM128,168a40,40,0,1,1,40-40A40,40,0,0,1,128,168Z"/></svg>`;
+        const SVG_PLUS = `<svg width="14" height="14" viewBox="0 0 256 256"><path d="M228,128a12,12,0,0,1-12,12H140v76a12,12,0,0,1-24,0V140H40a12,12,0,0,1,0-24h76V40a12,12,0,0,1,24,0v76h76A12,12,0,0,1,228,128Z"/></svg>`;
+        const SVG_X = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
+        const SVG_POWER = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-top:.5px"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>`;
+        const C = 2 * Math.PI * 5;
+        const SVG_RING = `<svg class="ring" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="rgba(0,0,0,.12)" stroke-width="1.5"/><circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C}" transform="rotate(-90 6 6)"/></svg>`;
+        // macOS pointer, from the onboarding window's own cursor assets
+        const SVG_CURSOR = `<svg width="32" height="32" viewBox="0 0 32 32"><g transform="translate(10 7)"><path d="m6.148 18.473 1.863-1.003 1.615-.839-2.568-4.816h4.332l-11.379-11.408v16.015l3.316-3.221z" fill="#fff"/><path d="m6.431 17 1.765-.941-2.775-5.202h3.604l-8.025-8.043v11.188l2.53-2.442z" fill="#000"/></g></svg>`;
+        const HOT = { x: 10, y: 7 }; // macOS arrow at 1:1, tip at (10, 7)
+
+
+        function roller(n) {
+          const el = document.createElement("span");
+          el.className = "roll";
+          const cols = [];
+          const set = (v) => {
+            const s = String(v);
+            while (cols.length < s.length) {
+              const d = document.createElement("span");
+              d.className = "d";
+              const strip = document.createElement("span");
+              strip.innerHTML = "0123456789".split("").map((c) => `<span>${c}</span>`).join("");
+              d.appendChild(strip);
+              el.appendChild(d);
+              cols.push(strip);
+            }
+            while (cols.length > s.length) { cols.pop(); el.lastChild.remove(); }
+            [...s].forEach((c, i) => { cols[i].style.transform = `translateY(${-Number(c) * 1.25}em)`; });
+          };
+          set(n);
+          return { el, set };
+        }
+
+        const WTB = (title) => `
+          <div class="wtb"><img src="/icon.png" alt="" /><span>${title}</span>
+            <div class="caps">
+              <span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></span>
+              <span class="off"><svg width="10" height="10" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1"/></svg></span>
+              <span><svg width="10" height="10" viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></span>
+            </div>
+          </div>`;
+
+        function appMarkup(variant) {
+          // The gallery's loading skeleton (screens/gallery.rs gallery_skeleton),
+          // held still, as the onboarding shows it: the cards are filler here.
+          const card = () => `
+            <div class="lk-card lk-sk-card">
+              <div class="lk-sk lk-sk-thumb"></div>
+              <div class="lk-info"><div class="lk-sk" style="width:60%;height:16px;margin-bottom:4px"></div><div class="lk-sk" style="width:40%;height:12px"></div></div>
+            </div>`;
+          return `
+            <div class="lk" data-os="${variant}">
+              <div class="lk-win">
+                ${WTB("Lookout v0.3.10")}
+                <div class="lk-body">
+                  <div class="lk-bar">
+                    <div class="lk-lights"><i></i><i></i><i></i></div>
+                    <div class="lk-pill-anchor" data-mac-pill></div>
+                  </div>
+                  <div class="lk-head">
+                    <div class="lk-title">Your Timelapses</div>
+                    <div class="lk-actions"><span>${SVG_GEAR}</span><span>${SVG_PLUS}</span></div>
+                  </div>
+                  <div class="lk-banner-wrap"><div class="lk-banner"><span class="lk-lines"><i style="width:94%"></i><i style="width:90%"></i><i style="width:62%"></i></span><span class="lk-open"><i></i></span></div></div>
+                  <div class="lk-scroll"><div class="lk-list">
+                    ${card()}
+                    ${card()}
+                    ${card()}
+                  </div></div>
+                  <div class="lk-pill-anchor" data-win-pill></div>
+                </div>
+              </div>
+            </div>`;
+        }
+
+        function pillMarkup() {
+          return `<span class="lk-pill" data-state="downloading">
+            <span class="slot">
+              <span class="s-dl">${SVG_RING}<span class="lbl">Downloading Update…&nbsp;<span class="pct"></span>%</span></span>
+              <span class="s-ready" style="opacity:0">${SVG_POWER}<span class="lbl">Restart to Complete Update</span></span>
+              <span class="s-inst" style="opacity:0">${SVG_POWER}<span class="lbl">Installing Update…</span></span>
+            </span>
+          </span>`;
+        }
+
+        // The new app's welcome window. Slots and tilts are onboarding.rs's
+        // SLOTS and TILTS; the art is sticker.rs's first seven.
+        const ICON_C = { x: 210, y: 234 }, ICON_BOX = 212;
+        const STICKERS = [
+          ["hackhackclub", -106, 2, 112, false, -8],
+          ["midnight-kitten", -48, -102, 68, false, 6],
+          ["i-heart-hc", 90, -78, 72, true, -4],
+          ["skullpup", 104, 28, 106, true, 9],
+          ["boba-orpheus", -76, 86, 68, true, -11],
+          ["pixel-orange", -128, 78, 40, true, 5],
+          ["sprig", 74, 100, 70, true, -6],
+        ];
+        function nwMarkup(variant) {
+          const st = (front) => STICKERS.filter((x) => x[4] === front).map(([n, x, y, size, , tilt]) =>
+            `<div class="nw-st" data-x="${x}" data-y="${y}" data-tilt="${tilt}" style="left:${ICON_C.x + x - size / 2}px;top:${ICON_C.y + y - size / 2}px;width:${size}px;height:${size}px;transform:rotate(${tilt}deg)"><img src="/update/${n}.png" alt="" /></div>`).join("");
+          return `
+            <div class="nw" data-os="${variant}">
+              ${WTB("Welcome to Lookout")}
+              <div class="lk-lights"><i></i><i></i><i></i></div>
+              <div class="nw-body">
+                ${st(false)}
+                <div class="nw-icon" style="left:${ICON_C.x - ICON_BOX / 2}px;top:${ICON_C.y - ICON_BOX / 2}px;width:${ICON_BOX}px;height:${ICON_BOX}px"><img src="/update/app-icon.png" alt="" /></div>
+                ${st(true)}
+                <div class="nw-copy">
+                  <div class="nw-title">Welcome to the new Lookout</div>
+                  <div class="nw-sub">Go check out what's new.</div>
+                  <div class="nw-links">Privacy &amp; Terms<i>·</i>Code of Conduct</div>
+                </div>
+                <div class="nw-dots"><i></i><i></i><i></i><i></i></div>
+                <div class="nw-btn">Continue</div>
+              </div>
+            </div>`;
+        }
+
+        const TERM_LINES = (v) => [
+          ["", 260],
+          ["<b>Lookout</b>", 60],
+          ["", 40],
+          ["Lookout 0.3.10 is installed. This will:", 90],
+          ["  • add https://pkg.lookout.hackclub.com to /etc/apt/sources.list.d/lookout.sources", 70],
+          ["  • trust its signing key 1A6D22590D34B83E2D0B3C8DF4806E984D9DA365", 70],
+          ["  • update lookout to the newest version with apt", 70],
+          ["", 40],
+          ['<span class="dim">Nothing else is changed. Uninstall with your package manager.</span>', 60],
+          ["", 40],
+        ];
+
+        const scene = (() => {
+          const wrap = $("#stage-wrap"), stage = $("#stage"), replayBtn = $("#replay");
+          let run = 0, current = "mac", started = false;
+          const W = 640, H = 640;
+
+          function fit() {
+            const k = Math.min(1, wrap.clientWidth / W);
+            stage.style.width = W + "px";
+            stage.style.height = H + "px";
+            stage.style.transform = `scale(${k})`;
+            wrap.style.height = H * k + "px";
+          }
+
+          const alive = (id) => id === run;
+          const sleep = (ms, id) => new Promise((res, rej) => setTimeout(() => (alive(id) ? res() : rej("stop")), ms));
+          const anim = (el, kf, o) => el.animate(kf, { fill: "forwards", ...o }).finished;
+
+          // Both windows whole, the new one opening centred where the old was.
+          const LAYOUT = {
+            // mac runs off the bottom; Windows off the top, keeping its
+            // bottom-left pill in view. The new window opens centred on the old.
+            // Content is laid out at real size; `cam` zooms it so the windows
+            // fill the stage and run off it (mac: off the bottom; Windows: off
+            // the top, keeping its bottom-left pill in view). The welcome window
+            // sits where its icon and title land in frame.
+            // z leaves 36px each side so the window shadow isn't clipped.
+            mac: { z: 1.18, t: { x: -11.2, y: -15.2 }, old: { x: 40, y: 40 }, neu: { x: 70, y: -13 } },
+            win: { z: 1.18, t: { x: -11.2, y: -115.1 }, old: { x: 40, y: -66 }, neu: { x: 70, y: 26 } },
+            linux: { term: { x: 32, y: 36, w: 576, h: 660 }, font: 14, textBottom: 500 },
+          };
+
+          function setCursor(cur, x, y) {
+            cur.style.transform = `translate(${x - HOT.x}px, ${y - HOT.y}px)`;
+          }
+          async function moveCursor(cur, from, to, ms) {
+            await anim(cur, [
+              { transform: `translate(${from.x - HOT.x}px, ${from.y - HOT.y}px)` },
+              { transform: `translate(${to.x - HOT.x}px, ${to.y - HOT.y}px)` },
+            ], { duration: ms, easing: "cubic-bezier(0.45, 0, 0.1, 1)" });
+          }
+
+          // a point inside an element, in stage pixels
+          function pt(el, fx, fy) {
+            const sr = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+            const k = sr.width / stage.offsetWidth;
+            return { x: (r.left - sr.left + r.width * fx) / k, y: (r.top - sr.top + r.height * fy) / k };
+          }
+
+          // motion.rs, ported: framer-motion's analytic spring (mass 1, from
+          // rest, 0 → 1) and the CSS cubic-bezier solver, so the welcome
+          // moves exactly like the native onboarding window.
+          function springAt(k, c, ms) {
+            const t = Math.max(0, ms / 1000), x0 = -1, w = Math.sqrt(k), z = c / (2 * Math.sqrt(k));
+            let x, v;
+            if (z < 1) {
+              const wd = w * Math.sqrt(1 - z * z), a = x0, b = (z * w * x0) / wd, env = Math.exp(-z * w * t);
+              const s = Math.sin(wd * t), co = Math.cos(wd * t);
+              x = env * (a * co + b * s);
+              v = env * ((b * wd - z * w * a) * co - (a * wd + z * w * b) * s);
+            } else if (Math.abs(z - 1) < 1e-9) {
+              const env = Math.exp(-w * t), b = w * x0;
+              x = env * (x0 + b * t);
+              v = env * (b - w * (x0 + b * t));
+            } else {
+              const r = Math.sqrt(z * z - 1), s1 = -w * (z - r), s2 = -w * (z + r);
+              const c2 = (-s1 * x0) / (s2 - s1), c1 = x0 - c2;
+              x = c1 * Math.exp(s1 * t) + c2 * Math.exp(s2 * t);
+              v = c1 * s1 * Math.exp(s1 * t) + c2 * s2 * Math.exp(s2 * t);
+            }
+            // motion.rs's rest test for a travel under 5 units
+            return { x: 1 + x, rest: Math.abs(v) <= 0.01 && Math.abs(x) <= 0.005 };
+          }
+          // a spring that starts `delay` ms in: { x, done }
+          function springIn(k, c, delay, ms) {
+            if (ms <= delay) return { x: 0, done: false };
+            const s = springAt(k, c, ms - delay);
+            return s.rest ? { x: 1, done: true } : { x: s.x, done: false };
+          }
+          function cubicBezier(x1, y1, x2, y2, t) {
+            if (t <= 0) return 0;
+            if (t >= 1) return 1;
+            const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+            const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+            const sx = (s) => ((ax * s + bx) * s + cx) * s, sy = (s) => ((ay * s + by) * s + cy) * s;
+            const dx = (s) => (3 * ax * s + 2 * bx) * s + cx;
+            let s = t;
+            for (let i = 0; i < 8; i++) {
+              const x = sx(s) - t;
+              if (Math.abs(x) < 1e-7) return sy(s);
+              const d = dx(s);
+              if (Math.abs(d) < 1e-6) break;
+              s -= x / d;
+            }
+            let lo = 0, hi = 1;
+            s = t;
+            for (let i = 0; i < 40; i++) {
+              const x = sx(s);
+              if (Math.abs(x - t) < 1e-7) break;
+              if (t > x) lo = s; else hi = s;
+              s = (lo + hi) / 2;
+            }
+            return sy(s);
+          }
+
+          // onboarding.rs's welcome entrance, timed from the end of its flag
+          // intro (T0; the mock opens straight on it): the content fades up
+          // from T0−120 over 400ms ease-out; the icon springs (300/19) from
+          // T0+60, 0.55→1 scale; each sticker springs (POP, 240/17) out from
+          // behind the icon from T0+140+60i, travelling from the icon's
+          // centre and growing 0.25→1, opacity √t; the words rise 620ms
+          // ease-out-quart from T0+120. No idle bob (its phase is unused).
+          async function welcome(nw, id) {
+            const T0 = 120;
+            const body = $(".nw-body", nw), icon = $(".nw-icon", nw);
+            const stickers = $$(".nw-st", nw).map((el) => ({ el, x: +el.dataset.x, y: +el.dataset.y, tilt: +el.dataset.tilt }));
+            const title = $(".nw-title", nw), sub = $(".nw-sub", nw), links = $(".nw-links", nw);
+            const frame = (ms) => {
+              let done = true;
+              const k = springIn(300, 19, T0 + 60, ms);
+              done = done && k.done;
+              icon.style.transform = `scale(${0.55 + 0.45 * k.x})`;
+              icon.style.opacity = Math.min(1, Math.max(0, k.x));
+              stickers.forEach((s, i) => {
+                const p = springIn(240, 17, T0 + 140 + i * 60, ms);
+                done = done && p.done;
+                const t = p.x, back = t - 1;
+                s.el.style.transform = `translate(${s.x * back}px, ${s.y * back}px) rotate(${s.tilt}deg) scale(${Math.max(0, 0.25 + 0.75 * t)})`;
+                s.el.style.opacity = Math.pow(Math.min(1, Math.max(0, t)), 0.5);
+              });
+              // the words: margin-tops in a column, so each line carries the ones above
+              const p = Math.min(1, Math.max(0, (ms - (T0 + 120)) / 620));
+              const a = cubicBezier(0.25, 1, 0.5, 1, p), a2 = Math.min(1, Math.max(0, (a - 0.12) / 0.88));
+              done = done && p >= 1;
+              const dy = (1 - a) * 10, dy2 = dy + (1 - a2) * 8;
+              title.style.transform = `translateY(${dy}px)`;
+              title.style.opacity = a;
+              sub.style.transform = `translateY(${dy2}px)`;
+              sub.style.opacity = a2;
+              links.style.transform = `translateY(${dy2 + (1 - a2) * 8}px)`;
+              links.style.opacity = a2;
+              return done;
+            };
+            frame(0);
+            nw.style.visibility = "visible";
+            // the OS opening the window, then the content fading up in it
+            anim(nw, [{ opacity: 0, transform: "scale(0.97)" }, { opacity: 1, transform: "none" }], { duration: 300, easing: "cubic-bezier(0.25, 0.8, 0.25, 1)" });
+            anim(body, [{ opacity: 0 }, { opacity: 1 }], { duration: 400, delay: T0 - 120, easing: "ease-out" });
+            await new Promise((res, rej) => {
+              const start = performance.now();
+              const tick = (now) => {
+                if (!alive(id) || !nw.isConnected) return rej("stop");
+                if (frame(Math.max(0, now - start))) {
+                  // settled: exactly the static layout
+                  stickers.forEach((s) => { s.el.style.transform = `rotate(${s.tilt}deg)`; s.el.style.opacity = ""; });
+                  [icon, title, sub, links].forEach((el) => { el.style.transform = ""; el.style.opacity = ""; });
+                  return res();
+                }
+                requestAnimationFrame(tick);
+              };
+              requestAnimationFrame(tick);
+            });
+          }
+
+          async function playApp(variant, id, poster) {
+            const L = LAYOUT[variant];
+            stage.innerHTML = appMarkup(variant) + nwMarkup(variant);
+            stage.dataset.foot = variant === "win" ? "both" : "bottom";
+            stage.innerHTML = `<div class="cam" style="transform: translate(${L.t.x}px, ${L.t.y}px) scale(${L.z})">${stage.innerHTML}</div>`;
+            const app = $(".lk", stage), nw = $(".nw", stage);
+            Object.assign(app.style, { left: L.old.x + "px", top: L.old.y + "px" });
+            Object.assign(nw.style, { left: L.neu.x + "px", top: L.neu.y + "px" });
+            const anchor = $(variant === "mac" ? "[data-mac-pill]" : "[data-win-pill]", app);
+            anchor.innerHTML = pillMarkup();
+            const pill = $(".lk-pill", anchor);
+            const pct = roller(0);
+            $(".pct", pill).replaceWith(pct.el);
+            const cur = document.createElement("div");
+            cur.className = "cursor";
+            cur.innerHTML = SVG_CURSOR;
+            stage.appendChild(cur);
+            // the pointer is the real size for the zoomed window
+            const csvg = $("svg", cur);
+            csvg.setAttribute("width", 32 * L.z);
+            csvg.setAttribute("height", 32 * L.z);
+            Object.assign(cur.style, { width: 32 * L.z + "px", height: 32 * L.z + "px" });
+            HOT.x = 10 * L.z;
+            HOT.y = 7 * L.z;
+
+            const fromBottom = variant === "win";
+            if (fromBottom) {
+              // Windows floats the pill over the list: scroll the gallery so
+              // it lands on the gap between two cards, where it can be read.
+              const scroll = $(".lk-scroll", app), list = $(".lk-list", app), cards = $$(".lk-card", app);
+              const k = (stage.getBoundingClientRect().width / W) * L.z;
+              const gapMid = (cards[1].getBoundingClientRect().bottom + cards[2].getBoundingClientRect().top) / 2;
+              const pillMid = anchor.getBoundingClientRect().top + 11 * k;
+              list.style.transform = `translateY(${-(gapMid - pillMid) / k}px)`;
+              scroll.setAttribute("data-scrolled", "");
+            }
+            const sDl = $(".s-dl", pill), sReady = $(".s-ready", pill), sInst = $(".s-inst", pill);
+            const ringArc = $(".ring circle:last-child", pill);
+
+            // rest on empty surface near where the pill will appear
+            const rest = variant === "mac" ? pt($(".lk-head", app), 0.55, 0.5) : pt($(".lk-list", app), 0.72, 0.9);
+            setCursor(cur, rest.x, rest.y);
+
+            const sizePill = (slot) => { pill.style.width = slot.offsetWidth + 22 + "px"; };
+            const showState = (name) => {
+              const map = { dl: sDl, ready: sReady, inst: sInst };
+              Object.entries(map).forEach(([k, el]) => (el.style.opacity = k === name ? 1 : 0));
+              sizePill(map[name]);
+              if (name !== "dl") pill.setAttribute("data-solid", ""); else pill.removeAttribute("data-solid");
+            };
+
+            if (poster) {
+              pill.style.opacity = 1;
+              showState("ready");
+              const p = pt(pill, 0.8, 0.62);
+              setCursor(cur, p.x + 10, p.y + (fromBottom ? -40 : 40));
+              return;
+            }
+
+            sizePill(sDl);
+            await sleep(700, id);
+            await anim(pill, [
+              { opacity: 0, transform: `translateY(${fromBottom ? 8 : -8}px) scale(0.95)` },
+              { opacity: 1, transform: "none" },
+            ], { duration: 420, easing: "cubic-bezier(0.2, 0.9, 0.3, 1.05)" });
+
+            let p = 0;
+            while (p < 100) {
+              p = Math.min(100, p + 3 + Math.round(Math.random() * 7));
+              pct.set(p);
+              sizePill(sDl); // a digit more at 10% and 100%
+              ringArc.style.strokeDashoffset = String(C * (1 - p / 100));
+              await sleep(120, id);
+            }
+            await sleep(450, id);
+            pill.style.transition = "background .15s ease, color .15s ease, border-color .15s ease, width .35s cubic-bezier(0.25, 0.8, 0.25, 1)";
+            showState("ready");
+            await sleep(900, id);
+
+            const target = pt(pill, 0.8, 0.62);
+            await moveCursor(cur, rest, target, 900);
+            setCursor(cur, target.x, target.y);
+            pill.setAttribute("data-hover", "");
+            await sleep(260, id);
+            await anim(pill, [{ transform: "scale(1)" }, { transform: "scale(0.96)" }], { duration: 90, easing: "ease-out" });
+            showState("inst");
+            await anim(pill, [{ transform: "scale(0.96)" }, { transform: "scale(1)" }], { duration: 260, easing: "cubic-bezier(0.2, 0.9, 0.3, 1.2)" });
+            pill.removeAttribute("data-hover");
+            await sleep(1100, id);
+
+            // the old app quits…
+            // its job is done: the pointer leaves with the old app
+            cur.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 240, easing: "ease-in", fill: "forwards" });
+            await anim(app, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.97)" }], { duration: 240, easing: "ease-in" });
+            app.style.visibility = "hidden";
+            await sleep(700, id);
+            // …and the new one opens on its welcome window
+            await welcome(nw, id);
+          }
+
+          async function playTerm(id, poster) {
+            stage.dataset.foot = "bottom";
+            HOT.x = 10; HOT.y = 7;
+            const L = LAYOUT.linux;
+            stage.innerHTML = `<div class="term">
+              <div class="term-bar"><span class="ttl">~</span>
+                <div class="end">
+                  <span><svg width="16" height="16" viewBox="0 0 256 256"><path d="M228,128a12,12,0,0,1-12,12H140v76a12,12,0,0,1-24,0V140H40a12,12,0,0,1,0-24h76V40a12,12,0,0,1,24,0v76h76A12,12,0,0,1,228,128Z"/></svg></span>
+                  <span><svg width="16" height="16" viewBox="0 0 256 256"><path d="M228,128a12,12,0,0,1-12,12H40a12,12,0,0,1,0-24H216A12,12,0,0,1,228,128ZM40,76H216a12,12,0,0,0,0-24H40a12,12,0,0,0,0,24ZM216,180H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Z"/></svg></span>
+                  <span class="x"><svg width="10" height="10" viewBox="0 0 256 256"><path d="M208.49,191.51a12,12,0,0,1-17,17L128,145,64.49,208.49a12,12,0,0,1-17-17L111,128,47.51,64.49a12,12,0,0,1,17-17L128,111l63.51-63.52a12,12,0,0,1,17,17L145,128Z"/></svg></span>
+                </div>
+              </div>
+              <div class="term-view"><div class="term-text"></div></div></div>`;
+            const term = $(".term", stage), view = $(".term-view", stage), text = $(".term-text", stage);
+            const title = $(".ttl", stage);
+            Object.assign(term.style, { left: L.term.x + "px", top: L.term.y + "px", width: L.term.w + "px", height: L.term.h + "px" });
+            text.style.fontSize = L.font + "px";
+            // keep the lines above the stage's fading foot, a whole number of them
+            const lh = Math.round(L.font * 1.3);
+            text.style.lineHeight = lh + "px";
+            view.style.bottom = "auto";
+            view.style.height = Math.floor((L.textBottom - L.term.y - 48) / lh) * lh + "px";
+            const CMD = "curl -fsSL https://lookout.hackclub.com/install.sh | sh";
+            let html = "";
+            const caret = '<span class="caret"></span>';
+            const render = (withCaret = true) => {
+              text.innerHTML = html + (withCaret ? caret : "");
+              // scroll by whole lines, as a terminal does
+              const over = Math.ceil((text.offsetHeight - view.clientHeight) / lh) * lh;
+              text.style.transform = over > 0 ? `translateY(${-over}px)` : "none";
+            };
+            // Ubuntu's coloured bash prompt
+            const prompt = '<span class="u">orpheus@hackclub</span>:<span class="p">~</span>$ ';
+
+            const finale = [
+              ["", 30],
+              [`<b>Updated Lookout from 0.3.10 to ${latest}.</b>`, 120],
+              ["Future versions arrive with your system updates (<b>sudo apt update &amp;&amp; sudo apt upgrade</b>).", 120],
+              ["", 30],
+            ];
+            const steps = [
+              ["<b>==&gt;</b> Adding the apt repository", 650],
+              ["<b>==&gt;</b> Refreshing package lists", 1300],
+              ["<b>==&gt;</b> Installing", 1500],
+            ];
+
+            if (poster) {
+              html = prompt + CMD + "\n";
+              TERM_LINES(latest).forEach(([l]) => (html += l + "\n"));
+              html += "Continue? [Y/n] y\n\n";
+              steps.forEach(([l]) => (html += l + "\n"));
+              finale.forEach(([l]) => (html += l + "\n"));
+              html += prompt;
+              render();
+              return;
+            }
+
+            html = prompt;
+            render();
+            await sleep(900, id);
+            for (const ch of CMD) {
+              html += ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : ch;
+              render();
+              await sleep(ch === " " ? 55 : 26 + Math.random() * 24, id);
+            }
+            await sleep(420, id);
+            title.textContent = CMD; // Ghostty titles the tab with the running command
+            html += "\n";
+            for (const [l, d] of TERM_LINES(latest)) { await sleep(d, id); html += l + "\n"; render(); }
+            html += "Continue? [Y/n] ";
+            render();
+            await sleep(1100, id);
+            html += "y\n\n";
+            render();
+            for (const [l, d] of steps) { await sleep(260, id); html += l + "\n"; render(); await sleep(d, id); }
+            for (const [l, d] of finale) { await sleep(d, id); html += l + "\n"; render(); }
+            title.textContent = "~";
+            html += prompt;
+            render();
+          }
+
+          async function start(variant, opts = {}) {
+            const id = ++run;
+            current = variant;
+            replayBtn.classList.remove("on");
+            fit();
+            const poster = reduce.matches;
+            $("#stage-desc").textContent = variant === "linux"
+              ? "A terminal runs Lookout's installer, which updates Lookout from 0.3.10 to the newest version."
+              : "The old Lookout window shows a Downloading Update pill, which turns into Restart to Complete Update. Clicking it restarts Lookout, and the new version opens on its Welcome to the new Lookout window.";
+            try {
+              if (variant === "linux") await playTerm(id, poster || opts.still);
+              else await playApp(variant, id, poster || opts.still);
+              if (alive(id) && !poster && !opts.still) {
+                await sleep(1200, id);
+                replayBtn.classList.add("on");
+              }
+            } catch (e) {
+              if (e !== "stop") console.error(e);
+            }
+          }
+
+          replayBtn.addEventListener("click", () => start(current));
+          addEventListener("resize", fit);
+
+          // play once it's on screen; until then show the still
+          const vis = new IntersectionObserver((es) => {
+            if (es[0].isIntersecting && !started) { started = true; start(current); }
+          }, { threshold: 0.35 });
+
+          return {
+            init(variant) { current = variant; fit(); start(variant, { still: true }); vis.observe(wrap); },
+            start(variant) { started = true; start(variant); },
+          };
+        })();
+
+        // ---------- boot ----------
+        $$(".v-min").forEach((el) => (el.textContent = "0.4.1"));
+        document.body.dataset.os = detected;
+        setOS(detected, false);
+        scene.init(detected);
+        heroDownload();
+        fetchLatest();
+      })();
+    </script>
+  </body>
+</html>
