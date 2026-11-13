@@ -7,6 +7,8 @@ pub mod decoder;
 pub mod mac_menu;
 #[cfg(target_os = "macos")]
 pub mod macos_occlusion;
+#[cfg(target_os = "macos")]
+pub mod objc_exceptions;
 pub mod permission_guide;
 pub mod system_icons;
 pub mod permissions;

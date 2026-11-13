@@ -72,6 +72,8 @@ fn main() {
     // after its first frame (see platform/macos_occlusion.rs).
     #[cfg(target_os = "macos")]
     platform::macos_occlusion::install();
+    #[cfg(target_os = "macos")]
+    platform::objc_exceptions::install();
     platform::reduce_motion::observe();
     if let Ok(f) = std::env::var("LOOKOUT_SLOWMO") {
         if let Ok(f) = f.parse::<f32>() {

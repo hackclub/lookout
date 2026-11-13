@@ -491,6 +491,24 @@ mod linux {
             // that) rather than leaving GTK no backend at all.
             gtk::gdk::set_allowed_backends(if wayland { "wayland,x11" } else { "x11" });
             gtk::init().map_err(|e| anyhow::anyhow!("GTK init failed: {e}"))?;
+            // Context for native crashes inside the GTK pump below (WebKitGTK
+            // has no symbols in our minidumps, e.g. LOOKOUT-NATIVE-15/-16).
+            let display = gtk::gdk::Display::default().map(|d| gtk::glib::ObjectExt::type_(&d).name().to_string()).unwrap_or_default();
+            // SAFETY: plain version getters; `load_webkit` already loaded the library.
+            let webkit = unsafe {
+                use webkit2gtk::ffi::*;
+                (webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version())
+            };
+            log::info!(
+                "[webview] GTK {}.{}.{} on {display}, WebKitGTK {}.{}.{}, dmabuf renderer {}",
+                gtk::major_version(),
+                gtk::minor_version(),
+                gtk::micro_version(),
+                webkit.0,
+                webkit.1,
+                webkit.2,
+                if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() { "off" } else { "on" },
+            );
         }
         if PUMPING.swap(true, Ordering::SeqCst) {
             return Ok(());
