@@ -63,6 +63,8 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
     options.auto_session_tracking = true;
     // Never the user's name/email/IP; the minidump is processed and discarded.
     options.send_default_pii = false;
+    // Also used by the crash reporter process (it clones these options).
+    options.before_send = Some(std::sync::Arc::new(soften_reporter_startup));
     let guard = sentry::init(options);
 
     sentry::configure_scope(|scope| {
@@ -80,20 +82,23 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
 /// lines before them become breadcrumbs. A no-op until [`init`] binds a
 /// client.
 pub fn wrap_logger<L: log::Log>(dest: L) -> impl log::Log {
-    use sentry::integrations::log::{breadcrumb_from_record, event_from_record, RecordMapping};
-    sentry::integrations::log::SentryLogger::with_dest(dest).mapper(|record| match record.level() {
-        log::Level::Error => {
-            if record.target().starts_with("xcap::") && is_expected_dependency_error(&record.args().to_string()) {
-                let mut crumb = breadcrumb_from_record(record);
-                crumb.level = sentry::Level::Warning;
-                RecordMapping::Breadcrumb(crumb)
-            } else {
-                RecordMapping::Event(Box::new(event_from_record(record)))
-            }
+    use sentry::integrations::log::{breadcrumb_from_record, event_from_record, RecordMapping, SentryLogger};
+    SentryLogger::with_dest(dest).mapper(|record: &log::Record<'_>| match record.level() {
+        log::Level::Error if is_downgraded_error(record.target(), &record.args().to_string()) => {
+            let mut b = breadcrumb_from_record(record);
+            b.level = sentry::Level::Warning;
+            RecordMapping::Breadcrumb(b)
         }
+        log::Level::Error => RecordMapping::Event(Box::new(event_from_record(record))),
         log::Level::Warn | log::Level::Info => RecordMapping::Breadcrumb(breadcrumb_from_record(record)),
         log::Level::Debug | log::Level::Trace => RecordMapping::Ignore,
     })
+}
+
+/// `error!` lines that describe a normal failure or the machine rather than
+/// a bug: kept as warning breadcrumbs instead of Sentry issues.
+fn is_downgraded_error(target: &str, message: &str) -> bool {
+    (target.starts_with("xcap::") && is_expected_dependency_error(message)) || is_environment_noise(target, message)
 }
 
 /// xcap's Windows backend logs these at error level, but they're normal
@@ -113,6 +118,36 @@ fn is_expected_dependency_error(message: &str) -> bool {
         ("GetFileVersionInfoSizeW(", "WIN32_ERROR(1813)"),
     ];
     EXPECTED.iter().any(|(call, code)| message.starts_with(call) && message.ends_with(code))
+}
+
+/// `error!` lines from dependencies we don't vendor that describe the
+/// machine rather than a bug, and can't be fixed from here: kept as
+/// breadcrumbs instead of Sentry issues.
+fn is_environment_noise(target: &str, message: &str) -> bool {
+    // X servers with no pointer that has scroll axes (WSLg, Xvfb, VNC):
+    // GPUI just has no smooth scrolling to set up (LOOKOUT-NATIVE-R).
+    (target.starts_with("gpui_linux::linux::x11") && message.starts_with("Found no xinput mouse pointers"))
+        // The Vulkan loader with no driver installed; wgpu falls back to GL,
+        // and if nothing can draw, the startup dialog says so.
+        || (target.starts_with("wgpu_hal::vulkan") && message.contains("Found no drivers"))
+}
+
+/// The crash reporter is a second process that listens on a socket in the
+/// temp folder. When Windows refuses that socket (WSAEADDRINUSE on a fresh,
+/// random path — antivirus or a temp folder that can't hold AF_UNIX sockets,
+/// LOOKOUT-NATIVE-11), the app runs on without native-crash reports; panics
+/// and errors still go straight from the app. Worth knowing about, not an
+/// error: send it as a warning.
+fn soften_reporter_startup(mut event: sentry::protocol::Event<'static>) -> Option<sentry::protocol::Event<'static>> {
+    let from_reporter = event.extra.get("event.process").and_then(|v| v.as_str()) == Some("crash-reporter");
+    let create_server = event.exception.values.iter().any(|e| {
+        e.ty == "CreateServer" || e.value.as_deref().is_some_and(|v| v.starts_with("Failed to create server with socket name"))
+    });
+    if from_reporter && create_server {
+        event.level = sentry::Level::Warning;
+        event.tags.insert("crash_reporter".into(), "unavailable".into());
+    }
+    Some(event)
 }
 
 /// `LOOKOUT_CRASH_TEST=segfault|abort|panic|error` (and `hang`, see
@@ -154,7 +189,9 @@ pub fn on_exit() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::is_expected_dependency_error as expected;
+    use sentry::protocol::{Event, Exception, Value};
 
     #[test]
     fn only_known_xcap_failures_are_downgraded() {
@@ -167,5 +204,28 @@ mod tests {
         assert!(!expected("GetModuleBaseNameW(HANDLE(0x900)) failed: WIN32_ERROR(50)"));
         assert!(!expected("GetFileVersionInfoSizeW(PCWSTR(0x1)) failed: WIN32_ERROR(18130)"));
         assert!(!expected("DeleteDC(HDC(0x1)) failed: WIN32_ERROR(1400)"));
+    }
+
+    #[test]
+    fn known_environment_errors_are_noise() {
+        assert!(is_environment_noise("gpui_linux::linux::x11::client", "Found no xinput mouse pointers."));
+        assert!(is_environment_noise(
+            "wgpu_hal::vulkan::instance",
+            "GENERAL [Loader Message (0x0)]\n\tvkCreateInstance: Found no drivers!"
+        ));
+        assert!(!is_environment_noise("lookout::screens::source_picker", "Found no xinput mouse pointers."));
+    }
+
+    #[test]
+    fn reporter_socket_failure_is_a_warning() {
+        let mut e = Event { level: sentry::Level::Error, ..Default::default() };
+        e.extra.insert("event.process".into(), Value::String("crash-reporter".into()));
+        e.exception.values.push(Exception { ty: "CreateServer".into(), ..Default::default() });
+        assert_eq!(soften_reporter_startup(e).unwrap().level, sentry::Level::Warning);
+
+        // The same failure reported by the app itself is left alone.
+        let mut e = Event { level: sentry::Level::Error, ..Default::default() };
+        e.exception.values.push(Exception { ty: "CreateServer".into(), ..Default::default() });
+        assert_eq!(soften_reporter_startup(e).unwrap().level, sentry::Level::Error);
     }
 }

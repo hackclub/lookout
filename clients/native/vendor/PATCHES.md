@@ -147,3 +147,10 @@ that updates an entity panics.
   `wake_posted` set so dispatches meanwhile don't spin the nested pump.
 - `gpui-pre-windows/src/events.rs`: the size/move-loop timer doesn't drain
   the task queue while the App is borrowed either.
+
+## Display changes with the window on no monitor (LOOKOUT-NATIVE-C)
+
+- `gpui-pre-windows/src/events.rs`: `handle_display_change_msg` logs at info
+  instead of error when `MonitorFromWindow(.., MONITOR_DEFAULTTONULL)` finds
+  no monitor (window hidden to the tray, displays asleep or unplugged). It
+  already kept the previous display; only the log level changed.

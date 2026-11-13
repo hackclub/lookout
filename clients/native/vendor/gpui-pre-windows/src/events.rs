@@ -943,7 +943,11 @@ impl WindowsWindowInner {
     fn handle_display_change_msg(&self, handle: HWND) -> Option<isize> {
         let new_monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONULL) };
         if new_monitor.is_invalid() {
-            log::error!("No monitor detected!");
+            // Lookout patch: WM_DISPLAYCHANGE arrives while the window is on
+            // no monitor (hidden to the tray, or every display asleep or
+            // unplugged). Keep the display we had; the next change puts it
+            // right. Upstream logged this at error level (LOOKOUT-NATIVE-C).
+            log::info!("display changed while the window is on no monitor; keeping the last one");
             return None;
         }
         let new_display = WindowsDisplay::new(WindowsDisplay::display_id_for_monitor(new_monitor))?;
