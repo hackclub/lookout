@@ -298,6 +298,7 @@ impl Onboarding {
         // Reopened from Settings, it just closes.
         window.on_window_should_close(cx, move |_, cx| {
             if at_launch {
+                crate::crash::note_quit("onboarding closed");
                 cx.quit();
             }
             true
@@ -1087,6 +1088,7 @@ impl Render for Onboarding {
         let at_launch = self.at_launch;
         let close = move |window: &mut Window, cx: &mut App| {
             if at_launch {
+                crate::crash::note_quit("onboarding closed");
                 cx.quit()
             } else {
                 window.remove_window()
