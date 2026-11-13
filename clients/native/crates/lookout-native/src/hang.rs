@@ -77,7 +77,7 @@ fn watch(main_thread: u32) {
                 hang_reported_at = Some(since);
                 if reports < MAX_REPORTS {
                     reports += 1;
-                    report(stale, main_thread);
+                    report(stale, beat, main_thread);
                 }
             }
         } else if let Some(began) = hang_reported_at.take() {
@@ -86,17 +86,22 @@ fn watch(main_thread: u32) {
     }
 }
 
-fn report(stale_ms: u64, main_thread: u32) {
+fn report(stale_ms: u64, beat: u64, main_thread: u32) {
     let message = format!("App hang: main thread blocked for {:.1}s", stale_ms as f64 / 1000.0);
     log::warn!("[hang] {message}");
     if sentry::Hub::current().client().is_none() {
         return;
     }
     let dump = minidump();
+    // Some Windows dumps show the main thread idle in its message loop: the
+    // hang ended while the dump was being written. Say so, so those aren't
+    // mistaken for a stuck message loop.
+    let over = LAST_BEAT_MS.load(Ordering::Acquire) != beat;
     sentry::with_scope(
         |scope| {
             scope.set_tag("hang", "true");
             scope.set_tag("main_thread_id", main_thread.to_string());
+            scope.set_tag("hang_over_at_dump", over.to_string());
             if let Some(buffer) = dump {
                 scope.add_attachment(sentry::protocol::Attachment {
                     buffer,
