@@ -1,6 +1,6 @@
 # Vendored GPUI crates
 
-These are the crates.io releases of `gpui-pre`, `gpui-pre-wgpu`,
+These are the crates.io releases of `gpui-pre`, `gpui-pre-wgpu`, `gpui-pre-macos`,
 `gpui-pre-windows` and `gpui-pre-apple` **0.3.10**, wired in with
 `[patch.crates-io]` in `../Cargo.toml`. They're patched so video frames can be
 drawn as GPU surfaces on every platform (upstream only implements
@@ -48,6 +48,18 @@ from `gpui-pre` (5 MB, not needed), and so were its `[[example]]` entries in
   surface source is H.264 video via `AVPlayerItemVideoOutput` (`420f`).
   Only compiled on a Mac (the cross-check stubs it), so CI is the first
   compile.
+
+## gpui-pre-macos
+
+The crates.io 0.3.10 release, vendored only for this patch:
+
+- `display_link.rs`: when `CVDisplayLinkCreateWithCGDisplay` fails for the
+  window's display (-6661 while displays reconfigure, LOOKOUT-NATIVE-17),
+  `WindowFrameSource::start` paces the window with a 60 Hz main-queue
+  dispatch timer instead of leaving it with no frames (frozen until its next
+  screen or occlusion change), and warns once instead of logging an error.
+  The next `start` (resize, activation, screen change) tries the link again;
+  `stop` cancels the timer.
 
 ## Upgrading GPUI
 

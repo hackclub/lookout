@@ -54,7 +54,8 @@ use crate::main_thread_marker;
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
-    _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
+    _dispatch_source_type_data_add, _dispatch_source_type_timer, DispatchObject, DispatchQueue,
+    DispatchRetained, DispatchSource, DispatchTime,
 };
 use gpui::{FrameRequestSource, PlatformFrameSignal};
 use gpui_util::ResultExt;
@@ -295,7 +296,15 @@ pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
     signal: Arc<PlatformFrameSignal>,
+    // Lookout patch: what drives frames when no display link could be
+    // created for the window's display (see `start`).
+    data: *mut c_void,
+    callback: extern "C" fn(*mut c_void),
+    fallback: Option<DispatchRetained<DispatchSource>>,
 }
+
+/// Lookout patch: frame interval of the fallback timer (60 Hz).
+const FALLBACK_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 impl WindowFrameSource {
     pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
@@ -317,15 +326,54 @@ impl WindowFrameSource {
             frame_requests,
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
+            data,
+            callback,
+            fallback: None,
         }
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
         self.stop();
-        let subscriber_id =
-            subscribe(display_id, self.frame_requests.clone(), self.signal.clone())?;
-        self.registration = Some((display_id, subscriber_id));
+        // Lookout patch: CoreVideo can refuse a link for a display that is
+        // being reconfigured (`kCVReturnInvalidArgument`, -6661,
+        // LOOKOUT-NATIVE-17). Upstream logged an error and left the window
+        // with no frames at all (frozen) until its next screen or occlusion
+        // change. Pace it with a plain 60 Hz timer on the main queue instead;
+        // the next `start` (every resize, activation, screen change) tries
+        // the display link again.
+        match subscribe(display_id, self.frame_requests.clone(), self.signal.clone()) {
+            Ok(subscriber_id) => self.registration = Some((display_id, subscriber_id)),
+            Err(error) => {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!(
+                        "no display link for display {display_id} ({error:#}); pacing frames with a timer"
+                    );
+                }
+                self.start_fallback();
+            }
+        }
         Ok(())
+    }
+
+    fn start_fallback(&mut self) {
+        let interval = FALLBACK_INTERVAL.as_nanos() as u64;
+        let timer = unsafe {
+            let timer = DispatchSource::new(
+                &raw const _dispatch_source_type_timer as *mut _,
+                0,
+                0,
+                Some(DispatchQueue::main()),
+            );
+            timer.set_context(self.data);
+            timer.set_event_handler_f(self.callback);
+            timer.set_timer(DispatchTime::NOW, interval, interval / 10);
+            // Resumed at once: destroying a suspended source is undefined.
+            timer.resume();
+            timer
+        };
+        self.fallback = Some(timer);
     }
 
     pub fn take_signal(&self) -> Option<(Instant, FrameRequestSource)> {
@@ -335,6 +383,11 @@ impl WindowFrameSource {
     pub fn stop(&mut self) {
         if let Some((display_id, subscriber_id)) = self.registration.take() {
             unsubscribe(display_id, subscriber_id);
+        }
+        // Lookout patch: cancelling guarantees the timer's handler (whose
+        // context is the window's native view) never runs again.
+        if let Some(timer) = self.fallback.take() {
+            timer.cancel();
         }
         self.signal.take();
     }
