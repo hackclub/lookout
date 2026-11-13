@@ -427,6 +427,11 @@ impl SourcePicker {
                         let cancelled = regex_lite_cancel(&e);
                         if cancelled {
                             log::info!("[sources] screencast dismissed by user: {e}");
+                        } else if crate::diagnosis::is_environment_issue(&e) {
+                            // The machine's setup (no session bus, LOOKOUT-NATIVE-V);
+                            // the dialog explains it.
+                            log::warn!("[sources] screencast unavailable here: {e}");
+                            cx.emit(PickerEvent::CaptureError { error: e, detecting: false });
                         } else {
                             log::error!("[sources] screencast failed: {e}");
                             cx.emit(PickerEvent::CaptureError { error: e, detecting: false });

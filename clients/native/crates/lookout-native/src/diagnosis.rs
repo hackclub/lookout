@@ -124,6 +124,28 @@ fn matches_any(raw: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| l.contains(&n.to_lowercase()))
 }
 
+/// No D-Bus session bus to reach the portal over: zbus couldn't even parse
+/// `DBUS_SESSION_BUS_ADDRESS` (`disabled:` on Artix/runit and similar
+/// setups without a user bus), or there's nothing listening at it.
+pub fn no_session_bus(raw: &str) -> bool {
+    matches_any(
+        raw,
+        &[
+            "address error",
+            "unsupported transport",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "Unable to autolaunch a dbus-daemon",
+            "Failed to connect to the session bus",
+        ],
+    )
+}
+
+/// The capture failure is the machine's setup (nothing Lookout can fix),
+/// so it's logged as a warning rather than reported as an error.
+pub fn is_environment_issue(raw: &str) -> bool {
+    no_session_bus(raw)
+}
+
 fn portal_missing(raw: &str) -> bool {
     matches_any(
         raw,
@@ -187,6 +209,21 @@ pub fn diagnose(raw: &str, env: Option<&CaptureEnvironment>) -> Option<Diagnosis
     }
     if env.and_then(|e| e.chromeos) == Some(true) {
         return Some(chromeos());
+    }
+    // Before the portal checks: the error also says "Failed to connect to
+    // screencast portal", but installing the portal wouldn't help.
+    if no_session_bus(raw) {
+        return Some(Diagnosis {
+            title: "No D-Bus session bus".into(),
+            summary: "Screen capture on Wayland asks your desktop for permission over the D-Bus session bus, and this session doesn't have one, so there's nobody to ask. Desktops usually start it at login; some setups (runit, s6, a bare window manager started from a TTY) don't.".into(),
+            steps: vec![
+                "Make sure a D-Bus session bus starts with your desktop. On systemd it comes with dbus; on runit/OpenRC/s6, start your compositor with `dbus-run-session`.".into(),
+                "Or start Lookout inside one for now: `dbus-run-session -- lookout`".into(),
+                "The xdg-desktop-portal service has to run on the same bus, so it may need starting too.".into(),
+            ],
+            command: Some("dbus-run-session -- lookout".into()),
+            record_in_browser: false,
+        });
     }
     let portal_installed = env.and_then(|e| e.portal_installed);
     if portal_installed == Some(false) || (portal_installed != Some(true) && portal_missing(raw) && !backend_missing(raw)) {
@@ -384,6 +421,16 @@ mod tests {
     /// ScreenCast (issue #212, ChromeOS's Linux; also any desktop with only
     /// the gtk backend).
     const PORTAL_NOT_FOUND: &str = "Failed to connect to screencast portal: A portal frontend implementing `org.freedesktop.portal.ScreenCast` was not found";
+
+    #[test]
+    fn disabled_session_bus_is_not_read_as_a_missing_portal() {
+        // LOOKOUT-NATIVE-V: Artix with DBUS_SESSION_BUS_ADDRESS=disabled:.
+        let raw = "Failed to connect to screencast portal: ZBus Error: address error: unsupported transport 'disabled'";
+        assert!(is_environment_issue(raw));
+        let d = diagnose(raw, Some(&linux(|_| {}))).expect("diagnosed");
+        assert_eq!(d.title, "No D-Bus session bus");
+        assert!(!is_environment_issue(PORTAL_NOT_FOUND));
+    }
 
     fn linux(f: impl FnOnce(&mut CaptureEnvironment)) -> CaptureEnvironment {
         let mut env = CaptureEnvironment { os: "linux".into(), ..Default::default() };
