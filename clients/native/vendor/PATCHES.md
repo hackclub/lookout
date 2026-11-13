@@ -95,3 +95,32 @@ drop the patch and switch `ui/video.rs` to its API.
   loop ends; `quit()`, the end of the loop and `WM_ENDSESSION` are logged.
 - `gpui-pre-windows/src/events.rs`: logs `WM_CLOSE` on a window.
 - `gpui-pre/src/app.rs`: logs "last window closed, quitting".
+
+## Re-entrant callbacks while the App is borrowed (LOOKOUT-NATIVE-Z, -10, -1E/F/G, -7, -6/-8)
+
+On Windows, a synchronous Win32 call made from inside an update delivers
+window messages right there: `SetFocus` sends `WM_ACTIVATE`, `ShowWindow*`
+and `SetWindowPos` send `WM_SIZE`/`WM_PAINT` (shell hooks such as Windhawk's
+window-animation mods even call `PrintWindow`, which paints synchronously),
+and nested message pumps (WebView2 creation's `wait_with_pump`, modal
+dialogs) also dispatch the main-thread task queue. Upstream then calls into
+the App that is still borrowed further up the stack: window callbacks fail
+and log "RefCell already borrowed" at error level, and a foreground task
+that updates an entity panics.
+
+- `gpui-pre/src/app.rs`: a thread-local count of live `AppRef`/`AppRefMut`
+  guards and `app_borrowed_on_this_thread()` (doc-hidden, re-exported).
+- `gpui-pre/src/window.rs`: `on_request_frame` defers (returns early, like
+  the existing `draw_in_progress()` check) when the App is borrowed; Windows
+  re-invalidates every window on the next vsync. Input, resize, move,
+  activation, visibility, hover, insets, viewport, button-layout and
+  display-change callbacks go through `update_window_or_defer`, which runs
+  them on a foreground task once the borrow is released instead of losing
+  them. A re-entrant input event reports "unhandled" (what the failed update
+  returned before); a re-entrant window-control hit test answers `None`.
+- `gpui-pre-windows/src/platform.rs`: `run_foreground_task` leaves the queue
+  alone while the App is borrowed and retries from a `USER_TIMER_MINIMUM`
+  timer on the platform window (`DEFERRED_TASKS_TIMER_ID`), keeping
+  `wake_posted` set so dispatches meanwhile don't spin the nested pump.
+- `gpui-pre-windows/src/events.rs`: the size/move-loop timer doesn't drain
+  the task queue while the App is borrowed either.

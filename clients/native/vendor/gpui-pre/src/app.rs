@@ -120,6 +120,7 @@ impl AppCell {
             self.borrow_origin
                 .set(Some((std::panic::Location::caller(), "shared")));
         }
+        APP_BORROWS.with(|count| count.set(count.get() + 1));
         AppRef(borrow)
     }
 
@@ -142,8 +143,26 @@ impl AppCell {
         let borrow = self.app.try_borrow_mut()?;
         self.borrow_origin
             .set(Some((std::panic::Location::caller(), "mutable")));
+        APP_BORROWS.with(|count| count.set(count.get() + 1));
         Ok(AppRefMut(borrow))
     }
+}
+
+thread_local! {
+    /// Lookout patch: live `AppRef`/`AppRefMut` guards on this thread.
+    static APP_BORROWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Lookout patch: whether the App is borrowed on this thread right now, i.e.
+/// the caller is running inside an update (or a draw). Platform code that can
+/// be re-entered from a nested message pump (a synchronous Win32 call made from
+/// inside an update — `SetFocus`, `ShowWindow*`, WebView2 creation, a modal
+/// dialog — dispatches window messages and queued tasks right there) checks
+/// this to queue work for later instead of touching the App, which would fail
+/// with "RefCell already borrowed" (or panic, for entity updates).
+#[doc(hidden)]
+pub fn app_borrowed_on_this_thread() -> bool {
+    APP_BORROWS.with(|count| count.get() > 0)
 }
 
 #[doc(hidden)]
@@ -152,6 +171,7 @@ pub struct AppRef<'a>(Ref<'a, App>);
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
+        APP_BORROWS.with(|count| count.set(count.get().saturating_sub(1)));
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped borrow from {thread_id:?}");
@@ -165,6 +185,7 @@ pub struct AppRefMut<'a>(RefMut<'a, App>);
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {
+        APP_BORROWS.with(|count| count.set(count.get().saturating_sub(1)));
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped {thread_id:?}");

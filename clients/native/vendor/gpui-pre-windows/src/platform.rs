@@ -1214,6 +1214,12 @@ impl WindowsPlatformInner {
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+            // Lookout patch: retry of foreground tasks deferred while the App
+            // was borrowed (see `run_foreground_task`).
+            WM_TIMER if wparam.0 == DEFERRED_TASKS_TIMER_ID => {
+                let _ = unsafe { KillTimer(Some(handle), DEFERRED_TASKS_TIMER_ID) };
+                self.run_foreground_task()
+            }
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
@@ -1321,6 +1327,38 @@ impl WindowsPlatformInner {
     #[inline]
     fn run_foreground_task(&self) -> Option<isize> {
         const MAIN_TASK_TIMEOUT: u128 = 10;
+
+        // Lookout patch: a nested message pump started from inside an update
+        // (WebView2 creation's `wait_with_pump`, a modal dialog, a synchronous
+        // Win32 call a shell hook pumps in) dispatches this message while the
+        // App is still borrowed further up the stack. The first task that
+        // touches the App would then panic with "RefCell already borrowed"
+        // (LOOKOUT-NATIVE-6 / -8). Leave the queue alone and retry shortly;
+        // `wake_posted` stays set, so dispatches meanwhile don't post wake-ups
+        // that would spin the nested pump. The timer fires again (and re-arms)
+        // until the borrow is released.
+        if gpui::app_borrowed_on_this_thread() {
+            log::debug!("deferring foreground tasks: App is borrowed (nested message pump)");
+            let platform_window = self.dispatcher.platform_window_handle.as_raw();
+            let timer = unsafe {
+                SetTimer(
+                    Some(platform_window),
+                    DEFERRED_TASKS_TIMER_ID,
+                    USER_TIMER_MINIMUM,
+                    None,
+                )
+            };
+            if timer == 0 {
+                // Without the timer nothing would run the queue again; fall
+                // back to running it now, as upstream does.
+                log::warn!(
+                    "unable to create deferred-task timer: {}",
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                return Some(0);
+            }
+        }
 
         let start = std::time::Instant::now();
         'tasks: loop {
@@ -1799,6 +1837,9 @@ fn handle_gpu_device_lost(
 }
 
 const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+/// Lookout patch: timer on the platform window that retries foreground tasks
+/// deferred because the App was borrowed (see `run_foreground_task`).
+const DEFERRED_TASKS_TIMER_ID: usize = 0x4C4F;
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {

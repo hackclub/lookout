@@ -6,8 +6,8 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    AsyncApp, AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
@@ -362,6 +362,46 @@ thread_local! {
 /// nested draw or panicking on the already-borrowed App.
 fn draw_in_progress() -> bool {
     CURRENT_ELEMENT_ARENA.with(|current| current.get().is_some())
+}
+
+/// Lookout patch: run a platform window callback's update now or, when the
+/// callback arrived re-entrantly while the App is already borrowed on this
+/// thread (see [`crate::app_borrowed_on_this_thread`]), on a foreground task
+/// once that borrow is released.
+///
+/// On Windows, synchronous Win32 calls made from inside an update (`SetFocus`,
+/// `ShowWindow*`, `SetWindowPos`, WebView2 creation...) deliver `WM_ACTIVATE`,
+/// `WM_SIZE`, `WM_PAINT` and friends straight into the window procedure.
+/// Upstream called `update` regardless, which failed with "RefCell already
+/// borrowed": logged at error level (Sentry LOOKOUT-NATIVE-Z, -10, -7, ...)
+/// and the event itself (a resize, an activation, a modifier change) was lost.
+fn update_window_or_defer(
+    cx: &mut AsyncApp,
+    handle: AnyWindowHandle,
+    update: impl FnOnce(&mut Window, &mut App) + 'static,
+) -> Result<()> {
+    if !crate::app_borrowed_on_this_thread() {
+        return handle.update(cx, |_, window, cx| update(window, cx));
+    }
+    log::debug!("deferring re-entrant window callback");
+    let mut deferred_cx = cx.clone();
+    cx.foreground_executor()
+        .spawn(async move {
+            // A platform whose nested message pump also runs foreground tasks
+            // could start this inside the same borrow; wait it out.
+            while crate::app_borrowed_on_this_thread() {
+                deferred_cx
+                    .background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+            }
+            // The window may have closed in the meantime; nothing to do then.
+            handle
+                .update(&mut deferred_cx, |_, window, cx| update(window, cx))
+                .ok();
+        })
+        .detach();
+    Ok(())
 }
 
 /// Allocates an element in the current arena. Uses the app-specific arena if one
@@ -1805,7 +1845,14 @@ impl Window {
                 // but calling it would hit the App borrow panic above, and this
                 // branch is unreachable there in practice: only Windows pumps
                 // platform events (and thus requests frames) mid-draw.
-                if draw_in_progress() {
+                // Lookout patch: also defer when the App is borrowed without a
+                // draw on the stack, e.g. a `WM_PAINT` sent synchronously by a
+                // `ShowWindowAsync`/`PrintWindow` hook (Windhawk mods) while a
+                // click handler or `remove_window` runs. Every `handle.update`
+                // below would fail and log "RefCell already borrowed"
+                // (LOOKOUT-NATIVE-Z, -1E, -1F, -1G). Windows re-invalidates on
+                // the next vsync, so the frame is drawn at most one vsync late.
+                if draw_in_progress() || crate::app_borrowed_on_this_thread() {
                     log::debug!("deferring re-entrant window draw request");
                     deferred_force_render |= request_frame_options.force_render;
                     #[cfg(feature = "profiler")]
@@ -1948,41 +1995,56 @@ impl Window {
             }
         }));
         invalidator.set_platform_waker(platform_window.frame_waker());
+        // Lookout patch: the callbacks below go through
+        // `update_window_or_defer`, so one delivered re-entrantly while the App
+        // is borrowed runs once the borrow is released instead of failing.
         platform_window.on_visual_viewport_changed(Box::new({
             let mut cx = cx.to_async();
             move || {
-                handle
-                    .update(&mut cx, |_, window, _| window.refresh())
-                    .log_err();
+                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).log_err();
             }
         }));
         platform_window.on_insets_changed(Box::new({
             let mut cx = cx.to_async();
             move |_| {
-                handle
-                    .update(&mut cx, |_, window, _| window.refresh())
-                    .log_err();
+                update_window_or_defer(&mut cx, handle, |window, _| window.refresh()).log_err();
             }
         }));
         platform_window.on_resize(Box::new({
             let mut cx = cx.to_async();
             move |_, _| {
-                handle
-                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                update_window_or_defer(&mut cx, handle, |window, cx| window.bounds_changed(cx))
                     .log_err();
             }
         }));
         platform_window.on_moved(Box::new({
             let mut cx = cx.to_async();
             move || {
-                handle
-                    .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                update_window_or_defer(&mut cx, handle, |window, cx| window.bounds_changed(cx))
                     .log_err();
             }
         }));
         platform_window.on_display_changed(Box::new({
             let cx = cx.to_async();
-            move || cx.update(|cx| Window::display_changed(handle, cx))
+            move || {
+                // `AsyncApp::update` would panic on a re-entrant borrow.
+                if crate::app_borrowed_on_this_thread() {
+                    let deferred_cx = cx.clone();
+                    cx.foreground_executor()
+                        .spawn(async move {
+                            while crate::app_borrowed_on_this_thread() {
+                                deferred_cx
+                                    .background_executor()
+                                    .timer(Duration::from_millis(1))
+                                    .await;
+                            }
+                            deferred_cx.update(|cx| Window::display_changed(handle, cx));
+                        })
+                        .detach();
+                } else {
+                    cx.update(|cx| Window::display_changed(handle, cx));
+                }
+            }
         }));
         platform_window.on_appearance_changed(Box::new({
             let cx = cx.to_async();
@@ -2003,61 +2065,72 @@ impl Window {
         platform_window.on_button_layout_changed(Box::new({
             let mut cx = cx.to_async();
             move || {
-                handle
-                    .update(&mut cx, |_, window, cx| window.button_layout_changed(cx))
-                    .log_err();
+                update_window_or_defer(&mut cx, handle, |window, cx| {
+                    window.button_layout_changed(cx)
+                })
+                .log_err();
             }
         }));
         platform_window.on_active_status_change(Box::new({
             let mut cx = cx.to_async();
             move |active| {
-                handle
-                    .update(&mut cx, |_, window, cx| {
-                        window.active.set(active);
-                        window.modifiers = window.platform_window.modifiers();
-                        window.capslock = window.platform_window.capslock();
-                        window
-                            .activation_observers
-                            .clone()
-                            .retain(&(), |callback| callback(window, cx));
+                update_window_or_defer(&mut cx, handle, move |window, cx| {
+                    window.active.set(active);
+                    window.modifiers = window.platform_window.modifiers();
+                    window.capslock = window.platform_window.capslock();
+                    window
+                        .activation_observers
+                        .clone()
+                        .retain(&(), |callback| callback(window, cx));
 
-                        window.bounds_changed(cx);
-                        window.refresh();
+                    window.bounds_changed(cx);
+                    window.refresh();
 
-                        SystemWindowTabController::update_last_active(cx, window.handle.id);
-                    })
-                    // Lookout patch: Windows delivers this from a spawned task, and
-                    // closing an active window sends a last deactivation, so the
-                    // window can be gone by the time it runs. Nothing to update then.
-                    .ok();
+                    SystemWindowTabController::update_last_active(cx, window.handle.id);
+                })
+                // Lookout patch: Windows delivers this from a spawned task, and
+                // closing an active window sends a last deactivation, so the
+                // window can be gone by the time it runs. Nothing to update then.
+                .ok();
             }
         }));
         platform_window.on_visibility_change(Box::new({
             let mut cx = cx.to_async();
             move |_| {
-                handle
-                    .update(&mut cx, |_, window, cx| {
-                        window.refresh_visibility(cx);
-                    })
-                    // Lookout patch: deferred like activation (above); the window
-                    // may have closed before delivery.
-                    .ok();
+                update_window_or_defer(&mut cx, handle, |window, cx| {
+                    window.refresh_visibility(cx);
+                })
+                // Lookout patch: deferred like activation (above); the window
+                // may have closed before delivery.
+                .ok();
             }
         }));
         platform_window.on_hover_status_change(Box::new({
             let mut cx = cx.to_async();
             move |active| {
-                handle
-                    .update(&mut cx, |_, window, _| {
-                        window.hovered.set(active);
-                        window.refresh();
-                    })
-                    .log_err();
+                update_window_or_defer(&mut cx, handle, move |window, _| {
+                    window.hovered.set(active);
+                    window.refresh();
+                })
+                .log_err();
             }
         }));
         platform_window.on_input({
             let mut cx = cx.to_async();
             Box::new(move |event| {
+                // Lookout patch: an input event delivered re-entrantly while the
+                // App is borrowed (e.g. the `ModifiersChanged` Windows sends from
+                // `WM_ACTIVATE` when `SetFocus` is called inside an update,
+                // LOOKOUT-NATIVE-10) is dispatched once the borrow is released.
+                // Its result can't be known now, so report it unhandled, which
+                // is what the failed update returned before.
+                if crate::app_borrowed_on_this_thread() {
+                    update_window_or_defer(&mut cx, handle, move |window, cx| {
+                        window.dispatch_event(event, cx);
+                    })
+                    .ok();
+                    return DispatchEventResult::default();
+                }
                 handle
                     .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
                     .log_err()
@@ -2067,6 +2140,11 @@ impl Window {
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
             Box::new(move || {
+                // Lookout patch: a re-entrant `WM_NCHITTEST` while the App is
+                // borrowed can't read the frame; answer "no control".
+                if crate::app_borrowed_on_this_thread() {
+                    return None;
+                }
                 handle
                     .update(&mut cx, |_, window, _cx| {
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {

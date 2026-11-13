@@ -301,9 +301,14 @@ impl WindowsWindowInner {
 
     fn handle_timer_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
         if wparam.0 == SIZE_MOVE_LOOP_TIMER_ID {
-            let mut runnables = self.main_receiver.clone().try_iter();
-            while let Some(Ok(runnable)) = runnables.next() {
-                WindowsDispatcher::execute_runnable(runnable);
+            // Lookout patch: a move/size loop entered from inside an update
+            // keeps the App borrowed; running tasks then would panic on it.
+            // They run from the platform window once the loop ends.
+            if !gpui::app_borrowed_on_this_thread() {
+                let mut runnables = self.main_receiver.clone().try_iter();
+                while let Some(Ok(runnable)) = runnables.next() {
+                    WindowsDispatcher::execute_runnable(runnable);
+                }
             }
             self.handle_paint_msg(handle)
         } else {
