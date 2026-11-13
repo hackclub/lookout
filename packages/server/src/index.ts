@@ -1,13 +1,26 @@
 import * as Sentry from "@sentry/node";
+import {
+  DB_UNAVAILABLE_FINGERPRINT,
+  isTransientDbError,
+  retryWhileDbUnavailable,
+} from "@lookout/shared";
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: "server",
   tracesSampleRate: 0.2,
+  // A DB restart fails whatever queries were in flight; group them as one
+  // "database unavailable" issue instead of one issue per query.
+  beforeSend(event, hint) {
+    if (isTransientDbError(hint.originalException)) {
+      event.fingerprint = DB_UNAVAILABLE_FINGERPRINT;
+      event.level = "warning";
+    }
+    return event;
+  },
 });
 
 import Fastify from "fastify";
-import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +32,9 @@ import { programRoutes } from "./routes/programs.js";
 import { announcementRoutes } from "./routes/announcements.js";
 import { tipRoutes } from "./routes/tips.js";
 import { healthRoutes } from "./routes/health.js";
-import { CORS_METHODS } from "./app.js";
+import { registerCommon } from "./app.js";
+import { sql } from "drizzle-orm";
+import { db } from "./db/index.js";
 import { boss } from "./lib/queue.js";
 import { registerTimeoutJobs } from "./lib/timeouts.js";
 
@@ -27,53 +42,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = Fastify({ logger: true });
 
-const IS_DEV = process.env.NODE_ENV !== "production";
-
-// Self-hosted deployments serve the admin panel from BASE_URL, so the
-// server's own public hostname must pass CORS alongside *.hackclub.com.
-const BASE_URL_HOSTNAME = (() => {
-  try {
-    return process.env.BASE_URL ? new URL(process.env.BASE_URL).hostname : null;
-  } catch {
-    return null;
-  }
-})();
-
-await app.register(cors, {
-  origin: (origin, cb) => {
-    // Allow: no origin (server-to-server), *.hackclub.com, BASE_URL's own
-    // host (self-hosted deployments), tauri app
-    // Tauri uses tauri:// on macOS/Linux but http://tauri.localhost on Windows
-    if (
-      !origin ||
-      origin.startsWith("tauri://") ||
-      origin === "http://tauri.localhost"
-    ) {
-      cb(null, true);
-      return;
-    }
-    try {
-      const hostname = new URL(origin).hostname;
-      const isAllowed =
-        /\.hackclub\.com$/.test(hostname) ||
-        hostname === "hackclub.com" ||
-        (BASE_URL_HOSTNAME !== null && hostname === BASE_URL_HOSTNAME) ||
-        // Only allow localhost origins in development
-        (IS_DEV && /^https?:\/\/localhost(:\d+)?$/.test(origin));
-
-      if (isAllowed) {
-        cb(null, true);
-      } else {
-        app.log.warn(`CORS rejected origin: ${origin}`);
-        cb(new Error(`Not allowed by CORS (origin: ${origin})`), false);
-      }
-    } catch {
-      app.log.warn(`CORS rejected origin (malformed): ${origin}`);
-      cb(new Error(`Not allowed by CORS (origin: ${origin})`), false);
-    }
-  },
-  methods: CORS_METHODS,
-});
+// CORS + the shared error handler (503 for DB outages), as in buildApp().
+await registerCommon(app);
 
 // Security headers
 app.addHook("onSend", async (_request, reply) => {
@@ -155,6 +125,10 @@ if (existsSync(publicDir)) {
 }
 
 // Start pgBoss and periodic jobs
+// Wait out a DB that's still restarting before starting pg-boss: a failed
+// boss.start() can't be retried (it stays flagged as "starting"), so the
+// probe is what gets retried, not the start itself.
+await retryWhileDbUnavailable("startup", () => db.execute(sql`select 1`));
 await boss.start();
 await registerTimeoutJobs();
 

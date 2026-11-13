@@ -21,6 +21,7 @@ import {
   type KeptRange,
   type VideoUnit,
   type MaskRegion,
+  RESILIENT_POOL_OPTIONS,
 } from "@lookout/shared";
 import * as schema from "./schema.js";
 import {
@@ -116,7 +117,16 @@ if (!DATABASE_URL) {
   throw new Error("DATABASE_URL environment variable must be set");
 }
 
-const pool = new pg.Pool({ connectionString: DATABASE_URL });
+const pool = new pg.Pool({
+  connectionString: DATABASE_URL,
+  ...RESILIENT_POOL_OPTIONS,
+});
+// Unhandled, an idle client's connection error crashes the worker on every
+// DB restart. The pool discards the client; a failed compile is retried by
+// pg-boss.
+pool.on("error", (err) => {
+  console.warn("[db] idle client error (client discarded):", err.message);
+});
 const db = drizzle(pool, { schema });
 
 const r2Client = new S3Client({

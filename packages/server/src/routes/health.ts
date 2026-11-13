@@ -13,7 +13,9 @@ import { db } from "../db/index.js";
 export async function healthRoutes(app: FastifyInstance) {
   app.get("/api/health", async (_request, reply) => {
     try {
-      await db.execute(sql`select 1`);
+      // The leading comment opts out of the read retry in db/readRetry.ts:
+      // a probe should report the database as it is right now, quickly.
+      await db.execute(sql`/* health */ select 1`);
     } catch (err) {
       app.log.error({ err }, "health check: database unreachable");
       return reply.code(503).send({ status: "error", database: "unreachable" });

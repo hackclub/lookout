@@ -110,3 +110,20 @@ describe("GET /api/media/:id/thumbnail.jpg", () => {
     expect(r.headers["cache-control"]).toContain("max-age=86400");
   });
 });
+
+describe("public media from a third-party origin (LOOKOUT-BACKEND-F)", () => {
+  it.each(["thumbnail.jpg", "video.mp4"])(
+    "serves %s with Access-Control-Allow-Origin: *",
+    async (file) => {
+      process.env.R2_PUBLIC_DOMAIN = "cdn.example.com";
+      const id = await seedSession();
+      const r = await app.inject({
+        method: "GET",
+        url: `/api/media/${id}/${file}`,
+        headers: { origin: "https://www.oxygenated.uk" },
+      });
+      expect(r.statusCode).toBe(302);
+      expect(r.headers["access-control-allow-origin"]).toBe("*");
+    },
+  );
+});

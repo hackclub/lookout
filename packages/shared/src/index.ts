@@ -4,3 +4,4 @@ export * from "./clientInfo.js";
 export * from "./cuts.js";
 export * from "./masks.js";
 export * from "./clockOffset.js";
+export * from "./dbErrors.js";

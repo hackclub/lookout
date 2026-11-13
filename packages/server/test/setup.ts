@@ -73,6 +73,9 @@ vi.mock("pg-boss", () => {
     async work() {}
     async schedule() {}
     async createQueue() {}
+    on() {
+      return this;
+    }
   }
   return { default: FakePgBoss };
 });

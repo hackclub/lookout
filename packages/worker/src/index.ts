@@ -1,9 +1,24 @@
 import * as Sentry from "@sentry/node";
+import {
+  DB_UNAVAILABLE_FINGERPRINT,
+  isTransientDbError,
+  RESILIENT_POOL_OPTIONS,
+  retryWhileDbUnavailable,
+} from "@lookout/shared";
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: "worker",
   tracesSampleRate: 0.2,
+  // A DB restart fails whatever was in flight; group those as one
+  // "database unavailable" issue instead of one per query.
+  beforeSend(event, hint) {
+    if (isTransientDbError(hint.originalException)) {
+      event.fingerprint = DB_UNAVAILABLE_FINGERPRINT;
+      event.level = "warning";
+    }
+    return event;
+  },
 });
 
 import PgBoss from "pg-boss";
@@ -24,14 +39,42 @@ const RETRY_LIMIT = 3;
 // Pools are sized for horizontal scaling: each replica opens this Drizzle pool
 // AND pg-boss's own pool. Keep (replicas × (5 + 5)) + server well under
 // Postgres max_connections (100). See queue.ts / server db for the budget.
-const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 5 });
+const pool = new pg.Pool({
+  connectionString: DATABASE_URL,
+  max: 5,
+  ...RESILIENT_POOL_OPTIONS,
+});
+// Without an 'error' listener, an idle client dropped by a DB restart is an
+// uncaught exception that kills the worker (LOOKOUT-BACKEND-1/4). The pool
+// already discards the broken client; just log it.
+pool.on("error", (err) => {
+  console.warn("[db] idle client error (client discarded):", err.message);
+});
 const db = drizzle(pool, { schema });
 
 const boss = new PgBoss({
   connectionString: DATABASE_URL,
   max: 5,
+  ...RESILIENT_POOL_OPTIONS,
 });
 
+// pg-boss re-emits its pool's errors and its polling/cron failures as
+// 'error'; unhandled, EventEmitter throws them (crash, or an unhandled
+// rejection from the cron monitor — LOOKOUT-BACKEND-6). pg-boss recovers by
+// itself once the DB is back, so transient errors only need a log line.
+boss.on("error", (err) => {
+  if (isTransientDbError(err)) {
+    console.warn("[pg-boss] database unavailable:", err.message);
+    return;
+  }
+  console.error("[pg-boss] error:", err);
+  Sentry.captureException(err);
+});
+
+// A pod that starts while Postgres is still restarting (LOOKOUT-BACKEND-3)
+// waits for it instead of crashing. The probe is retried, not boss.start():
+// a failed start() stays flagged as "starting" and can't be re-run.
+await retryWhileDbUnavailable("startup", () => pool.query("select 1"));
 await boss.start();
 
 console.log("Worker started, listening for compilation jobs...");

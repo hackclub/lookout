@@ -2103,10 +2103,19 @@ export async function sessionRoutes(app: FastifyInstance) {
   // the address bar); without it they fall back to presigning / streaming
   // straight from the bucket. Use session ID (public, unguessable UUID)
   // instead of token (secret).
+  //
+  // Any origin may read them: they carry no auth and no cookies (nothing is
+  // sent with credentials), and programs and third-party pages already embed
+  // them via <img>/<video>. `*` also lets a page fetch() or draw them on a
+  // canvas without tainting it.
+  const publicMediaRouteOptions = {
+    schema: { params: sessionIdParamSchema },
+    config: { cors: { origin: "*" } },
+  };
 
   app.get<{ Params: { sessionId: string } }>(
     "/api/media/:sessionId/thumbnail.jpg",
-    { schema: { params: sessionIdParamSchema } },
+    publicMediaRouteOptions,
     async (request, reply) => {
       const rl = checkGenericRateLimit("media-thumbnail", request.params.sessionId, 60);
       if (!rl.allowed) {
@@ -2170,7 +2179,7 @@ export async function sessionRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { sessionId: string } }>(
     "/api/media/:sessionId/video.mp4",
-    { schema: { params: sessionIdParamSchema } },
+    publicMediaRouteOptions,
     async (request, reply) => {
       const rl = checkGenericRateLimit("media-video", request.params.sessionId, 30);
       if (!rl.allowed) {
@@ -2207,7 +2216,7 @@ export async function sessionRoutes(app: FastifyInstance) {
   // a broken player.
   app.get<{ Params: { sessionId: string } }>(
     "/api/media/:sessionId/video.webm",
-    { schema: { params: sessionIdParamSchema } },
+    publicMediaRouteOptions,
     async (request, reply) => {
       const rl = checkGenericRateLimit("media-video-webm", request.params.sessionId, 30);
       if (!rl.allowed) {

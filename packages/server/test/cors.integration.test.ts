@@ -9,7 +9,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { buildApp } from "../src/app.js";
+import Fastify from "fastify";
+import { buildApp, isAllowedOrigin, registerCommon } from "../src/app.js";
 
 let app: FastifyInstance;
 
@@ -36,5 +37,73 @@ describe("CORS preflight", () => {
       .split(",")
       .map((m) => m.trim());
     expect(allowed).toContain(method);
+  });
+});
+
+describe("origins", () => {
+  it("answers a disallowed origin normally, just without CORS headers", async () => {
+    // Used to be an Error → 500 → Sentry issue (LOOKOUT-BACKEND-F).
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "https://www.oxygenated.uk" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("allows *.hackclub.com", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "https://program.hackclub.com" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(
+      "https://program.hackclub.com",
+    );
+  });
+});
+
+describe("isAllowedOrigin", () => {
+  const prod = { isDev: false, baseUrlHostname: "lookout.example.org" };
+  it.each([
+    [undefined, true],
+    ["tauri://localhost", true],
+    ["http://tauri.localhost", true],
+    ["https://hackclub.com", true],
+    ["https://x.hackclub.com", true],
+    ["https://lookout.example.org", true],
+    ["https://evilhackclub.com", false],
+    ["https://hackclub.com.evil.example", false],
+    ["http://localhost:5173", false],
+    ["not a url", false],
+  ])("%s → %s", (origin, expected) => {
+    expect(isAllowedOrigin(origin, prod)).toBe(expected);
+  });
+});
+
+describe("database outage", () => {
+  it("maps a transient DB error to 503 + Retry-After", async () => {
+    const outage = Fastify();
+    await registerCommon(outage);
+    outage.get("/boom", async () => {
+      throw new Error("Failed query: select 1", {
+        cause: Object.assign(new Error("the database system is shutting down"), {
+          code: "57P03",
+        }),
+      });
+    });
+    outage.get("/bug", async () => {
+      throw new Error("not a db problem");
+    });
+
+    const down = await outage.inject({ method: "GET", url: "/boom" });
+    expect(down.statusCode).toBe(503);
+    expect(down.headers["retry-after"]).toBe("5");
+
+    const bug = await outage.inject({ method: "GET", url: "/bug" });
+    expect(bug.statusCode).toBe(500);
+    await outage.close();
   });
 });
