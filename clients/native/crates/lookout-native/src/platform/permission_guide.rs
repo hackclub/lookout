@@ -300,7 +300,18 @@ mod imp {
                     unsafe { item.setDraggingFrame_contents(self.bounds(), Some(&image)) };
                 }
                 let items = NSArray::from_retained_slice(&[item]);
-                let session = self.beginDraggingSessionWithItems_event_source(&items, &down, ProtocolObject::from_ref(self));
+                // AppKit returns nil when it won't start a drag (seen on macOS
+                // 27, LOOKOUT-NATIVE-W), though the binding promises non-null and
+                // panics; ask for a nullable result instead.
+                let source = ProtocolObject::<dyn NSDraggingSource>::from_ref(self);
+                // SAFETY: the selector and argument types match AppKit's
+                // `-[NSView beginDraggingSessionWithItems:event:source:]`.
+                let session: Option<Retained<NSDraggingSession>> =
+                    unsafe { msg_send![self, beginDraggingSessionWithItems: &*items, event: &*down, source: source] };
+                let Some(session) = session else {
+                    log::warn!("[permissions] AppKit wouldn't start dragging the app tile");
+                    return;
+                };
                 session.setAnimatesToStartingPositionsOnCancelOrFail(true);
                 session.setDraggingFormation(NSDraggingFormation::None);
             }
