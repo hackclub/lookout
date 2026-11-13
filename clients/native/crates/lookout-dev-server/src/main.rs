@@ -11,6 +11,10 @@
 //!
 //! `LOOKOUT_DEV_UPDATES=<dir>` also serves fake update releases at
 //! `/updates/…` (see `lookout-update-tool fake-release`).
+//!
+//! `DEV_MANY=<n>` adds n completed sessions (a long gallery; tokens are
+//! `printf '%064x' $((0xdead0000 + i))`), and `DEV_THUMB_DELAY_MS=<ms>`
+//! makes every thumbnail that slow to arrive.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -90,6 +94,11 @@ fn serve_update(rest: &[&str], range: Option<&str>) -> Response<Cursor<Vec<u8>>>
 
 fn token(seed: u8) -> String {
     (0..32).map(|i| format!("{:02x}", (seed as u32 * 37 + i * 11) % 256)).collect()
+}
+
+/// The token of `DEV_MANY` session `i`.
+fn many_token(i: u64) -> String {
+    format!("{:064x}", 0xdead_0000u64 + i)
 }
 
 fn thumb(hue: u8, w: u32, h: u32) -> Vec<u8> {
@@ -176,6 +185,26 @@ fn main() {
             },
         );
     }
+    // `DEV_MANY=<n>`: n more completed sessions, for a long gallery. Their
+    // tokens are `many_token(0..n)`; seed the app with them via
+    // LOOKOUT_SEED_TOKENS.
+    let many: u64 = std::env::var("DEV_MANY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    for i in 0..many {
+        let t = many_token(i);
+        sessions.insert(
+            t.clone(),
+            Session {
+                token: t,
+                name: format!("Session #{}", many - i),
+                status: "complete".into(),
+                tracked: 600 + (i as i64 * 97) % 7200,
+                shots: 10,
+                created_at: format!("2026-10-01T00:00:00.{:03}Z", (many - i) % 1000),
+                hue: (i * 23 % 256) as u8,
+                stopped_at: None,
+            },
+        );
+    }
     println!("Lookout dev server on {base}");
     let mut list: Vec<_> = sessions.values().cloned().collect();
     list.sort_by(|a, b| a.created_at.cmp(&b.created_at).reverse());
@@ -232,6 +261,11 @@ fn main() {
                 (Method::Get, ["media", "thumb", file]) => {
                     let tok = file.trim_end_matches(".jpg");
                     let hue = st.get(tok).map(|s| s.hue).unwrap_or(100);
+                    drop(st);
+                    // `DEV_THUMB_DELAY_MS`: a slow network.
+                    if let Some(ms) = std::env::var("DEV_THUMB_DELAY_MS").ok().and_then(|v| v.parse().ok()) {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
                     let _ = req.respond(Response::from_data(thumb(hue, 640, 360)).with_header(Header::from_bytes("Content-Type", "image/jpeg").unwrap()));
                     return;
                 }

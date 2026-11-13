@@ -44,6 +44,8 @@ pub struct GalleryPage {
     add_anchor: Bounds<Pixels>,
     pub banner: Option<AnyElementFactory>,
     generation: u64,
+    /// A session card's measured height (they're all the same).
+    card_h: Option<f32>,
 }
 
 /// Builds the announcement banner each render (owned by the main window).
@@ -69,6 +71,7 @@ impl GalleryPage {
             add_anchor: Bounds::default(),
             banner: None,
             generation: 0,
+            card_h: None,
         };
         page.refresh(cx);
         page
@@ -290,11 +293,60 @@ impl Render for GalleryPage {
         let show_bottom = show_bottom_fade && offset + 0.5 < max;
         store_mut(cx).gallery_scroll = offset;
         let entity = cx.entity();
-        let cards: Vec<AnyElement> = self
-            .sessions
-            .iter()
-            .map(|s| session_card(s, &t, entity.clone(), window, cx).into_any_element())
-            .collect();
+
+        // Only the cards on screen (and a few either side) are built: every
+        // card is the same height, so the rest are stand-in spacers. The
+        // first built card is measured each frame to keep that height true.
+        let n = self.sessions.len();
+        let viewport = self.scroll.bounds().size;
+        let (view_w, view_h) = if viewport.height > px(0.0) {
+            (f32::from(viewport.width), f32::from(viewport.height))
+        } else {
+            let v = window.viewport_size();
+            (f32::from(v.width), f32::from(v.height))
+        };
+        let card_h = self.card_h.unwrap_or_else(|| LAST_CARD_H.get().unwrap_or_else(|| estimate_card_h(view_w - 2.0 * LIST_PAD)));
+        let stride = card_h + CARD_GAP;
+        let range = visible_range(n, offset, view_h, stride, LIST_PAD, OVERSCAN);
+        self.release_far_thumbnails(&range, cx);
+        let mut cards: Vec<AnyElement> = Vec::with_capacity(range.len() + 2);
+        if range.start > 0 {
+            cards.push(div().flex_none().h(px(range.start as f32 * stride - CARD_GAP)).into_any_element());
+        }
+        for i in range.clone() {
+            let card = session_card(&self.sessions[i], &t, entity.clone(), window, cx).into_any_element();
+            if i == range.start {
+                let probe = entity.clone();
+                cards.push(
+                    div()
+                        .relative()
+                        .child(card)
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    let h = f32::from(bounds.size.height);
+                                    probe.update(cx, |this, cx| {
+                                        if h > 0.0 && this.card_h.is_none_or(|old| (old - h).abs() > 0.5) {
+                                            this.card_h = Some(h);
+                                            LAST_CARD_H.set(Some(h));
+                                            cx.notify();
+                                        }
+                                    })
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                cards.push(card);
+            }
+        }
+        if range.end < n {
+            cards.push(div().flex_none().h(px((n - range.end) as f32 * stride - CARD_GAP)).into_any_element());
+        }
         col.child(
             div()
                 .flex_1()
@@ -308,13 +360,13 @@ impl Render for GalleryPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
-                        .p(px(16.0))
+                        .p(px(LIST_PAD))
                         // Cards, then a spacer that soaks up any leftover
                         // height, then the footer: pinned to the bottom when
                         // the list is short, after the last card when it scrolls.
                         .flex()
                         .flex_col()
-                        .child(div().flex_none().flex().flex_col().gap(px(12.0)).children(cards))
+                        .child(div().flex_none().flex().flex_col().gap(px(CARD_GAP)).children(cards))
                         .child(div().flex_1().min_h(px(40.0)))
                         .child(crate::screens::info::hack_club_footer("gallery-hackclub", &t)),
                     if show_top { 20.0 } else { 0.0 },
@@ -322,6 +374,69 @@ impl Render for GalleryPage {
                 )),
         )
         .into_any_element()
+    }
+}
+
+/// The scroll list's padding and the space between cards.
+const LIST_PAD: f32 = 16.0;
+const CARD_GAP: f32 = 12.0;
+/// Cards built beyond each edge of the view, so a fast scroll doesn't
+/// reveal a gap before the next frame.
+const OVERSCAN: usize = 3;
+/// Decoded thumbnails kept for cards this many places beyond the built
+/// ones; farther ones release their textures and reload from the disk
+/// cache when scrolled back to.
+const KEEP_DECODED: usize = 12;
+
+thread_local! {
+    /// The last measured card height, so a re-opened gallery starts exact.
+    static LAST_CARD_H: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A card's height before one has been measured: the 16:9 thumbnail plus
+/// the name and meta lines, inside a 1px border.
+fn estimate_card_h(card_w: f32) -> f32 {
+    (card_w - 2.0) * 9.0 / 16.0 + 64.0
+}
+
+/// The cards to build for a list of `n` cards `stride` apart (height plus
+/// gap) that starts `top` into the scroll content, scrolled to `offset`
+/// with a `view_h`-tall view: the ones on screen, plus `overscan` a side.
+fn visible_range(n: usize, offset: f32, view_h: f32, stride: f32, top: f32, overscan: usize) -> std::ops::Range<usize> {
+    if n == 0 || stride <= 0.0 {
+        return 0..n;
+    }
+    let first = ((offset - top) / stride).floor().max(0.0) as usize;
+    let last = ((offset + view_h - top) / stride).ceil().max(0.0) as usize;
+    let start = first.saturating_sub(overscan).min(n);
+    let end = last.saturating_add(overscan).min(n).max(start);
+    start..end
+}
+
+impl GalleryPage {
+    /// Drop decoded thumbnails of cards far outside `built`, so a long
+    /// gallery holds a screenful or so of textures, not one per session.
+    fn release_far_thumbnails(&self, built: &std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let keep = built.start.saturating_sub(KEEP_DECODED)..built.end.saturating_add(KEEP_DECODED);
+        let cache = images::cache(cx);
+        let far: Vec<String> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !keep.contains(i))
+            .filter_map(|(_, s)| s.thumbnail_url.as_deref())
+            .filter(|url| cache.read(cx).is_ready(url))
+            .map(str::to_string)
+            .collect();
+        if !far.is_empty() {
+            cx.defer(move |cx| {
+                cache.update(cx, |c, cx| {
+                    for url in &far {
+                        c.evict(url, cx);
+                    }
+                })
+            });
+        }
     }
 }
 
@@ -515,6 +630,23 @@ mod tests {
 
     fn summary(token: &str, created_at: &str) -> SessionSummary {
         serde_json::from_value(serde_json::json!({ "token": token, "createdAt": created_at })).unwrap()
+    }
+
+    #[test]
+    fn visible_range_builds_only_what_is_on_screen() {
+        // 100 cards 312px apart under 16px of padding, in a 600px view.
+        assert_eq!(visible_range(100, 0.0, 600.0, 312.0, 16.0, 0), 0..2);
+        assert_eq!(visible_range(100, 0.0, 600.0, 312.0, 16.0, 3), 0..5);
+        // Scrolled to card 50's top edge.
+        let y = 16.0 + 50.0 * 312.0;
+        assert_eq!(visible_range(100, y, 600.0, 312.0, 16.0, 0), 50..52);
+        assert_eq!(visible_range(100, y, 600.0, 312.0, 16.0, 3), 47..55);
+        // At the end, and past it (overscroll).
+        assert_eq!(visible_range(100, 31_000.0, 600.0, 312.0, 16.0, 3), 96..100);
+        assert_eq!(visible_range(100, 99_999.0, 600.0, 312.0, 16.0, 3), 100..100);
+        assert_eq!(visible_range(0, 0.0, 600.0, 312.0, 16.0, 3), 0..0);
+        // A short list builds everything.
+        assert_eq!(visible_range(2, 0.0, 600.0, 312.0, 16.0, 3), 0..2);
     }
 
     #[test]
