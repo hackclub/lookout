@@ -179,7 +179,11 @@ fn main() {
         }
     });
     crash::on_exit();
-    drop(runtime);
+    // Not a plain drop: that waits for every blocking task, forever if one
+    // never returns, so the process never exited (a LOOKOUT-NATIVE-B hang
+    // report sat in tokio's blocking-pool shutdown). Give them a moment,
+    // then leave the rest to process exit.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
 }
 
 /// What the app proper needs to start (after onboarding, if any).
