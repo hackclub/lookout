@@ -153,7 +153,7 @@ pub(crate) fn list_onscreen_window_rects() -> Vec<OnScreenWindowRect> {
 
     let mut rects = Vec::new();
     for w in windows {
-        let app_name = w.app_name().unwrap_or_default();
+        let app_name = window_app_name(&w);
         if app_name.is_empty() || app_name == "Lookout" {
             continue;
         }
@@ -203,6 +203,41 @@ fn is_click_through_overlay(window_id: u32) -> bool {
     let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
     let mask = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
     ex_style & mask == mask
+}
+
+/// The app name for an xcap window: what the Filtered Apps list shows and
+/// redaction matches against. On Windows it comes from
+/// [`crate::win_app_name`], which gives xcap's answer without xcap's
+/// error-level log spam (and names an exe with no version resource by its
+/// file stem rather than its full path).
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn window_app_name(w: &xcap::Window) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        w.id().map(crate::win_app_name::app_name_for_window).unwrap_or_default()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        w.app_name().unwrap_or_default()
+    }
+}
+
+/// `C:\dir\Foo.exe` -> `Foo`.
+pub(crate) fn file_stem(path: &str) -> &str {
+    let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    match file.rfind('.') {
+        Some(i) if i > 0 => &file[..i],
+        _ => file,
+    }
+}
+
+/// Whether the Filtered Apps entry `entry` names the app `app_name`
+/// (case-insensitive). An entry saved as a full exe path also matches by
+/// its file stem: up to 0.4.2, Windows named an exe with no version
+/// resource by its path, and such entries are still in users' settings.
+pub(crate) fn blacklist_entry_matches(entry: &str, app_name: &str) -> bool {
+    entry.eq_ignore_ascii_case(app_name)
+        || (entry.contains(['\\', '/']) && file_stem(entry).eq_ignore_ascii_case(app_name))
 }
 
 pub(crate) fn should_exclude_window(app_name: &str, title: &str) -> bool {
@@ -462,7 +497,7 @@ pub fn list_capture_sources() -> Result<CaptureSourceList, String> {
         .into_iter()
         .filter_map(|w| {
             let title = w.title().ok().unwrap_or_default();
-            let app_name = w.app_name().ok().unwrap_or_default();
+            let app_name = window_app_name(&w);
             let width = w.width().ok()?;
             let height = w.height().ok()?;
 
@@ -493,4 +528,27 @@ pub fn list_capture_sources() -> Result<CaptureSourceList, String> {
         .collect();
 
     Ok(CaptureSourceList { monitors, windows })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_stem_strips_dir_and_extension() {
+        assert_eq!(file_stem(r"C:\Program Files\Foo\Foo.Bar.exe"), "Foo.Bar");
+        assert_eq!(file_stem("tool.exe"), "tool");
+        assert_eq!(file_stem("tool"), "tool");
+        assert_eq!(file_stem(r"C:\x\.hidden"), ".hidden");
+    }
+
+    #[test]
+    fn blacklist_entries_match_names_and_legacy_paths() {
+        assert!(blacklist_entry_matches("Discord", "discord"));
+        assert!(!blacklist_entry_matches("Discord", "Discord PTB"));
+        // A name saved as a full path by older Windows builds.
+        assert!(blacklist_entry_matches(r"C:\Users\me\AppData\Local\mytool\MyTool.exe", "mytool"));
+        // A plain name with a dot is not treated as a path.
+        assert!(!blacklist_entry_matches("Foo.exe", "Foo"));
+    }
 }

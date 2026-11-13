@@ -278,10 +278,9 @@ fn running_apps() -> Vec<(String, Option<String>)> {
         let mut names = std::collections::BTreeSet::new();
         if let Ok(windows) = Window::all() {
             for w in windows {
-                if let Ok(name) = w.app_name() {
-                    if !name.is_empty() && !should_exclude_window(&name, &w.title().unwrap_or_default()) {
-                        names.insert(name);
-                    }
+                let name = crate::sources::window_app_name(&w);
+                if !name.is_empty() && !should_exclude_window(&name, &w.title().unwrap_or_default()) {
+                    names.insert(name);
                 }
             }
         }

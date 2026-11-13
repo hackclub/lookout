@@ -196,8 +196,8 @@ impl DirectManipulationEventHandler {
     fn mouse_position(&self) -> Point<Pixels> {
         let scale_factor = self.scale_factor.get();
         unsafe {
-            let mut point: POINT = std::mem::zeroed();
-            let _ = GetCursorPos(&mut point);
+            // Lookout patch: last known position when the desktop isn't ours.
+            let mut point = crate::window::cursor_screen_position();
             let _ = ScreenToClient(self.window, &mut point);
             logical_point(point.x as f32, point.y as f32, scale_factor)
         }

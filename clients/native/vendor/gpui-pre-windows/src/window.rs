@@ -631,6 +631,32 @@ impl Drop for WindowsWindow {
     }
 }
 
+/// Lookout patch: the cursor's position in screen pixels. `GetCursorPos`
+/// fails with ACCESS_DENIED whenever another desktop has input (UAC prompt,
+/// lock screen, Ctrl+Alt+Del). That's expected, so it isn't an error
+/// (upstream logged it at error level, which Sentry reported as
+/// LOOKOUT-NATIVE-9), and (0, 0) would jump the pointer to the corner, so
+/// this returns the last position it did read. Logged once, at debug level.
+pub(crate) fn cursor_screen_position() -> POINT {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    let mut point = POINT::default();
+    match unsafe { GetCursorPos(&mut point) } {
+        Ok(()) => {
+            LAST.store(((point.x as i64) << 32) | (point.y as u32 as i64), Ordering::Relaxed);
+            point
+        }
+        Err(err) => {
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                log::debug!("GetCursorPos failed ({err}); using the last known cursor position");
+            }
+            let last = LAST.load(Ordering::Relaxed);
+            POINT { x: (last >> 32) as i32, y: last as i32 }
+        }
+    }
+}
+
 impl PlatformWindow for WindowsWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
@@ -692,10 +718,8 @@ impl PlatformWindow for WindowsWindow {
     fn mouse_position(&self) -> Point<Pixels> {
         let scale_factor = self.scale_factor();
         let point = unsafe {
-            let mut point: POINT = std::mem::zeroed();
-            GetCursorPos(&mut point)
-                .context("unable to get cursor position")
-                .log_err();
+            // Lookout patch: see `cursor_screen_position`.
+            let mut point = cursor_screen_position();
             ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
             point
         };

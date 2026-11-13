@@ -43,10 +43,9 @@ fn redact_blacklisted_regions(
     let mut above_pixel_rects: Vec<(u32, u32, u32, u32)> = Vec::new();
 
     for win in &on_screen {
-        let app_lower = win.app_name.to_ascii_lowercase();
         let is_blacklisted = blacklisted_apps
             .iter()
-            .any(|b| b.to_ascii_lowercase() == app_lower);
+            .any(|b| crate::sources::blacklist_entry_matches(b, &win.app_name));
 
         // Compute intersection of window with monitor in screen coords
         let ix1 = f64::max(win.x, mon_x);

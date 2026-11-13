@@ -68,6 +68,8 @@ pub mod sources;
 pub mod timer;
 pub mod transport;
 pub mod upload;
+#[cfg(target_os = "windows")]
+mod win_app_name;
 
 // The pure session logic lives in `lookout-session`, the orchestration in
 // `lookout-recorder`; these aliases keep every `lookout_core::` path a

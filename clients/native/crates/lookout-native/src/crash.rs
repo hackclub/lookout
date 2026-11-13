@@ -80,7 +80,39 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
 /// lines before them become breadcrumbs. A no-op until [`init`] binds a
 /// client.
 pub fn wrap_logger<L: log::Log>(dest: L) -> impl log::Log {
-    sentry::integrations::log::SentryLogger::with_dest(dest)
+    use sentry::integrations::log::{breadcrumb_from_record, event_from_record, RecordMapping};
+    sentry::integrations::log::SentryLogger::with_dest(dest).mapper(|record| match record.level() {
+        log::Level::Error => {
+            if record.target().starts_with("xcap::") && is_expected_dependency_error(&record.args().to_string()) {
+                let mut crumb = breadcrumb_from_record(record);
+                crumb.level = sentry::Level::Warning;
+                RecordMapping::Breadcrumb(crumb)
+            } else {
+                RecordMapping::Event(Box::new(event_from_record(record)))
+            }
+        }
+        log::Level::Warn | log::Level::Info => RecordMapping::Breadcrumb(breadcrumb_from_record(record)),
+        log::Level::Debug | log::Level::Trace => RecordMapping::Ignore,
+    })
+}
+
+/// xcap's Windows backend logs these at error level, but they're normal
+/// failures, so they become breadcrumbs instead of Sentry issues. Matched
+/// on the call and the exact Win32 error, so a different failure of the
+/// same call still reports.
+/// - `ReleaseDC` → ERROR_INVALID_WINDOW_HANDLE (1400): the window being
+///   captured closed mid-capture; its DC went with it (LOOKOUT-NATIVE-S).
+/// - `GetModuleBaseNameW` → ACCESS_DENIED (5) and `GetFileVersionInfoSizeW`
+///   → ERROR_RESOURCE_TYPE_NOT_FOUND (1813), from `Window::app_name`. We
+///   name apps ourselves (`lookout_core`'s `win_app_name`), so these only
+///   matter if something calls xcap's again (LOOKOUT-NATIVE-H, -M, -X).
+fn is_expected_dependency_error(message: &str) -> bool {
+    const EXPECTED: &[(&str, &str)] = &[
+        ("ReleaseDC(", "WIN32_ERROR(1400)"),
+        ("GetModuleBaseNameW(", "WIN32_ERROR(5)"),
+        ("GetFileVersionInfoSizeW(", "WIN32_ERROR(1813)"),
+    ];
+    EXPECTED.iter().any(|(call, code)| message.starts_with(call) && message.ends_with(code))
 }
 
 /// `LOOKOUT_CRASH_TEST=segfault|abort|panic|error` (and `hang`, see
@@ -117,5 +149,23 @@ pub fn on_exit() {
     match *QUIT_REASON.lock().unwrap_or_else(|e| e.into_inner()) {
         Some(reason) => log::info!("[app] exiting ({reason})"),
         None => log::error!("[app] Lookout quit without being asked to"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_expected_dependency_error as expected;
+
+    #[test]
+    fn only_known_xcap_failures_are_downgraded() {
+        // Messages exactly as Sentry received them.
+        assert!(expected("ReleaseDC(HDC(0xffffffff8c010b24)) failed: WIN32_ERROR(1400)"));
+        assert!(expected("GetModuleBaseNameW(HANDLE(0x900)) failed: WIN32_ERROR(5)"));
+        assert!(expected("GetFileVersionInfoSizeW(PCWSTR(0x49b5ffe898)) failed: WIN32_ERROR(1813)"));
+        // Other codes from the same calls still report.
+        assert!(!expected("ReleaseDC(HDC(0x1)) failed: WIN32_ERROR(6)"));
+        assert!(!expected("GetModuleBaseNameW(HANDLE(0x900)) failed: WIN32_ERROR(50)"));
+        assert!(!expected("GetFileVersionInfoSizeW(PCWSTR(0x1)) failed: WIN32_ERROR(18130)"));
+        assert!(!expected("DeleteDC(HDC(0x1)) failed: WIN32_ERROR(1400)"));
     }
 }

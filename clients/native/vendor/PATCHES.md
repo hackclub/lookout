@@ -95,6 +95,12 @@ drop the patch and switch `ui/video.rs` to its API.
   loop ends; `quit()`, the end of the loop and `WM_ENDSESSION` are logged.
 - `gpui-pre-windows/src/events.rs`: logs `WM_CLOSE` on a window.
 - `gpui-pre/src/app.rs`: logs "last window closed, quitting".
+- `gpui-pre-windows/src/window.rs`: `cursor_screen_position()` replaces the
+  bare `GetCursorPos` in `mouse_position` (and in
+  `direct_manipulation.rs`). It fails with ACCESS_DENIED while another
+  desktop has input (UAC, lock screen, Ctrl+Alt+Del); upstream logged that at
+  error level (Sentry LOOKOUT-NATIVE-9) and returned (0, 0). Now it returns
+  the last position read and logs once at debug.
 
 ## Re-entrant callbacks while the App is borrowed (LOOKOUT-NATIVE-Z, -10, -1E/F/G, -7, -6/-8)
 
