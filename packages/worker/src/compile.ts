@@ -28,6 +28,7 @@ import {
   buildSegment,
   probeDimensions,
   cutVideoToKeptRanges,
+  concatList,
   type VideoMask,
   maskToVideoMask,
   masksToVideoMasks,
@@ -649,7 +650,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     const concatListPath = path.join(tmpDir, "segments.txt");
     await fs.writeFile(
       concatListPath,
-      segments.map((p) => `file '${p}'`).join("\n") + "\n",
+      concatList(segments.map((p) => ({ path: p, seconds: 1 }))),
     );
 
     const originalPath = path.join(tmpDir, "original.mp4");
@@ -1027,7 +1028,7 @@ async function buildPublishFromUnits(
   const concatListPath = path.join(tmpDir, "publish_concat.txt");
   await fs.writeFile(
     concatListPath,
-    segments.map((p) => `file '${p}'`).join("\n") + "\n",
+    concatList(segments.map((p) => ({ path: p, seconds: 1 }))),
   );
   const outPath = path.join(tmpDir, "publish.mp4");
   try {

@@ -123,11 +123,12 @@ describe.skipIf(!ffmpegAvailable)("maskVideo with cutVideoToKeptRanges", () => {
   let tmpDir: string;
   let originalPath: string;
   let originalHashes: string[];
+  let segments: string[];
 
   beforeAll(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-"));
 
-    const segments: string[] = [];
+    segments = [];
     for (let i = 0; i < UNITS; i++) {
       const jpeg = path.join(tmpDir, `unit_${i}.jpg`);
       // Use testsrc with time/clock display for distinct pixel content per frame
@@ -281,6 +282,42 @@ describe.skipIf(!ffmpegAvailable)("maskVideo with cutVideoToKeptRanges", () => {
 
     const frameCount = await probeFrameCount(edited);
     expect(frameCount).toBe(3 * SEGMENT_FPS);
+  }, 120_000);
+
+  it("cuts by frame index when the original's timeline has drifted", async () => {
+    // Originals assembled before concatList could have timestamps squeezed by
+    // seconds while still holding exactly fps frames per unit. Picking frames
+    // by time would keep the wrong ones (and the wrong number of them).
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lookout-mask-d-"));
+    // The way it happened in production: the concat demuxer believed some
+    // segments were a frame short and started the next one early.
+    const listPath = path.join(dir, "drifted.txt");
+    await fs.writeFile(
+      listPath,
+      segments
+        .map((p) => `file '${p}'\nduration ${(SEGMENT_FPS - 1) / SEGMENT_FPS}`)
+        .join("\n") + "\n",
+    );
+    const driftedPath = path.join(dir, "drifted.mp4");
+    await execFileAsync(
+      "ffmpeg",
+      ["-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-y", driftedPath],
+      { timeout: 60_000 },
+    );
+    expect(await probeFrameCount(driftedPath)).toBe(UNITS * SEGMENT_FPS);
+
+    const masks: VideoMask[] = [
+      { startSec: 0, endSec: UNITS, x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+    ];
+    const edited = await cutVideoToKeptRanges(
+      dir,
+      driftedPath,
+      [{ start: 0, end: 1 }, { start: 3, end: UNITS }],
+      false,
+      masks,
+    );
+
+    expect(await probeFrameCount(edited)).toBe(2 * SEGMENT_FPS);
   }, 120_000);
 
   it("probeDimensions fails closed when video dimensions cannot be determined", async () => {

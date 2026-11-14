@@ -222,6 +222,30 @@ export function segmentEncodeArgs(
 /** Publish-tier segment parameters. See segmentEncodeArgs. */
 export const SEGMENT_ENCODE_ARGS = segmentEncodeArgs("publish");
 
+/**
+ * A concat-demuxer list that states each file's duration instead of letting
+ * the demuxer guess it.
+ *
+ * MPEG-TS stores no duration, so ffprobe/the demuxer estimate one from packet
+ * timestamps, and for some publish-tier segments (B-frames, reordered tail)
+ * a 6-frame segment reads as 0.833s. The demuxer then starts the next file a
+ * frame early, the muxer shoves the overlapping timestamps along, and over a
+ * few hundred segments the timeline shrinks by seconds while the frame count
+ * stays right (so verifyVideo passes). Anything that later addresses the video
+ * by time - a `select` on `t`, a `-ss` seek - then lands on the wrong frames.
+ * Seen on session 0dacd19f (2026-11-13): 212 segments assembled to 203.67s,
+ * and every masked edit compile failed its frame count check.
+ */
+export function concatList(
+  entries: Array<{ path: string; seconds: number }>,
+): string {
+  return (
+    entries
+      .map((e) => `file '${e.path}'\nduration ${e.seconds}`)
+      .join("\n") + "\n"
+  );
+}
+
 /** Probe a video's frame rate (rounded to integer fps). Used wherever the
  *  code touches an artifact that may predate the current SEGMENT_FPS —
  *  originals compiled before the 6fps change are 30fps, and cutting one
@@ -598,7 +622,12 @@ export async function cutVideoToKeptRanges(
       const listPath = path.join(tmpDir, "kept_ranges.txt");
       await fs.writeFile(
         listPath,
-        rangePaths.map((p) => `file '${p}'`).join("\n") + "\n",
+        concatList(
+          rangePaths.map((p, i) => ({
+            path: p,
+            seconds: keptRanges[i].end - keptRanges[i].start,
+          })),
+        ),
       );
       await execFileAsync(
         "ffmpeg",
@@ -635,8 +664,12 @@ export async function cutVideoToKeptRanges(
   // original's own rate (see `fps` above). The GOP stays one second — pinned
   // by frame count matching the fps — so the output remains aligned for
   // future edits.
+  //
+  // Frames are picked by index (`n`), not time (`t`): a unit is exactly `fps`
+  // frames, but the timestamps of originals assembled before concatList existed
+  // can have drifted by seconds (see concatList).
   const keepExpr = keptRanges
-    .map((r) => `(gte(t\\,${r.start})*lt(t\\,${r.end}))`)
+    .map((r) => `(gte(n\\,${r.start * fps})*lt(n\\,${r.end * fps}))`)
     .join("+");
   if (!hasMasks) {
     await execFileAsync(
@@ -687,7 +720,7 @@ export async function cutVideoToKeptRanges(
       filterParts.push(
         `[${currentIn}]split=2[m_base_${i}][m_crop_${i}]`,
         `[m_crop_${i}]crop=${W}:${H}:${X}:${Y},scale=${downW}:${downH}:flags=neighbor,scale=${W}:${H}:flags=neighbor[m_pix_${i}]`,
-        `[m_base_${i}][m_pix_${i}]overlay=${X}:${Y}:enable='gte(t\\,${m.startSec - 0.005})*lte(t\\,${m.endSec + 0.005})'[${outTag}]`,
+        `[m_base_${i}][m_pix_${i}]overlay=${X}:${Y}:enable='gte(n\\,${m.startSec * fps - 0.03})*lte(n\\,${m.endSec * fps + 0.03})'[${outTag}]`,
       );
       currentIn = outTag;
     }

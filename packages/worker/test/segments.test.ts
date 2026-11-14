@@ -20,6 +20,7 @@ import {
   probeFrameCount,
   probeDimensions,
   cutVideoToKeptRanges,
+  concatList,
   SEGMENT_FPS,
   PREVIEW_WIDTH,
   PREVIEW_HEIGHT,
@@ -184,7 +185,7 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     const listPath = path.join(tmpDir, "segments.txt");
     await fs.writeFile(
       listPath,
-      segments.map((p) => `file '${p}'`).join("\n") + "\n",
+      concatList(segments.map((p) => ({ path: p, seconds: 1 }))),
     );
     const outPath = path.join(tmpDir, "timelapse.mp4");
     await execFileAsync(
@@ -203,6 +204,27 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     // 3 units → exactly 3 seconds, 90 frames, one decodable H.264 stream.
     expect(await probeFrameCount(outPath)).toBe(segments.length * SEGMENT_FPS);
     expect(await probeDurationSeconds(outPath)).toBeCloseTo(segments.length, 1);
+
+    // Every frame sits on the n/fps grid: cuts and masks address frames by
+    // their place in it, so a drifted timeline would cut the wrong minutes.
+    const { stdout: ptsOut } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "frame=pts_time",
+        "-of", "csv=p=0",
+        outPath,
+      ],
+      { timeout: 60_000 },
+    );
+    const pts = ptsOut
+      .split("\n")
+      .map((l) => l.replace(/,/g, "").trim())
+      .filter((l) => l.length > 0)
+      .map(Number);
+    expect(pts).toHaveLength(segments.length * SEGMENT_FPS);
+    pts.forEach((t, n) => expect(t).toBeCloseTo(n / SEGMENT_FPS, 2));
 
     // The copied stream must actually DECODE end to end (a bad splice can
     // still carry a plausible frame count).
