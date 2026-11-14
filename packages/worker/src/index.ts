@@ -172,7 +172,12 @@ if (heartbeatUrl) {
 const shutdown = async () => {
   console.log("Worker shutting down...");
   if (heartbeatTimer) clearInterval(heartbeatTimer);
-  await boss.stop();
+  // pg-boss waits `timeout` for in-flight jobs, then fails them so another
+  // replica retries them. Its default (30s) equals the pod's termination grace
+  // period, so the SIGKILL landed first and a compile cut off by a deploy sat
+  // "active" until the 2h expiry or the stuck-compiling timeout. Compiles run
+  // for minutes, so don't bother waiting long: fail them fast instead.
+  await boss.stop({ timeout: 10_000 });
   process.exit(0);
 };
 
