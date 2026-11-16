@@ -520,10 +520,6 @@ final class RoundButton: FlippedView, Animating, HoverSyncing {
     private func setHovered(_ on: Bool) {
         guard on != hovered else { return }
         hovered = on
-        // Only one row in a list is ever lit, even if AppKit loses an exit.
-        if on, let siblings = superview?.subviews {
-            for case let r as PressRow in siblings where r !== self { r.setHovered(false) }
-        }
         hover.setCSS(on ? 1 : 0, 100, .easeOut)
         animate()
     }
