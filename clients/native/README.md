@@ -182,7 +182,12 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   Linked Programs, Advanced) redrawn in AppKit with the app's tokens, Button
   squircle and press spring, row hover/press and route slides
   (`Kit.swift`, `Controls.swift`, `Pages.swift`), icons converted from
-  `assets/icons` by `svg2pdf.py`. It edits settings for real by running
+  `assets/icons` by `svg2pdf.py`. Its menu opens with an About-style header
+  (icon, version, Website/Docs/GitHub/Privacy & Terms links, Open Lookout)
+  instead of an About row; sub-pages use the header bar's round back button.
+  It asks for a 500pt-wide view and stretches to fit, so System Settings
+  doesn't widen its window for it (the classic 668pt pane did), and the
+  Filtered Apps list only builds the rows on screen. It edits settings for real by running
   `lookout --settings-pane '<json>'` (`src/settings_pane.rs`): with Lookout
   open that relays over the per-user single-instance socket and the app
   applies it (store, engine filter list, server reload, unlink revoke);

@@ -43,10 +43,13 @@ class Page: FlippedView {
     var outlines: [(CGRect, Role)] = []
     /// Card surfaces drawn by the page itself, under its text.
     var surfaces: [CGRect] = []
+    /// Images drawn by the page (the menu's app icon).
+    var images: [(NSImage, CGRect)] = []
     let pad: CGFloat = 20
 
-    private(set) lazy var backButton: LKButton = {
-        let b = LKButton("← Back", .secondary, card: true) { [unowned self] in self.root.back() }
+    /// Lookout's header-bar back button, not an in-page "← Back".
+    private(set) lazy var backButton: RoundButton = {
+        let b = RoundButton(.headerBack, label: "Back") { [unowned self] in self.root.back() }
         addSubview(b)
         return b
     }()
@@ -72,22 +75,24 @@ class Page: FlippedView {
         texts.append(TextItem(text: s, frame: rect, font: font, role: role, lineHeight: lh, wrap: wrap, align: align))
     }
 
-    /// `PageChrome`: Back, the title (20 bold) and the description (12 / 1.5).
-    func chrome(_ title: String, _ description: String, back: Bool, width: CGFloat, trailing: LKButton? = nil) -> CGFloat {
+    /// `PageChrome`: the title (20 bold), led by the round back button as in
+    /// Lookout's header bar, and the description (12 / 1.5).
+    func chrome(_ title: String, _ description: String, back: Bool, width: CGFloat) -> CGFloat {
         var y: CGFloat = 16
-        if back {
-            backButton.sizeToFit()
-            backButton.setFrameOrigin(CGPoint(x: pad, y: y))
-            y += LKButton.height + 16
-        }
         let inner = width - 2 * pad
-        if let b = trailing {
-            b.sizeToFit()
-            b.setFrameOrigin(CGPoint(x: width - pad - b.frame.width, y: y + (24 - LKButton.height) / 2))
+        if back {
+            // The circle's edge sits outside the content column, so the
+            // chevron lines up with the text below.
+            let s = RoundButton.size
+            backButton.frame = CGRect(x: pad - 10, y: y, width: s, height: s)
+            let tx = backButton.frame.maxX + 4
+            text(title, CGRect(x: tx, y: y + (s - 24) / 2, width: width - pad - tx, height: 24),
+                 Txt.font(20, .bold), .primary, lh: 24)
+            y += s + 6
+        } else {
+            text(title, CGRect(x: pad, y: y, width: inner, height: 24), Txt.font(20, .bold), .primary, lh: 24)
+            y += 24 + 4
         }
-        text(title, CGRect(x: pad, y: y, width: inner - (trailing.map { $0.frame.width + 12 } ?? 0), height: 24),
-             Txt.font(20, .bold), .primary, lh: 24)
-        y += 24 + 4
         let dh = Txt.height(description, Txt.font(12), width: inner, lineHeight: 18)
         text(description, CGRect(x: pad, y: y, width: inner, height: dh), Txt.font(12), .secondary, lh: 18, wrap: true)
         return y + dh + 16
@@ -95,6 +100,10 @@ class Page: FlippedView {
 
     override func draw(_ dirtyRect: NSRect) {
         let t = Theme.of(self)
+        for (image, rect) in images {
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true,
+                       hints: [.interpolation: NSImageInterpolation.high.rawValue])
+        }
         for rect in surfaces {
             paintBox(rect, radius: 10, fill: t.bgSurface, border: t.borderDefault)
         }
@@ -126,8 +135,14 @@ final class MenuPage: Page {
     private let advanced: MenuRow
     private let beta: MenuRow
     private let onboarding: MenuRow
-    private let about: MenuRow
     private let openButton: LKButton
+    /// The About page's links (screens/info.rs) plus Hack Club's privacy terms.
+    private let links = [
+        LinkLabel("Website", "https://lookout.hackclub.com"),
+        LinkLabel("Docs", "https://fallout.hackclub.com/docs"),
+        LinkLabel("GitHub", "https://github.com/hackclub/lookout/"),
+        LinkLabel("Privacy & Terms", "https://hackclub.com/privacy-and-terms"),
+    ]
 
     override init(root: PaneRoot) {
         filtered = MenuRow(.funnelFill, "Filtered Apps", "") { [unowned root] in root.go(.filteredApps) }
@@ -135,7 +150,6 @@ final class MenuPage: Page {
         advanced = MenuRow(.wrenchFill, "Advanced", "") { [unowned root] in root.go(.advanced) }
         beta = MenuRow(.power, "Beta updates", "Get new versions early. They can be rougher.", .toggle)
         onboarding = MenuRow(.play, "Show onboarding", "") { [unowned root] in root.openLink("lookout://onboarding") }
-        about = MenuRow(.infoFill, "About Lookout", "") { [unowned root] in root.openLink("lookout://settings/about") }
         openButton = LKButton("Open Lookout", .secondary, card: true) { [unowned root] in root.openLookout() }
         super.init(root: root)
         beta.onClick = { [unowned self] in
@@ -143,8 +157,9 @@ final class MenuPage: Page {
             self.root.setBeta(self.beta.isOn)
         }
         for r in [filtered, linked, advanced, beta] { card1.addSubview(r) }
-        for r in [onboarding, about] { card2.addSubview(r) }
+        card2.addSubview(onboarding)
         for v in [card1, card2, openButton] { addSubview(v) }
+        for l in links { addSubview(l) }
         beta.setOnImmediately(root.state.beta)
         stateChanged()
     }
@@ -161,19 +176,61 @@ final class MenuPage: Page {
             ? "Developer options"
             : "Custom server: " + s.apiBase.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
         if !root.writing { beta.isOn = s.beta }
-        about.detail = s.version.isEmpty ? "" : "Version \(s.version)"
         needsLayout = true
         root.relayout()
     }
 
+    /// The header: Lookout's icon, name and version centred like an About
+    /// panel, its links, and Open Lookout.
+    private func header(width: CGFloat) -> CGFloat {
+        let inner = width - 2 * pad
+        var y: CGFloat = 24
+        let side: CGFloat = 72
+        if let icon = root.lookoutIcon {
+            images.append((icon, CGRect(x: ((width - side) / 2).rounded(), y: y, width: side, height: side)))
+            y += side + 10
+        }
+        text("Lookout", CGRect(x: pad, y: y, width: inner, height: 24), Txt.font(20, .bold), .primary, lh: 24,
+             wrap: true, align: .center)
+        y += 24 + 2
+        var version = root.version.isEmpty ? "" : "Version \(root.version)"
+        if !version.isEmpty, root.state.betaSupported, root.state.beta { version += " (Beta)" }
+        if !version.isEmpty {
+            text(version, CGRect(x: pad, y: y, width: inner, height: 18), Txt.font(12), .secondary, lh: 18,
+                 wrap: true, align: .center)
+            y += 18
+        }
+        y += 10
+        // Website · Docs · GitHub · Privacy & Terms
+        let lh = Txt.lh(12)
+        let dot = "·"
+        let dotW = Txt.width(dot, Txt.font(12))
+        let gap: CGFloat = 8
+        let total = links.reduce(CGFloat(0)) { $0 + $1.fittingWidth } + CGFloat(links.count - 1) * (dotW + 2 * gap)
+        var x = ((width - total) / 2).rounded()
+        for (i, l) in links.enumerated() {
+            if i > 0 {
+                text(dot, CGRect(x: x + gap, y: y, width: dotW + 1, height: lh), Txt.font(12), .tertiary, lh: lh)
+                x += dotW + 2 * gap
+            }
+            l.frame = CGRect(x: x, y: y, width: l.fittingWidth + 1, height: lh)
+            x += l.fittingWidth
+        }
+        y += lh + 14
+        openButton.sizeToFit()
+        openButton.setFrameOrigin(CGPoint(x: ((width - openButton.frame.width) / 2).rounded(), y: y))
+        return y + LKButton.height + 20
+    }
+
     override func build(width: CGFloat, height: CGFloat) -> CGFloat {
         texts = []
+        images = []
         let s = root.state
-        var y = chrome("Settings", "Configure Lookout.", back: false, width: width, trailing: openButton)
+        var y = header(width: width)
         let inner = width - 2 * pad
         func fill(_ card: Card, _ rows: [MenuRow]) -> CGFloat {
             var ry: CGFloat = 4
-            for r in [filtered, linked, advanced, beta, onboarding, about] where r.superview === card {
+            for r in [filtered, linked, advanced, beta, onboarding] where r.superview === card {
                 r.isHidden = !rows.contains(r)
             }
             for r in rows {
@@ -189,7 +246,7 @@ final class MenuPage: Page {
         let h1 = fill(card1, rows1)
         card1.frame = CGRect(x: pad, y: y, width: inner, height: h1)
         y += h1 + 12
-        let h2 = fill(card2, [onboarding, about])
+        let h2 = fill(card2, [onboarding])
         card2.frame = CGRect(x: pad, y: y, width: inner, height: h2)
         y += h2 + 16
         needsDisplay = true
@@ -206,11 +263,17 @@ final class FilteredAppsPage: Page {
     private let list = FlippedView()
     private let skeleton = SkeletonRows()
     private let message = MessageView()
+    /// Every app the list shows, in order; only the rows on screen (plus a
+    /// few either side) exist as views, so opening the page and scrolling
+    /// stay cheap with hundreds of apps.
+    private var shown: [AppEntry] = []
+    private var checked: Set<String> = []
     private var rows: [String: AppRow] = [:]
-    private var order: [String] = []
+    private var rowWidth: CGFloat = 0
     /// What was filtered when the page opened: those stay on top.
     private let pinned: Set<String>
     private var query = ""
+    private var scrollObserver: NSObjectProtocol?
 
     override init(root: PaneRoot) {
         pinned = Set(root.state.filtered)
@@ -224,6 +287,10 @@ final class FilteredAppsPage: Page {
         card.addSubview(scroll)
         card.addSubview(message)
         for v in [search, card] { addSubview(v) }
+        scroll.contentView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
+        ) { [weak self] _ in self?.placeRows() }
         search.onChange = { [unowned self] q in
             self.query = q.lowercased()
             self.rebuildRows()
@@ -234,6 +301,10 @@ final class FilteredAppsPage: Page {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    deinit {
+        if let o = scrollObserver { NotificationCenter.default.removeObserver(o) }
+    }
 
     override func stateChanged() {
         rebuildRows()
@@ -247,39 +318,59 @@ final class FilteredAppsPage: Page {
             return
         }
         skeleton.removeFromSuperview()
-        let filtered = Set(root.filtered)
+        checked = Set(root.filtered)
         var all = apps
-        for name in filtered where !all.contains(where: { $0.name == name }) {
+        for name in checked where !all.contains(where: { $0.name == name }) {
             all.append(AppEntry(name: name, path: nil, running: false))
         }
-        let shown = all.filter { query.isEmpty || $0.name.lowercased().contains(query) }.sorted { a, b in
-            func group(_ e: AppEntry) -> Int { pinned.contains(e.name) ? 0 : (e.running ? 1 : 2) }
-            let ga = group(a), gb = group(b)
-            return ga != gb ? ga < gb : a.name.lowercased() < b.name.lowercased()
-        }.prefix(400)
+        var seen = Set<String>()
+        shown = Array(all.filter { (query.isEmpty || $0.name.lowercased().contains(query)) && seen.insert($0.name).inserted }
+            .sorted { a, b in
+                func group(_ e: AppEntry) -> Int { pinned.contains(e.name) ? 0 : (e.running ? 1 : 2) }
+                let ga = group(a), gb = group(b)
+                return ga != gb ? ga < gb : a.name.lowercased() < b.name.lowercased()
+            }.prefix(400))
         message.isHidden = !shown.isEmpty
         message.text = query.isEmpty ? "No apps detected" : "No matching apps"
-        var keep: [String: AppRow] = [:]
-        order = []
-        for app in shown {
-            let row: AppRow
-            if let r = rows[app.name] {
-                row = r
-                row.checked = filtered.contains(app.name)
+        placeRows()
+    }
+
+    private func makeRow(_ app: AppEntry) -> AppRow {
+        let row = AppRow(name: app.name, checked: checked.contains(app.name))
+        let name = app.name
+        row.onClick = { [unowned self] in self.root.toggleFiltered(name) }
+        list.addSubview(row)
+        if let path = app.path {
+            if let img = root.cachedIcon(path) {
+                row.setIcon(img, fade: false)
             } else {
-                row = AppRow(name: app.name, checked: filtered.contains(app.name))
-                let name = app.name
-                row.onClick = { [unowned self] in self.root.toggleFiltered(name) }
-                list.addSubview(row)
-                if let path = app.path {
-                    root.appIcon(path) { [weak row] img in row?.icon = img }
-                }
+                root.appIcon(path) { [weak row] img in row?.setIcon(img, fade: true) }
             }
-            keep[app.name] = row
-            order.append(app.name)
+        }
+        return row
+    }
+
+    /// Create the rows in view, drop the rest, and re-check hover (AppKit
+    /// doesn't send `mouseExited` to a row scrolled out from under the pointer).
+    private func placeRows() {
+        guard root.apps != nil, rowWidth > 0 else { return }
+        let h = AppRow.height
+        let visible = scroll.contentView.bounds
+        let first = max(0, Int(floor((visible.minY - 4) / h)) - 6)
+        let last = min(shown.count - 1, Int(ceil((visible.maxY - 4) / h)) + 6)
+        var keep: [String: AppRow] = [:]
+        if first <= last {
+            for i in first...last {
+                let app = shown[i]
+                let row = rows[app.name] ?? makeRow(app)
+                row.checked = checked.contains(app.name)
+                row.frame = CGRect(x: 4, y: 4 + CGFloat(i) * h, width: rowWidth - 8, height: h)
+                keep[app.name] = row
+            }
         }
         for (name, row) in rows where keep[name] == nil { row.removeFromSuperview() }
         rows = keep
+        for row in rows.values { row.syncHover() }
     }
 
     override func build(width: CGFloat, height: CGFloat) -> CGFloat {
@@ -291,17 +382,14 @@ final class FilteredAppsPage: Page {
         card.frame = CGRect(x: pad, y: y, width: inner, height: max(120, height - y - 16))
         scroll.frame = card.bounds.insetBy(dx: 1, dy: 1)
         message.frame = card.bounds
-        let w = scroll.contentSize.width
-        var ry: CGFloat = 4
-        for name in order {
-            rows[name]?.frame = CGRect(x: 4, y: ry, width: w - 8, height: AppRow.height)
-            ry += AppRow.height
-        }
+        rowWidth = scroll.contentSize.width
+        var contentH = 4 + CGFloat(shown.count) * AppRow.height + 4
         if skeleton.superview != nil {
-            skeleton.frame = CGRect(x: 0, y: 0, width: w, height: 4 + 12 * AppRow.height + 4)
-            ry = skeleton.frame.height - 4
+            skeleton.frame = CGRect(x: 0, y: 0, width: rowWidth, height: 4 + 12 * AppRow.height + 4)
+            contentH = skeleton.frame.height
         }
-        list.frame = CGRect(x: 0, y: 0, width: w, height: max(ry + 4, scroll.contentSize.height))
+        list.frame = CGRect(x: 0, y: 0, width: rowWidth, height: max(contentH, scroll.contentSize.height))
+        placeRows()
         needsDisplay = true
         return height
     }

@@ -14,7 +14,7 @@ enum ButtonVariant {
 
 /// `Button` at size Sm: the squircle background springs to 0.96 on press
 /// (1500 / 60) while the label stays put; hover blends the fill.
-final class LKButton: FlippedView, Animating {
+final class LKButton: FlippedView, Animating, HoverSyncing {
     var title: String {
         didSet { needsDisplay = true }
     }
@@ -97,19 +97,29 @@ final class LKButton: FlippedView, Animating {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseEntered(with event: NSEvent) {
+    override func mouseEntered(with event: NSEvent) { enter() }
+
+    override func mouseExited(with event: NSEvent) { leave() }
+
+    private func enter() {
         hovered = true
         guard isEnabled else { return }
         hover.set(1, .spring(.press))
         animate()
     }
 
-    override func mouseExited(with event: NSEvent) {
+    private func leave() {
         hovered = false
         if !pressed {
             hover.set(0, .spring(.press))
             animate()
         }
+    }
+
+    func syncHover() {
+        let inside = pointerInside(self)
+        guard inside != hovered else { return }
+        if inside { enter() } else { leave() }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -148,8 +158,9 @@ final class LKButton: FlippedView, Animating {
 
 /// `pressable_row`: hover fills the background (120ms ease-out), press
 /// scales the fill to 0.96 (120ms ease-out); the content stays put.
-class PressRow: FlippedView, Animating {
+class PressRow: FlippedView, Animating, HoverSyncing {
     var onClick: (() -> Void)?
+    private var hovered = false
     private var hover = Anim(0)
     private var press = Anim(0)
     private var pressed = false
@@ -165,14 +176,25 @@ class PressRow: FlippedView, Animating {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseEntered(with event: NSEvent) {
-        hover.setCSS(1, 120, .easeOut)
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    private func setHovered(_ on: Bool) {
+        guard on != hovered else { return }
+        hovered = on
+        hover.setCSS(on ? 1 : 0, 120, .easeOut)
         animate()
     }
 
-    override func mouseExited(with event: NSEvent) {
-        hover.setCSS(0, 120, .easeOut)
-        animate()
+    /// AppKit drops `mouseExited` when content scrolls out from under a
+    /// still pointer, which left rows lit up after a scroll: ask where the
+    /// pointer really is instead.
+    func syncHover() { setHovered(pointerInside(self)) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { hovered = false; hover.jump(0); press.jump(0); pressed = false }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -310,12 +332,7 @@ final class AppRow: PressRow {
             animate()
         }
     }
-    var icon: NSImage? {
-        didSet {
-            iconFade = Anim.fromTo(0, 1, .tween(200, .easeOut))
-            animate()
-        }
-    }
+    private(set) var icon: NSImage?
     private var check: Anim
     private var iconFade = Anim(1)
 
@@ -329,6 +346,13 @@ final class AppRow: PressRow {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Fade in only icons that arrive after the row is on screen.
+    func setIcon(_ image: NSImage, fade: Bool) {
+        icon = image
+        iconFade = fade ? Anim.fromTo(0, 1, .tween(200, .easeOut)) : Anim(1)
+        if fade { animate() } else { needsDisplay = true }
+    }
 
     override func tickExtra() -> Bool {
         let a = check.tick()
@@ -401,6 +425,183 @@ final class ProgramRow: FlippedView {
         let top = (h - tl - dl) / 2
         Txt.draw(label, at: CGPoint(x: x, y: top), width: w, font: Txt.font(13, .medium), color: t.textPrimary, lineHeight: tl)
         Txt.draw(detail, at: CGPoint(x: x, y: top + tl), width: w, font: Txt.font(12), color: t.textTertiary, lineHeight: dl)
+    }
+}
+
+// MARK: - Hover sync
+
+/// A control that can re-check whether the pointer is over it.
+protocol HoverSyncing: AnyObject {
+    func syncHover()
+}
+
+/// Whether the pointer is over the visible part of `view`.
+func pointerInside(_ view: NSView) -> Bool {
+    guard let w = view.window, w.isVisible else { return false }
+    let p = view.convert(w.mouseLocationOutsideOfEventStream, from: nil)
+    return view.visibleRect.contains(p)
+}
+
+/// Re-check hover for every control under `view` (after a scroll).
+func syncHover(in view: NSView) {
+    if let v = view as? HoverSyncing { v.syncHover() }
+    for sub in view.subviews where !sub.isHidden { syncHover(in: sub) }
+}
+
+// MARK: - Header button
+
+/// The header bar's round back button (ui/header_bar.rs `HeaderBtn`,
+/// `Action` kind): 30px circle, transparent at rest, `headerbar_control` on
+/// hover and `headerbar_control_hover` while pressed, the glyph going from
+/// secondary to primary text (100ms ease-out each).
+final class RoundButton: FlippedView, Animating, HoverSyncing {
+    let icon: Icon
+    var onClick: (() -> Void)?
+    private var hovered = false
+    private var pressed = false
+    private var hover = Anim(0)
+    private var press = Anim(0)
+    private var tracking: NSTrackingArea?
+
+    static let size: CGFloat = 30
+
+    init(_ icon: Icon, label: String, onClick: (() -> Void)? = nil) {
+        self.icon = icon
+        self.onClick = onClick
+        super.init(frame: CGRect(x: 0, y: 0, width: RoundButton.size, height: RoundButton.size))
+        toolTip = label
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(label)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let t = Theme.of(self)
+        let h = hover.v, p = press.v
+        let bg = mix(mix(clearColor, t.headerbarControl, h), t.headerbarControlHover, p)
+        if bg.alphaComponent > 0.001 {
+            bg.setFill()
+            NSBezierPath(ovalIn: bounds).fill()
+        }
+        let fg = mix(t.textSecondary, t.textPrimary, max(h, p))
+        icon.draw(in: CGRect(x: bounds.midX - 8, y: bounds.midY - 8, width: 16, height: 16), color: fg)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(t)
+        tracking = t
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func setHovered(_ on: Bool) {
+        guard on != hovered else { return }
+        hovered = on
+        hover.setCSS(on ? 1 : 0, 100, .easeOut)
+        animate()
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    func syncHover() { setHovered(pointerInside(self)) }
+
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        press.setCSS(1, 100, .easeOut)
+        animate()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard pressed else { return }
+        pressed = false
+        press.setCSS(0, 100, .easeOut)
+        animate()
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { hovered = false; pressed = false; hover.jump(0); press.jump(0) }
+    }
+
+    private func animate() {
+        needsDisplay = true
+        Animator.shared.run(self)
+    }
+
+    func animationFrame() -> Bool {
+        let a = hover.tick()
+        let b = press.tick()
+        needsDisplay = true
+        return a || b
+    }
+}
+
+// MARK: - Link
+
+/// A plain text link (screens/info.rs `link`): secondary text that
+/// brightens to primary on hover.
+final class LinkLabel: FlippedView {
+    let title: String
+    let url: URL
+    private var hovered = false {
+        didSet { needsDisplay = true }
+    }
+    private var tracking: NSTrackingArea?
+    static let font = Txt.font(12)
+
+    init(_ title: String, _ url: String) {
+        self.title = title
+        self.url = URL(string: url)!
+        super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.link)
+        setAccessibilityLabel(title)
+        toolTip = url
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    var fittingWidth: CGFloat { Txt.width(title, LinkLabel.font) }
+
+    override func accessibilityPerformPress() -> Bool {
+        NSWorkspace.shared.open(url)
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let t = Theme.of(self)
+        Txt.draw(title, at: .zero, width: bounds.width + 1, font: LinkLabel.font,
+                 color: hovered ? t.textPrimary : t.textSecondary, lineHeight: bounds.height)
+    }
+
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(t)
+        tracking = t
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { NSWorkspace.shared.open(url) }
     }
 }
 

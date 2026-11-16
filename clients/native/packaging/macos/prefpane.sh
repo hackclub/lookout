@@ -50,7 +50,7 @@ plutil -lint "$pane/Contents/Info.plist"
 # The Settings icons, as template PDFs drawn from the app's own SVGs (the
 # names match `Icon` in Kit.swift).
 python3 "$here/svg2pdf.py" "$pane/Contents/Resources/icons" \
-  $(for n in funnel-fill link-bold wrench-fill lk-power lk-play info-fill caret-right-bold check-bold; do
+  $(for n in funnel-fill link-bold wrench-fill lk-power lk-play lk-header-back caret-right-bold check-bold; do
       echo "$root/assets/icons/$n.svg"; done)
 if [ -n "$icon" ]; then
   cp "$icon" "$pane/Contents/Resources/icon.icns"

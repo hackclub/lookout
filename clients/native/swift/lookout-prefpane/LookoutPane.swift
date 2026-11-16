@@ -18,6 +18,8 @@ final class LookoutPane: NSPreferencePane {
     override func loadMainView() -> NSView {
         Icon.bundle = bundle
         let r = PaneRoot(frame: NSRect(x: 0, y: 0, width: PaneRoot.width, height: PaneRoot.height), paneBundle: bundle)
+        // Fill whatever room System Settings gives the pane.
+        r.autoresizingMask = [.width, .height]
         root = r
         mainView = r
         mainViewDidLoad()
@@ -120,7 +122,10 @@ final class Bridge {
 // MARK: - Root
 
 final class PaneRoot: FlippedView, Animating {
-    static let width: CGFloat = 668
+    /// System Settings widens its window to fit a pane wider than its own
+    /// detail column (the classic 668pt pane did), so ask for no more than
+    /// that column and stretch to whatever we're given.
+    static let width: CGFloat = 500
     static let height: CGFloat = 560
     static let appID = "com.hackclub.lookout"
 
@@ -148,6 +153,7 @@ final class PaneRoot: FlippedView, Animating {
         let sub: Sub
         let scroll: NSScrollView
         let page: Page
+        let scrollObserver: NSObjectProtocol
         var x: Anim
         var opacity: Anim
         var leaving: Bool
@@ -193,7 +199,7 @@ final class PaneRoot: FlippedView, Animating {
         } else {
             bridge = nil
             if missing == nil {
-                for l in layers { l.scroll.removeFromSuperview() }
+                for l in layers { drop(l) }
                 layers = []
                 let m = MissingPage(root: self)
                 addSubview(m)
@@ -211,6 +217,8 @@ final class PaneRoot: FlippedView, Animating {
             ) { [weak self] _ in self?.refresh() }
         }
         watch()
+        // Have the app list ready before Filtered Apps opens.
+        loadApps()
     }
 
     func disappeared() {
@@ -365,15 +373,52 @@ final class PaneRoot: FlippedView, Animating {
         (try? FileManager.default.trashItem(at: paneBundle.bundleURL, resultingItemURL: nil)) != nil
     }
 
+    func cachedIcon(_ path: String) -> NSImage? { iconCache[path] }
+
     func appIcon(_ path: String, _ done: @escaping (NSImage) -> Void) {
         if let i = iconCache[path] { return done(i) }
         iconQueue.async {
-            let img = NSWorkspace.shared.icon(forFile: path)
+            // Workspace icons carry every size up to 1024px and decode lazily,
+            // on the main thread, the first time they're drawn: render the one
+            // size the rows use here instead.
+            let img = PaneRoot.thumbnail(NSWorkspace.shared.icon(forFile: path), side: 20)
             DispatchQueue.main.async { [weak self] in
                 self?.iconCache[path] = img
                 done(img)
             }
         }
+    }
+
+    /// `image` as a single bitmap of `side` points at 2x.
+    static func thumbnail(_ image: NSImage, side: CGFloat) -> NSImage {
+        let px = Int(side * 2)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return image }
+        rep.size = NSSize(width: side, height: side)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSImage(size: rep.size)
+        out.addRepresentation(rep)
+        return out
+    }
+
+    /// Lookout's icon for the header: the pane's own (the app's icon.icns),
+    /// else the installed app's.
+    private(set) lazy var lookoutIcon: NSImage? = {
+        if let i = self.paneBundle.image(forResource: "icon") { return i }
+        if let app = self.appURL { return NSWorkspace.shared.icon(forFile: app.path) }
+        return nil
+    }()
+
+    /// The app's version; before Lookout answers, the pane's (built with it).
+    var version: String {
+        if !state.version.isEmpty { return state.version }
+        return paneBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     }
 
     func remoteImage(_ url: URL, _ done: @escaping (NSImage) -> Void) {
@@ -433,7 +478,7 @@ final class PaneRoot: FlippedView, Animating {
     private func push(_ sub: Sub, animated: Bool) {
         let dir: Double = sub == .menu ? -1 : 1
         if !animated {
-            for l in layers { l.scroll.removeFromSuperview() }
+            for l in layers { drop(l) }
             layers = []
         }
         for i in layers.indices where !layers[i].leaving {
@@ -459,9 +504,15 @@ final class PaneRoot: FlippedView, Animating {
             scroll.borderType = .noBorder
             scroll.documentView = page
             addSubview(scroll)
+            scroll.contentView.postsBoundsChangedNotifications = true
+            let observer = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
+            ) { [weak page] _ in
+                if let page = page { syncHover(in: page) }
+            }
             let x = animated ? Anim.fromTo(14 * dir, 0, .spring(.route)) : Anim(0)
             let o = animated ? Anim.fromTo(0, 1, .tween(160, .easeOut), delay: 40) : Anim(1)
-            layers.append(Layer(sub: sub, scroll: scroll, page: page, x: x, opacity: o, leaving: false))
+            layers.append(Layer(sub: sub, scroll: scroll, page: page, scrollObserver: observer, x: x, opacity: o, leaving: false))
         }
         current = sub
         relayout()
@@ -477,10 +528,15 @@ final class PaneRoot: FlippedView, Animating {
             let b = layers[i].opacity.tick()
             moving = moving || a || b
         }
-        for l in layers where l.leaving && !l.opacity.isAnimating { l.scroll.removeFromSuperview() }
+        for l in layers where l.leaving && !l.opacity.isAnimating { drop(l) }
         layers.removeAll { $0.leaving && !$0.opacity.isAnimating }
         positionLayers()
         return moving
+    }
+
+    private func drop(_ l: Layer) {
+        l.scroll.removeFromSuperview()
+        NotificationCenter.default.removeObserver(l.scrollObserver)
     }
 
     private func positionLayers() {
@@ -521,6 +577,11 @@ final class PaneRoot: FlippedView, Animating {
     override func layout() {
         super.layout()
         layoutPages()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        relayout()
     }
 
     // MARK: Keys

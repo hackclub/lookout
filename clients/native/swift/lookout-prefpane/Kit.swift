@@ -46,6 +46,9 @@ struct Theme {
     let textTertiary: NSColor
     let borderDefault: NSColor
     let borderHover: NSColor
+    /// The header bar's round buttons: hover fill, then pressed fill.
+    let headerbarControl: NSColor
+    let headerbarControlHover: NSColor
     let accent = rgb(0x3b82f6)
     /// `oklab_mix_black(accent, 0.88)`.
     let accentHover = rgb(0x306dd0)
@@ -57,11 +60,13 @@ struct Theme {
     static let darkTheme = Theme(
         dark: true, bgSurface: white(0.08), bgSelected: white(0.12), textPrimary: rgb(0xffffff),
         textInverse: rgb(0x000000), textSecondary: white(0.7), textTertiary: white(0.5),
-        borderDefault: white(0.12), borderHover: white(0.22))
+        borderDefault: white(0.12), borderHover: white(0.22),
+        headerbarControl: white(0.1), headerbarControlHover: white(0.18))
     static let lightTheme = Theme(
         dark: false, bgSurface: white(0.5), bgSelected: black(0.1), textPrimary: black(0.85),
         textInverse: rgb(0xffffff), textSecondary: black(0.65), textTertiary: black(0.45),
-        borderDefault: black(0.12), borderHover: black(0.22))
+        borderDefault: black(0.12), borderHover: black(0.22),
+        headerbarControl: black(0.08), headerbarControlHover: black(0.16))
 
     static func of(_ view: NSView) -> Theme {
         view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? darkTheme : lightTheme
@@ -507,7 +512,7 @@ enum Icon: String {
     case wrenchFill = "wrench-fill"
     case power = "lk-power"
     case play = "lk-play"
-    case infoFill = "info-fill"
+    case headerBack = "lk-header-back"
     case caretRight = "caret-right-bold"
     case checkBold = "check-bold"
 
