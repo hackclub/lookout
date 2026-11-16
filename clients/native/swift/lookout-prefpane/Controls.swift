@@ -165,10 +165,16 @@ class PressRow: FlippedView, Animating, HoverSyncing {
     private var press = Anim(0)
     private var pressed = false
     private var tracking: NSTrackingArea?
+    /// Off for rows in a `HoverListScrollView`, which lights them itself: a
+    /// row's own enter/exit events go stale while its list scrolls.
+    var tracksHover = true {
+        didSet { updateTrackingAreas() }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let t = tracking { removeTrackingArea(t) }
+        if let t = tracking { removeTrackingArea(t); tracking = nil }
+        guard tracksHover else { return }
         let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(t)
         tracking = t
@@ -176,11 +182,11 @@ class PressRow: FlippedView, Animating, HoverSyncing {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseEntered(with event: NSEvent) { if tracksHover { setHovered(true) } }
 
-    override func mouseExited(with event: NSEvent) { setHovered(false) }
+    override func mouseExited(with event: NSEvent) { if tracksHover { setHovered(false) } }
 
-    private func setHovered(_ on: Bool) {
+    func setHovered(_ on: Bool) {
         guard on != hovered else { return }
         hovered = on
         // Only one row in a list is ever lit, even if AppKit loses an exit.
@@ -194,7 +200,7 @@ class PressRow: FlippedView, Animating, HoverSyncing {
     /// AppKit drops `mouseExited` when content scrolls out from under a
     /// still pointer, which left rows lit up after a scroll: ask where the
     /// pointer really is instead.
-    func syncHover() { setHovered(pointerInside(self)) }
+    func syncHover() { if tracksHover { setHovered(pointerInside(self)) } }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -459,6 +465,48 @@ func pointerInside(_ view: NSView) -> Bool {
 func syncHover(in view: NSView) {
     if let v = view as? HoverSyncing { v.syncHover() }
     for sub in view.subviews where !sub.isHidden { syncHover(in: sub) }
+}
+
+/// A scroll view that lights the one row under the pointer itself, from
+/// its own mouse and scroll events, instead of leaving it to each row's
+/// tracking area (those miss exits while the content scrolls under a still
+/// pointer, which left rows lit).
+final class HoverListScrollView: NSScrollView {
+    /// The rows currently in the list.
+    var rows: () -> [PressRow] = { [] }
+    private var tracking: NSTrackingArea?
+    /// The pointer in window coordinates, nil while it's outside.
+    private var pointer: NSPoint?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                               owner: self)
+        addTrackingArea(t)
+        tracking = t
+    }
+
+    override func mouseEntered(with event: NSEvent) { update(event.locationInWindow) }
+    override func mouseMoved(with event: NSEvent) { update(event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { update(nil) }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        update(event.locationInWindow)
+    }
+
+    /// Re-light after the content moved (scrolling, bouncing, rows rebuilt).
+    func refresh() { update(pointer) }
+
+    private func update(_ location: NSPoint?) {
+        pointer = location
+        var hit: PressRow?
+        if let l = location, visibleRect.contains(convert(l, from: nil)) {
+            hit = rows().first { $0.bounds.contains($0.convert(l, from: nil)) }
+        }
+        for r in rows() { r.setHovered(r === hit) }
+    }
 }
 
 // MARK: - Header button

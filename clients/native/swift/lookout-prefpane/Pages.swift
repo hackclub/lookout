@@ -259,7 +259,7 @@ final class MenuPage: Page {
 final class FilteredAppsPage: Page {
     private let search = LKField(placeholder: "Search apps...")
     private let card = Card()
-    private let scroll = NSScrollView()
+    private let scroll = HoverListScrollView()
     private let list = FlippedView()
     private let skeleton = SkeletonRows()
     private let message = MessageView()
@@ -284,6 +284,7 @@ final class FilteredAppsPage: Page {
         scroll.scrollerStyle = .overlay
         scroll.borderType = .noBorder
         scroll.documentView = list
+        scroll.rows = { [unowned self] in Array(self.rows.values) }
         card.addSubview(scroll)
         card.addSubview(message)
         for v in [search, card] { addSubview(v) }
@@ -337,6 +338,7 @@ final class FilteredAppsPage: Page {
 
     private func makeRow(_ app: AppEntry) -> AppRow {
         let row = AppRow(name: app.name, checked: checked.contains(app.name))
+        row.tracksHover = false
         let name = app.name
         row.onClick = { [unowned self] in self.root.toggleFiltered(name) }
         list.addSubview(row)
@@ -350,8 +352,8 @@ final class FilteredAppsPage: Page {
         return row
     }
 
-    /// Create the rows in view, drop the rest, and re-check hover (AppKit
-    /// doesn't send `mouseExited` to a row scrolled out from under the pointer).
+    /// Create the rows in view, drop the rest, and re-light the row under
+    /// the pointer.
     private func placeRows() {
         guard root.apps != nil, rowWidth > 0 else { return }
         let h = AppRow.height
@@ -370,7 +372,7 @@ final class FilteredAppsPage: Page {
         }
         for (name, row) in rows where keep[name] == nil { row.removeFromSuperview() }
         rows = keep
-        for row in rows.values { row.syncHover() }
+        scroll.refresh()
     }
 
     override func build(width: CGFloat, height: CGFloat) -> CGFloat {
