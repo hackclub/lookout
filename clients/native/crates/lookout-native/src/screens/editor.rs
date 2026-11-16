@@ -34,6 +34,7 @@ use crate::editor_math::{self as em, CutInterval, Mask, Region, VideoUnit, View}
 use crate::filmstrip::{self, Filmstrip};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, Theme, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing, minutes_flow};
 use crate::ui::icon::Icon;
@@ -163,6 +164,8 @@ pub struct TimelapseEditor {
     time: f64,
     playing: bool,
     drag: Option<Drag>,
+    /// A trackpad tap when a dragged edge meets something (see `haptics`).
+    detent: crate::platform::haptics::Detent,
     /// The filmstrip's bounds (= the timeline's width), window coordinates.
     strip: Bounds<Pixels>,
     stage: Bounds<Pixels>,
@@ -224,6 +227,7 @@ impl TimelapseEditor {
             time: 0.0,
             playing: false,
             drag: None,
+            detent: Default::default(),
             strip: Bounds::default(),
             stage: Bounds::default(),
             mini: Bounds::default(),
@@ -829,6 +833,7 @@ impl TimelapseEditor {
             Drag::Minimap { .. } | Drag::MaskSpan { .. } | Drag::MaskBox { .. } => {}
             _ => {}
         }
+        self.detent.start();
         self.drag = Some(drag);
         cx.notify();
     }
@@ -868,16 +873,20 @@ impl TimelapseEditor {
             Drag::Region { index, mode, grab, anchor } => {
                 if let Some(mut r) = self.regions.get(index).copied() {
                     let mut seek_to = None;
+                    // Which edges moved, for the haptic: (start, end).
+                    let moved;
                     match mode {
                         DragMode::Move => {
                             let width = r.end - r.start;
                             let start = ((u - grab).round() as i64).clamp(0, (n - width).max(0));
                             r.start = start;
                             r.end = start + width;
+                            moved = (true, true);
                         }
                         DragMode::Start => {
                             r.start = (u.round() as i64).clamp(0, r.end - 1);
                             seek_to = Some(r.start as f64 + 0.02);
+                            moved = (true, false);
                         }
                         DragMode::End => {
                             let rounded = u.round() as i64;
@@ -885,12 +894,19 @@ impl TimelapseEditor {
                                 r.start = rounded.max(0);
                                 r.end = anchor + 1;
                                 seek_to = Some(r.start as f64 + 0.02);
+                                moved = (true, false);
                             } else {
                                 r.end = n.min((r.start + 1).max(rounded));
                                 seek_to = Some((n as f64 - 0.05).min(r.end as f64 + 0.02));
+                                moved = (false, true);
                             }
                         }
                     }
+                    // Tap as a moving edge meets the timeline's end or another cut.
+                    let others = || self.regions.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, o)| *o);
+                    let touching = (moved.0 && (r.start == 0 || others().any(|o| o.end == r.start)))
+                        || (moved.1 && (r.end == n || others().any(|o| o.start == r.end)));
+                    self.detent.update(touching);
                     self.regions[index] = r;
                     self.selected = Some(index);
                     if let Some(t) = seek_to {
@@ -936,10 +952,12 @@ impl TimelapseEditor {
                 let (dx, dy) = (p.0 - at.0, p.1 - at.1);
                 let (ox, oy, ow, oh) = orig;
                 const MIN: f32 = 0.02;
+                let mut touching = false;
                 if let Some(m) = self.mask_mut(&id) {
                     if grip == Grip::default() {
                         m.x = (ox + dx).clamp(0.0, 1.0 - ow);
                         m.y = (oy + dy).clamp(0.0, 1.0 - oh);
+                        touching = m.x <= 0.0 || m.y <= 0.0 || m.x >= 1.0 - ow || m.y >= 1.0 - oh;
                     } else {
                         let (mut l, mut t, mut r, mut b) = (ox, oy, ox + ow, oy + oh);
                         if grip.l {
@@ -958,8 +976,11 @@ impl TimelapseEditor {
                         m.y = t;
                         m.w = r - l;
                         m.h = b - t;
+                        // Only the edges being dragged count as arriving at the frame's edge.
+                        touching = (grip.l && l <= 0.0) || (grip.r && r >= 1.0) || (grip.t && t <= 0.0) || (grip.b && b >= 1.0);
                     }
                 }
+                self.detent.update(touching);
                 cx.notify();
                 Some(Drag::MaskBox { id, grip, at, orig })
             }
@@ -996,6 +1017,15 @@ impl TimelapseEditor {
         if em::masks_overlapping(&others, s, e, None) >= em::MAX_MASK_LANES {
             return;
         }
+        // Tap as a moving edge meets the timeline's end or a cut's edge.
+        let on_cut = |v: f64| self.regions.iter().any(|r| (r.start as f64 - v).abs() < 1e-9 || (r.end as f64 - v).abs() < 1e-9);
+        let (ms, me) = match mode {
+            DragMode::Move => (true, true),
+            DragMode::Start => (true, false),
+            DragMode::End => (false, true),
+        };
+        let touching = (ms && (s <= 0.0 || on_cut(s))) || (me && (e >= n || on_cut(e)));
+        self.detent.update(touching);
         if let Some(mm) = self.mask_mut(id) {
             mm.start = s;
             mm.end = e;
@@ -1394,17 +1424,21 @@ impl Render for TimelapseEditor {
                     .text_center()
                     .p(px(20.0))
                     .child(match units {
-                        Some(_) => ProgressRing::new("editor-progress", self.progress).show_percent().into_any_element(),
+                        Some(_) => ProgressRing::new("editor-progress", self.progress).show_percent().aria_label("Preparing your timelapse").into_any_element(),
                         None => Spinner::new(SpinnerSize::Lg).into_any_element(),
                     })
                     .child(
                         div()
-                            .child(div().ts(16.0).w600().text_color(t.text_primary).child("Preparing your timelapse"))
-                            .child(div().ts_lh(13.0, 1.5).text_color(t.text_secondary).mt(px(4.0)).max_w(px(340.0)).child(match units {
-                                Some(n) if n > 0 => format!("Stitching {n} minute{} of footage.", if n == 1 { "" } else { "s" }),
-                                // The Tauri app printed this placeholder before the count arrived.
-                                _ => "oooooooooooo".to_string(),
-                            })),
+                            .child(div().a11y_status("prep-title", "Preparing your timelapse", Live::Polite).ts(16.0).w600().text_color(t.text_primary).child("Preparing your timelapse"))
+                            .child({
+                                let text = match units {
+                                    Some(n) if n > 0 => format!("Stitching {n} minute{} of footage.", if n == 1 { "" } else { "s" }),
+                                    // The Tauri app printed this placeholder before the count arrived.
+                                    _ => "oooooooooooo".to_string(),
+                                };
+                                let spoken = if text.starts_with('o') { String::new() } else { text.clone() };
+                                div().a11y_text("prep-body", spoken).ts_lh(13.0, 1.5).text_color(t.text_secondary).mt(px(4.0)).max_w(px(340.0)).child(text)
+                            }),
                     )
                     .into_any_element();
             }
@@ -1497,6 +1531,7 @@ impl Render for TimelapseEditor {
                             .px(px(8.0))
                             .py(px(3.0))
                             .rounded(px(6.0))
+                            .a11y_status("will-be-removed", "Will be removed", Live::Polite)
                             .child("Will be removed"),
                     ),
             );
@@ -1525,8 +1560,53 @@ impl Render for TimelapseEditor {
 
         // Ruler: timecodes over dense ticks; owns scrubbing.
         let (label_step, minor) = ruler_steps(ppu);
+        // The ruler owns scrubbing, so it is the playhead's slider for
+        // assistive technology: one step is one recorded minute.
+        let unit_now = em::unit_at_time(self.time, n);
+        let in_cut = em::region_at_time(self.time, &normalized).is_some();
+        let step_to = |delta: i64| {
+            let e = cx.entity();
+            move |_: Option<&gpui_kit::gpui::accesskit::ActionData>, _: &mut Window, cx: &mut App| {
+                e.update(cx, |e, cx| {
+                    let n = e.n() as i64;
+                    if n == 0 {
+                        return;
+                    }
+                    let u = (em::unit_at_time(e.time, e.n()) + delta).clamp(0, n - 1);
+                    e.seek(u as f64, cx);
+                    e.reveal(u as f64);
+                })
+            }
+        };
         let mut ruler = div()
             .id("editor-ruler")
+            .role(Role::Slider)
+            .aria_label("Playhead")
+            .aria_orientation(gpui_kit::gpui::Orientation::Horizontal)
+            .aria_min_numeric_value(1.0)
+            .aria_max_numeric_value(n.max(1) as f64)
+            .aria_numeric_value_step(1.0)
+            .aria_numeric_value((unit_now + 1) as f64)
+            .aria_value(crate::ui::a11y::editor_playhead_text(self.time, n, in_cut))
+            .on_a11y_action(AccessibleAction::Increment, step_to(1))
+            .on_a11y_action(AccessibleAction::Decrement, step_to(-1))
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let e = cx.entity();
+                move |data, _, cx| {
+                    if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(v)) = data {
+                        let v = *v;
+                        e.update(cx, |e, cx| {
+                            let n = e.n();
+                            if n == 0 {
+                                return;
+                            }
+                            let u = (v.round() as i64 - 1).clamp(0, n as i64 - 1);
+                            e.seek(u as f64, cx);
+                            e.reveal(u as f64);
+                        })
+                    }
+                }
+            })
             .relative()
             .h(px(RULER_H))
             .overflow_hidden()
@@ -1599,6 +1679,8 @@ impl Render for TimelapseEditor {
         let gap_c = t.text_quaternary;
         let mut strip = div()
             .id("editor-strip")
+            .role(Role::List)
+            .aria_label("Cuts")
             .relative()
             .h(px(STRIP_H))
             .cursor(CursorStyle::Crosshair)
@@ -1722,6 +1804,19 @@ impl Render for TimelapseEditor {
             strip = strip.child(
                 div()
                     .id(("region", i))
+                    .role(Role::ListItem)
+                    .aria_label(crate::ui::a11y::cut_label(r.start as f64, r.end as f64))
+                    .aria_selected(selected)
+                    .on_a11y_click({
+                        let e = cx.entity();
+                        move |_, cx| {
+                            e.update(cx, |e, cx| {
+                                e.selected = Some(i);
+                                e.sel_mask = None;
+                                cx.notify();
+                            })
+                        }
+                    })
                     .absolute()
                     .top_0()
                     .bottom_0()
@@ -1784,7 +1879,12 @@ impl Render for TimelapseEditor {
         // Mask lanes.
         let lanes_h = self.lane_h.get();
         // `lanes_h` includes a 6px gap above the first lane.
-        let mut lanes_el = div().relative().h(px(lanes_h)).overflow_hidden();
+        let mut lanes_el = div()
+            .id("editor-mask-lanes")
+            .when(self.masks_supported, |d| d.role(Role::List).aria_label("Masks"))
+            .relative()
+            .h(px(lanes_h))
+            .overflow_hidden();
         if have_w {
             for (mi, m) in self.masks.clone().into_iter().enumerate() {
                 let lane = lanes[mi];
@@ -2014,9 +2114,11 @@ impl Render for TimelapseEditor {
                 .text_color(t.text_primary)
                 .border(t.border_hover)
         };
-        let icon_btn = |id: &'static str, icon: Icon, tip: &'static str| tool(id).fixed(CTRL, CTRL).padding(0.0, 0.0).tooltip(tip).child(icon.el(17.0, t.text_primary));
+        let icon_btn = |id: &'static str, icon: Icon, label: &'static str, tip: &'static str| {
+            tool(id).fixed(CTRL, CTRL).padding(0.0, 0.0).tooltip(tip).aria_label(label).child(icon.el(17.0, t.text_primary))
+        };
         let text_btn = |id: &'static str, icon: Icon, label: &'static str| {
-            tool(id).padding(10.0, 16.0).font_size(14.0).gap(8.0).child(icon.el(16.0, t.text_primary)).child(label)
+            tool(id).padding(10.0, 16.0).font_size(14.0).gap(8.0).aria_label(label).child(icon.el(16.0, t.text_primary)).child(label)
         };
         let (e_play, e_in, e_out, e_cut, e_mask, e_del, e_clear, e_pub) =
             (cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity());
@@ -2027,16 +2129,21 @@ impl Render for TimelapseEditor {
             .gap(px(8.0))
             .mt(px(6.0))
             .child(
-                icon_btn("editor-play", if self.playing { Icon::VpPause } else { Icon::VpPlay }, if self.playing { "Pause (Space)" } else { "Play (Space)" })
+                icon_btn(
+                    "editor-play",
+                    if self.playing { Icon::VpPause } else { Icon::VpPlay },
+                    if self.playing { "Pause" } else { "Play" },
+                    if self.playing { "Pause (Space)" } else { "Play (Space)" },
+                )
                     .on_click(move |_, _, cx| e_play.update(cx, |e, cx| e.toggle_play(cx))),
             )
             .child(
-                icon_btn("editor-zoom-in", Icon::ZoomIn, "Zoom in (=)")
+                icon_btn("editor-zoom-in", Icon::ZoomIn, "Zoom in", "Zoom in (=)")
                     .disabled(self.view.zoom >= max_zoom - 1e-3)
                     .on_click(move |_, _, cx| e_in.update(cx, |e, cx| e.zoom_by(1.6, None, true, cx))),
             )
             .child(
-                icon_btn("editor-zoom-out", Icon::ZoomOut, "Zoom out (−)")
+                icon_btn("editor-zoom-out", Icon::ZoomOut, "Zoom out", "Zoom out (−)")
                     .disabled(!zoomed)
                     .on_click(move |_, _, cx| e_out.update(cx, |e, cx| e.zoom_by(1.0 / 1.6, None, true, cx))),
             )
@@ -2060,6 +2167,7 @@ impl Render for TimelapseEditor {
             })
             .child(
                 div()
+                    .a11y_text("editor-kept", crate::ui::a11y::kept_summary(kept, removed))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
@@ -2078,6 +2186,7 @@ impl Render for TimelapseEditor {
             .when(has_selection, |d| {
                 d.child(
                     tool("editor-delete")
+                        .aria_label(if self.sel_mask.is_some() { "Delete mask" } else { "Remove cut" })
                         .padding(10.0, 14.0)
                         .font_size(14.0)
                         .gap(7.0)
@@ -2145,8 +2254,23 @@ impl TimelapseEditor {
         let id = m.id.clone();
         let video = self.video.clone();
         let mask = m.clone();
+        let number = self.masks.iter().position(|x| x.id == m.id).map(|i| i + 1).unwrap_or(1);
+        let id_a = m.id.clone();
         let mut el = div()
             .id(SharedString::from(format!("mask-box-{}", m.id)))
+            .role(Role::Button)
+            .aria_label(format!("Mask {number}"))
+            .aria_description("Pixelated on the video")
+            .aria_selected(selected)
+            .on_a11y_click({
+                let me = cx.entity();
+                move |_, cx| {
+                    me.update(cx, |e, cx| {
+                        e.select_mask(Some(id_a.clone()));
+                        cx.notify();
+                    })
+                }
+            })
             .absolute()
             .left(px(x))
             .top(px(y))
@@ -2271,8 +2395,27 @@ impl TimelapseEditor {
         let (g0, g1) = ((left >= -7.0).then(|| grip(true, cx)), (right <= w + 7.0).then(|| grip(false, cx)));
         let id = m.id.clone();
         let id_h = m.id.clone();
+        let number = self.masks.iter().position(|x| x.id == m.id).map(|i| i + 1).unwrap_or(1);
+        let id_a = m.id.clone();
         div()
             .id(SharedString::from(format!("mask-span-{}", m.id)))
+            .role(Role::ListItem)
+            .aria_label(crate::ui::a11y::mask_label(number, m.start, m.end))
+            .aria_selected(selected)
+            .on_a11y_click({
+                let me = cx.entity();
+                move |_, cx| {
+                    me.update(cx, |e, cx| {
+                        let Some(m) = e.masks.iter().find(|m| m.id == id_a).cloned() else { return };
+                        e.select_mask(Some(id_a.clone()));
+                        // Show its box: put the playhead inside the span.
+                        if !m.active_at(e.time) {
+                            e.seek(m.start + 0.02, cx);
+                        }
+                        cx.notify();
+                    })
+                }
+            })
             .absolute()
             .top(px(top))
             .left(px(vl))

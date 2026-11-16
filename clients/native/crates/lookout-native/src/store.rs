@@ -157,7 +157,7 @@ pub fn config_dir() -> PathBuf {
     base.join(APP_ID)
 }
 
-fn state_path() -> PathBuf {
+pub fn state_path() -> PathBuf {
     config_dir().join("native-state.json")
 }
 

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Lookout's System Settings pane. @VERSION@ / @BUNDLE_VERSION@ are filled in
+  by packaging/macos/prefpane.sh with the app's own version, which is also
+  how the app (platform/pref_pane.rs) tells an outdated installed copy apart.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>Lookout</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.hackclub.lookout.prefpane</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Lookout</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUNDLE_VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.15</string>
+	<key>NSPrincipalClass</key>
+	<string>LookoutPane</string>
+	<key>NSPrefPaneIconFile</key>
+	<string>icon.icns</string>
+	<key>NSPrefPaneIconLabel</key>
+	<string>Lookout</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Hack Club, a 501(c)(3) nonprofit (EIN: 81-2908499)</string>
+</dict>
+</plist>

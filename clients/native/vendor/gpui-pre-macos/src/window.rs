@@ -1356,11 +1356,11 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
-        // `accesskit_macos::SubclassingAdapter::for_window` strong-retains the
-        // window's content view, and that content view keeps the `GPUIView` it
-        // hosts alive. Together with the `Arc<Mutex<MacWindowState>>` parked in
-        // both views' `windowState` ivar, that forms
-        // `MacWindowState -> adapter -> content view -> GPUIView -> MacWindowState`,
+        // Lookout patch (zed#66691): the `accesskit_macos::SubclassingAdapter`
+        // strong-retains the `GPUIView` it subclasses (see `a11y_init`).
+        // Together with the `Arc<Mutex<MacWindowState>>` parked in the view's
+        // `windowState` ivar, that forms
+        // `MacWindowState -> adapter -> GPUIView -> MacWindowState`,
         // a cycle the delegate/`frame_source` teardown below cannot break. Drop
         // the adapter here so the native view, its `CAMetalLayer` and the
         // renderer's command queue are actually released with the window.
@@ -2345,9 +2345,17 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
+        // Lookout patch (zed#66691): subclass GPUI's own view, not the
+        // window's content view. `GPUIView` is the first responder, and AppKit
+        // answers "which element has focus" (what VoiceOver and dictation apps
+        // ask first) from the first responder; with the content view
+        // subclassed, the focused element resolved to the window even while a
+        // control in the tree had focus. `a11y_init` runs right after `open`
+        // made the view first responder, no later than `for_window` subclassed
+        // the content view before.
         let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
+            accesskit_macos::SubclassingAdapter::new(
+                lock.native_view.as_ptr() as *mut c_void,
                 activation_handler,
                 action_handler,
             )

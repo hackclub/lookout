@@ -16,6 +16,7 @@ use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::store::{CachedSummary, SessionSummary};
 use crate::theme::{self, Theme, theme};
 use crate::ui::button::{BtnSize, Button, PressState, Variant, paint_squircle_bg, press_values};
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 use crate::ui::primitives::{AspectBox, BadgeSize, PressScale, Skeleton, badge, card, edge_faded};
 use crate::ui::text::TextExt;
@@ -33,6 +34,8 @@ pub enum GalleryEvent {
     Add(Bounds<Pixels>),
     ContextMenu { token: String, status: String, position: Point<Pixels> },
     Archive(String),
+    /// "Open in Editor" (the card's context menu, or its screen-reader action).
+    Edit(String),
 }
 
 pub struct GalleryPage {
@@ -133,6 +136,7 @@ impl GalleryPage {
                         st.save();
                         this.sessions = list;
                         this.error = None;
+                        crate::platform::dock_menu::sync(cx);
                     }
                     Err(e) => {
                         log::warn!("Gallery fetch error: {e}");
@@ -158,7 +162,17 @@ impl GalleryPage {
             .p(px(16.0))
             .pb(px(0.0))
             .flex_none()
-            .child(div().ts(20.0).w700().text_color(t.text_primary).child("Your Timelapses"))
+            .child(
+                div()
+                    .id("gallery-title")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label("Your Timelapses")
+                    .ts(20.0)
+                    .w700()
+                    .text_color(t.text_primary)
+                    .child("Your Timelapses"),
+            )
             .child(
                 div()
                     .flex()
@@ -185,6 +199,7 @@ impl GalleryPage {
                                     .padding(0.0, 0.0)
                                     .font_size(18.0)
                                     .tooltip("Start")
+                                    .aria_label("Start a timelapse")
                                     .child(Icon::PlusBold.el(GALLERY_ICON, t.text_secondary))
                                     .on_click(move |_, _, cx| {
                                         entity2.update(cx, |this, cx| cx.emit(GalleryEvent::Add(this.add_anchor)))
@@ -249,6 +264,9 @@ impl Render for GalleryPage {
                 .child(
                     div().flex_1().flex().flex_col().items_center().justify_center().p(px(24.0)).child(
                         div()
+                            .id("gallery-error")
+                            .role(Role::Label)
+                            .aria_value(err.clone())
                             .font_family(crate::ui::text::MONO)
                             .ts(11.0)
                             .text_color(t.text_error)
@@ -272,7 +290,17 @@ impl Render for GalleryPage {
                         .justify_center()
                         .p(px(24.0))
                         .child(div().mb(px(12.0)).opacity(0.2).child(Icon::LkMonitor.el(48.0, t.text_primary)))
-                        .child(div().ts(14.0).text_color(t.text_primary).opacity(0.5).child("No timelapses yet"))
+                        .child(
+                            div()
+                                .id("gallery-empty")
+                                .role(Role::Label)
+                                .aria_value("No timelapses yet")
+                                .aria_description("Start a recording session to see it here.")
+                                .ts(14.0)
+                                .text_color(t.text_primary)
+                                .opacity(0.5)
+                                .child("No timelapses yet"),
+                        )
                         .child(
                             div()
                                 .ts(12.0)
@@ -314,7 +342,12 @@ impl Render for GalleryPage {
             cards.push(div().flex_none().h(px(range.start as f32 * stride - CARD_GAP)).into_any_element());
         }
         for i in range.clone() {
-            let card = session_card(&self.sessions[i], &t, entity.clone(), window, cx).into_any_element();
+            let card = session_card(&self.sessions[i], (i + 1, n), &t, entity.clone(), window, cx)
+                .on_scroll_into_view({
+                    let g = entity.clone();
+                    move |_, cx| g.update(cx, |this, cx| this.scroll_card_into_view(i, stride, card_h, cx))
+                })
+                .into_any_element();
             if i == range.start {
                 let probe = entity.clone();
                 cards.push(
@@ -356,6 +389,8 @@ impl Render for GalleryPage {
                 .child(edge_faded(
                     div()
                         .id("gallery-scroll")
+                        .role(Role::List)
+                        .aria_label("Your Timelapses")
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
@@ -414,6 +449,24 @@ fn visible_range(n: usize, offset: f32, view_h: f32, stride: f32, top: f32, over
 }
 
 impl GalleryPage {
+    /// Scroll so card `i` is fully in view (a screen reader moved to it).
+    fn scroll_card_into_view(&mut self, i: usize, stride: f32, card_h: f32, cx: &mut Context<Self>) {
+        let view_h = f32::from(self.scroll.bounds().size.height);
+        let max = f32::from(self.scroll.max_offset().y);
+        let offset = -f32::from(self.scroll.offset().y);
+        let top = LIST_PAD + i as f32 * stride;
+        let bottom = top + card_h;
+        let target = if top - LIST_PAD < offset {
+            top - LIST_PAD
+        } else if bottom + LIST_PAD > offset + view_h {
+            bottom + LIST_PAD - view_h
+        } else {
+            return;
+        };
+        self.scroll.set_offset(gpui_kit::gpui::point(px(0.0), px(-target.clamp(0.0, max.max(0.0)))));
+        cx.notify();
+    }
+
     /// Drop decoded thumbnails of cards far outside `built`, so a long
     /// gallery holds a screenful or so of textures, not one per session.
     fn release_far_thumbnails(&self, built: &std::ops::Range<usize>, cx: &mut Context<Self>) {
@@ -481,11 +534,12 @@ struct ArchiveHover {
 
 fn session_card(
     s: &SessionSummary,
+    (pos, of): (usize, usize),
     t: &Theme,
     gallery: Entity<GalleryPage>,
     window: &mut Window,
     cx: &mut App,
-) -> impl IntoElement {
+) -> PressScale {
     let token = s.token.clone();
     let status = s.status.clone();
     let thumb: AnyElement = match s.thumbnail_url.as_deref() {
@@ -527,6 +581,9 @@ fn session_card(
     let tok_archive = token.clone();
     let archive = div()
         .id(theme::eid("archive", &token))
+        .role(Role::Button)
+        .aria_label("Archive")
+        .aria_description(if s.name.is_empty() { SharedString::from("Untitled session") } else { s.name.clone().into() })
         .absolute()
         .top(px(8.0))
         .left(px(8.0))
@@ -571,6 +628,13 @@ fn session_card(
                 cx.notify();
             })
         })
+        .on_a11y_click({
+            let (g, tok) = (g_archive.clone(), tok_archive.clone());
+            move |_, cx| {
+                let tok = tok.clone();
+                g.update(cx, |_, cx| cx.emit(GalleryEvent::Archive(tok)));
+            }
+        })
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             let tok = tok_archive.clone();
@@ -610,10 +674,24 @@ fn session_card(
         )
         .child(archive);
 
-    let (g_open, g_menu) = (gallery.clone(), gallery);
+    let (g_open, g_menu) = (gallery.clone(), gallery.clone());
     let (tok_open, st_open) = (token.clone(), status.clone());
     let (tok_menu, st_menu) = (token.clone(), status);
+    let a11y_label = crate::ui::a11y::session_card_label(&s.name, &s.status, s.tracked_seconds);
+    let editable = s.status == "complete";
+    let card_name: SharedString = if s.name.is_empty() { "Untitled session".into() } else { s.name.clone().into() };
+    let (g_edit, tok_edit) = (gallery.clone(), token.clone());
     PressScale::new(theme::eid("card", &token), 0.99, content)
+        .when(editable, |p| {
+            p.a11y_action("Open in Editor", Some(card_name.clone()), move |_, cx| {
+                let t = tok_edit.clone();
+                g_edit.update(cx, |_, cx| cx.emit(GalleryEvent::Edit(t)));
+            })
+        })
+        .role(Role::ListItem)
+        .aria_label(a11y_label)
+        .aria_description(date)
+        .aria_position(pos, of)
         .on_click(move |_, _, cx| {
             let (t, s) = (tok_open.clone(), st_open.clone());
             g_open.update(cx, |_, cx| cx.emit(GalleryEvent::Open(t, s)));

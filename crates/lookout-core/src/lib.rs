@@ -145,7 +145,7 @@ pub use capture_loop::{
 pub use clock::{ClockState, MAX_INTERPOLATION_SECS, TIMER_INTERPOLATION_SLACK_SECS};
 pub use lookout_recorder::{CoreEvent, Recorder, ScreencastRevoked};
 pub use recorder::{
-    ControlMode, FinishOutcome, PickedSource, RecorderError, RecorderNotice, RecorderPhase,
+    ControlMode, FinishOutcome, NoticeKind, PickedSource, RecorderError, RecorderNotice, RecorderPhase,
     RecorderState, RecordingSource, SourceLoss, SourceLossReason, StopOutcome,
 };
 pub use upload::CaptureUploadResult;

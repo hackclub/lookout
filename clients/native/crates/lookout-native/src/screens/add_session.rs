@@ -14,6 +14,7 @@ use crate::images::{self, Remote};
 use crate::programs::{OpenOutcome, Program};
 use crate::screens::layout::page_layout;
 use crate::theme::{self, Theme, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button};
 use crate::ui::input::{InputEvent, TextInput, new_input};
 use crate::ui::spinner::{Spinner, SpinnerSize};
@@ -43,6 +44,7 @@ impl EventEmitter<AddEvent> for AddSessionPage {}
 impl AddSessionPage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let link = new_input("Paste a lookout:// link here", cx);
+        link.update(cx, |i, _| i.a11y_label = Some("Session link".into()));
         let mut subs = Vec::new();
         subs.push(cx.subscribe(&link, |this, _, ev: &InputEvent, cx| {
             match ev {
@@ -142,6 +144,7 @@ impl Render for AddSessionPage {
                         .full_width()
                         .loading(loading_this)
                         .disabled(disabled)
+                        .aria_label(label.clone())
                         .on_click(move |_, _, cx| {
                             let p = program.clone();
                             me2.update(cx, |page, cx| {
@@ -158,21 +161,28 @@ impl Render for AddSessionPage {
                 }
                 body = body.child(col);
                 body = body.child(match &self.launched {
-                    Some(l) => note(&t)
-                        .text_color(t.text_secondary)
-                        .child(format!("Opened {l} in your browser — finish there and you'll be sent back here to start recording.")),
-                    None => note(&t).child("Not all programs support this. You may need to start the session on the program's website."),
+                    Some(l) => {
+                        let msg = format!("Opened {l} in your browser — finish there and you'll be sent back here to start recording.");
+                        note(&t).text_color(t.text_secondary).a11y_status("add-note", msg.clone(), Live::Polite).child(msg)
+                    }
+                    None => note(&t)
+                        .a11y_text("add-note", "Not all programs support this. You may need to start the session on the program's website.")
+                        .child("Not all programs support this. You may need to start the session on the program's website."),
                 });
             }
             Some(_) => {
-                body = body.child(note(&t).child("No programs available right now. Open Lookout from a Hack Club site, or paste a link below."))
+                body = body.child(
+                    note(&t)
+                        .a11y_text("add-note", "No programs available right now. Open Lookout from a Hack Club site, or paste a link below.")
+                        .child("No programs available right now. Open Lookout from a Hack Club site, or paste a link below."),
+                )
             }
         }
         let link_empty = self.link.read(cx).text().trim().is_empty();
         let me_back = cx.entity();
         let me_start = cx.entity();
         let actions: Vec<AnyElement> = vec![
-            self.error.clone().map(|e| note(&t).text_color(theme::status::danger()).child(e).into_any_element()),
+            self.error.clone().map(|e| note(&t).text_color(theme::status::danger()).a11y_status("add-error", e.clone(), Live::Assertive).child(e).into_any_element()),
             Some(
                 crate::ui::input::field_box(&self.link)
                     .w_full()

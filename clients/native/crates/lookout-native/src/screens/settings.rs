@@ -19,6 +19,7 @@ use crate::images::{self, Remote};
 use crate::motion::{self, Anim, Curve, Ease, Spring};
 use crate::store::DEFAULT_API_BASE;
 use crate::theme::{self, Theme, eid, is_mac, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::header_bar::HeaderNav;
 use crate::ui::icon::Icon;
@@ -102,6 +103,8 @@ impl SettingsPage {
         let server = new_input("https://lookout.hackclub.com", cx);
         let current = store(cx).api_base();
         server.update(cx, |i, cx| i.set_text(current, cx));
+        search.update(cx, |i, _| i.a11y_label = Some("Search apps".into()));
+        server.update(cx, |i, _| i.a11y_label = Some("Lookout server".into()));
         let mut subs = Vec::new();
         subs.push(cx.subscribe(&search, |this, _, ev: &InputEvent, cx| {
             match ev {
@@ -342,6 +345,7 @@ impl SettingsPage {
                 .variant(Variant::Secondary)
                 .size(BtnSize::Sm)
                 .card_style(t)
+                .aria_label("Back")
                 .on_click(move |_, _, cx| me.update(cx, |s, cx| s.back(cx)));
             let back = if is_mac() {
                 back.child("← Back")
@@ -354,7 +358,7 @@ impl SettingsPage {
             div()
                 .flex_none()
                 .mb(px(16.0))
-                .when(!theme::header_bar_shown(), |d| d.child(div().ts(20.0).w700().text_color(t.text_primary).mb(px(4.0)).child(title.to_string())))
+                .when(!theme::header_bar_shown(), |d| d.child(div().ts(20.0).w700().text_color(t.text_primary).mb(px(4.0)).a11y_heading("settings-title", title.to_string(), 1).child(title.to_string())))
                 .child(description),
         )
     }
@@ -409,7 +413,7 @@ impl SettingsPage {
                 }),
             });
         }
-        let desc = div().ts_lh(12.0, 1.5).text_color(t.text_secondary).child("Configure Lookout.").into_any_element();
+        let desc = div().ts_lh(12.0, 1.5).text_color(t.text_secondary).a11y_text("settings-desc", "Configure Lookout.").child("Configure Lookout.").into_any_element();
         let me = cx.entity();
         let about = div()
             .mt(px(12.0))
@@ -431,6 +435,7 @@ impl SettingsPage {
         let desc = div()
             .ts_lh(12.0, 1.5)
             .text_color(t.text_secondary)
+            .a11y_text("settings-desc", "Selected apps will be blacked out in monitor screen captures.")
             .child("Selected apps will be blacked out in monitor screen captures.")
 
             .into_any_element();
@@ -451,6 +456,7 @@ impl SettingsPage {
                         .text_color(t.text_tertiary)
                         .ts_lh(12.0, 1.5)
                         .text_center()
+                        .a11y_text("apps-wayland", "App filtering is not supported on Wayland.")
                         .child("App filtering is not supported on Wayland."),
                 )
                 .into_any_element();
@@ -537,6 +543,7 @@ impl SettingsPage {
                             .p(px(24.0))
                             .text_color(t.text_tertiary)
                             .ts(12.0)
+                            .a11y_text("apps-empty", if q.is_empty() { "No apps detected" } else { "No matching apps" })
                             .child(if q.is_empty() { "No apps detected" } else { "No matching apps" }),
                     );
                 } else {
@@ -569,6 +576,7 @@ impl SettingsPage {
         let desc = div()
             .ts_lh(12.0, 1.5)
             .text_color(t.text_secondary)
+            .a11y_text("settings-desc", "Programs linked to this device can start a timelapse straight from the add menu.")
             .child("Programs linked to this device can start a timelapse straight from the + menu.")
             .into_any_element();
         let registry = crate::programs::registry(cx);
@@ -592,6 +600,10 @@ impl SettingsPage {
             let (program, label2) = (link.program.clone(), label.clone());
             list = list.child(
                 div()
+                    .id(eid("linked", &link.program))
+                    .role(Role::Group)
+                    .aria_label(SharedString::from(label.clone()))
+                    .aria_description(format!("Linked {}, {host}", crate::fmt::numeric_date(&link.paired_at)))
                     .flex()
                     .items_center()
                     .gap(px(12.0))
@@ -653,6 +665,7 @@ impl SettingsPage {
         let desc = div()
             .ts_lh(12.0, 1.5)
             .text_color(t.text_secondary)
+            .a11y_text("settings-desc", "Options for testing and development. Please don't touch anything if you don't know what you're doing.")
             .child("Options for testing and development. Please don't touch anything if you don't know what you're doing.")
             .into_any_element();
         let raw = self.server.read(cx).text();
@@ -696,11 +709,11 @@ impl SettingsPage {
                             .rounded(px(8.0))
                             .child(self.server.clone()),
                     )
-                    .child(div().ts_lh(12.0, 1.5).text_color(t.text_tertiary).mt(px(4.0)).child("Please enter a VALID lookout service URL."))
+                    .child(div().ts_lh(12.0, 1.5).text_color(t.text_tertiary).mt(px(4.0)).a11y_text("server-hint", "Please enter a VALID lookout service URL.").child("Please enter a VALID lookout service URL."))
                     .when(invalid, |d| {
-                        d.child(div().ts(12.0).text_color(theme::status::danger()).child("Enter a valid HTTPS URL (e.g. https://lookout-stage.example.com)."))
+                        d.child(div().ts(12.0).text_color(theme::status::danger()).a11y_text("server-invalid", "Enter a valid HTTPS URL (e.g. https://lookout-stage.example.com).").aria_live(Live::Polite).child("Enter a valid HTTPS URL (e.g. https://lookout-stage.example.com)."))
                     })
-                    .when_some(error, |d, e| d.child(div().ts(12.0).text_color(theme::status::danger()).child(e))),
+                    .when_some(error, |d, e| d.child(div().ts(12.0).text_color(theme::status::danger()).a11y_text("server-error", e.clone()).aria_live(Live::Assertive).child(e))),
             )
             .child(
                 div()
@@ -740,6 +753,7 @@ impl SettingsPage {
                         .border_color(theme::status::warning())
                         .text_color(theme::status::warning())
                         .ts_lh(12.0, 1.5)
+                        .a11y_text("server-custom", "Using a custom server. Timelapses recorded here won't appear on the default Lookout server.")
                         .child("Using a custom server. Timelapses recorded here won't appear on the default Lookout server."),
                 )
             })
@@ -829,6 +843,9 @@ impl gpui_kit::gpui::RenderOnce for MenuRow {
         let t = self.t;
         let f = self.on_click;
         pressable_row(self.id.into(), t.bg_selected, window, cx)
+            .role(Role::Button)
+            .aria_label(self.title)
+            .when(!self.description.is_empty(), |d| d.aria_description(self.description.clone()))
             .gap(px(12.0))
             .p(px(12.0))
             .text_color(t.text_primary)
@@ -856,6 +873,10 @@ impl gpui_kit::gpui::RenderOnce for MenuRow {
                     }),
             )
             .child(div().relative().child(Icon::CaretRightBold.el(16.0, t.text_tertiary)))
+            .on_a11y_click({
+                let f = f.clone();
+                move |window, cx| f(window, cx)
+            })
             .on_click(move |_, window, cx| f(window, cx))
     }
 }
@@ -890,6 +911,10 @@ impl gpui_kit::gpui::RenderOnce for ToggleRow {
         let c = chk.read(cx).get();
         let (on, f) = (self.on, self.on_toggle);
         pressable_row(self.id.into(), t.bg_selected, window, cx)
+            .role(Role::CheckBox)
+            .aria_label(self.title)
+            .aria_description(self.description.clone())
+            .aria_toggled(if on { Toggled::True } else { Toggled::False })
             .gap(px(12.0))
             .p(px(12.0))
             .text_color(t.text_primary)
@@ -927,6 +952,10 @@ impl gpui_kit::gpui::RenderOnce for ToggleRow {
                     .flex_none()
                     .when(on, |d| d.child(Icon::CheckBold.el(12.0, t.text_inverse))),
             )
+            .on_a11y_click({
+                let f = f.clone();
+                move |_, cx| f(!on, cx)
+            })
             .on_click(move |_, _, cx| f(!on, cx))
     }
 }
@@ -961,7 +990,13 @@ fn app_row(
         Some(Remote::Ready(i, _)) => img(i).size(px(20.0)).opacity(icon_opacity).into_any_element(),
         _ => div().size(px(20.0)).rounded(px(6.0)).bg(t.bg_selected).into_any_element(),
     };
+    let on_click = Rc::new(on_click);
+    let on_click_a11y = on_click.clone();
     pressable_row(id, t.bg_selected, window, cx)
+        .on_a11y_click(move |window, cx| on_click_a11y(window, cx))
+        .role(Role::CheckBox)
+        .aria_label(name.to_string())
+        .aria_toggled(if checked { Toggled::True } else { Toggled::False })
         .gap(px(6.0))
         .px(px(8.0))
         .py(px(6.0))

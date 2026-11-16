@@ -23,6 +23,7 @@ use crate::screens::recorder::{RecorderView, RecorderViewEvent};
 use crate::screens::source_picker::{PickerEvent, Sel, SourcePicker};
 use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
+use crate::ui::a11y::prelude::*;
 use crate::ui::header_bar::{HeaderBtn, HeaderBtnKind};
 use crate::ui::icon::Icon;
 use crate::ui::overlay::{Entrance, ModalWidth};
@@ -485,6 +486,7 @@ impl RecordPage {
                         .ts(14.0)
                         .w700()
                         .text_color(t.text_primary)
+                        .a11y_heading("picker-title", title, 1)
                         .child(title),
                 )
                 .when(self.can_stop(), |d| {

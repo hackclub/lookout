@@ -19,6 +19,7 @@ use gpui_kit::gpui::{
 use crate::platform::permission_guide::{self, Phase, Source};
 use crate::platform::permissions::{self, Kind};
 use crate::theme::{Theme, black, fade, sh, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::spinner::{Spinner, SpinnerSize};
@@ -156,13 +157,14 @@ impl Render for PermissionScreen {
                             .justify_center()
                             .child(img(i).size(px(64.0)))
                     }))
-                    .child(div().ts(24.0).w700().text_color(t.text_primary).mb(px(8.0)).child("Set up Lookout"))
+                    .child(div().a11y_heading("setup-title", "Set up Lookout", 1).ts(24.0).w700().text_color(t.text_primary).mb(px(8.0)).child("Set up Lookout"))
                     .child(
                         div()
                             .ts_lh(13.0, 1.55)
                             .text_color(t.text_secondary)
                             .text_center()
                             .mb(px(16.0))
+                            .a11y_text("setup-body", "Lookout needs to see your screen to record your work. Everything is captured on your Mac, and only periodic snapshots are uploaded.")
                             .child("Lookout needs to see your screen to record your work. Everything is captured on your Mac, and only periodic snapshots are uploaded."),
                     )
                     .child(div().w_full().flex().flex_col().gap(px(12.0)).children(rows))
@@ -225,6 +227,7 @@ impl PermissionScreen {
                 .flex()
                 .items_center()
                 .gap(px(5.0))
+                .a11y_status("allowed", format!("{title} allowed"), Live::Polite)
                 .child(Icon::LkCheckLine.el(14.0, t.accent))
                 .child(div().ts(13.0).w600().text_color(t.accent).child("Allowed"))
                 .into_any_element()
@@ -233,6 +236,7 @@ impl PermissionScreen {
         } else {
             let me = cx.entity();
             Button::new(("setup-allow", i), "Allow")
+                .aria_label(format!("Allow {title}"))
                 .variant(if is_next { Variant::Primary } else { Variant::Secondary })
                 .size(BtnSize::Md)
                 .radius(999.0)
@@ -240,8 +244,20 @@ impl PermissionScreen {
                 .into_any_element()
         };
 
+        let spoken_state = if state.granted {
+            "Allowed"
+        } else if away {
+            "Finish in System Settings"
+        } else if optional {
+            "Optional"
+        } else {
+            "Not allowed yet"
+        };
         div()
             .id(("setup-row", i))
+            .role(Role::Group)
+            .aria_label(title)
+            .aria_description(format!("{spoken_state}. {body}"))
             .relative()
             .w_full()
             .rounded(px(20.0))

@@ -16,6 +16,7 @@ use gpui_kit::gpui::{
 
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::feedback::NumberFlow;
 use crate::ui::icon::Icon;
 use crate::ui::paint;
@@ -147,8 +148,28 @@ impl Render for UpdatePill {
             UpdatePhase::Idle => String::new(),
         };
 
+        // Spoken: a progress bar while downloading, a status while
+        // installing, a button once a restart finishes the update. The name
+        // only changes with the phase, so the live region speaks once each.
+        let (role, spoken) = match &self.shown {
+            UpdatePhase::Downloading { .. } => (Role::ProgressIndicator, "Downloading update"),
+            UpdatePhase::Installing { .. } => (Role::Status, "Installing update"),
+            UpdatePhase::Ready { .. } => (Role::Button, "Restart to complete update"),
+            UpdatePhase::Idle => (Role::Status, ""),
+        };
+        let progress_value = match &self.shown {
+            UpdatePhase::Downloading { progress, .. } => Some(*progress as f64),
+            _ => None,
+        };
         let mut pill = div()
             .id("update-pill")
+            .role(role)
+            .aria_label(spoken)
+            .aria_description(tip.clone())
+            .aria_live(Live::Polite)
+            .when_some(progress_value, |d, v| {
+                d.aria_min_numeric_value(0.0).aria_max_numeric_value(100.0).aria_numeric_value(v)
+            })
             .relative()
             .top(px(self.y.get()))
             .opacity(self.opacity.get().clamp(0.0, 1.0))

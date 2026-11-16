@@ -32,6 +32,7 @@ use crate::app::{store, store_mut};
 use crate::motion::{self, Anim, Curve, Ease, Spring};
 use crate::theme::{Theme, black, hex, is_linux, is_mac, is_windows, sh, theme, white};
 use crate::ui::button::{BtnSize, Button, Variant};
+use crate::ui::a11y::prelude::*;
 use crate::ui::header_bar::{HeaderBtn, HeaderBtnKind};
 use crate::ui::icon::Icon;
 use crate::ui::sticker::{self, Sticker};
@@ -822,10 +823,11 @@ impl Onboarding {
                     .gap(px(6.0))
                     .px(px(52.0))
                     .child(
-                        div().mt(px((1.0 - a) * 10.0 * rise)).opacity(a).ts(21.0).w700().text_color(t.text_primary).child(title),
+                        div().a11y_heading("title", title, 1).mt(px((1.0 - a) * 10.0 * rise)).opacity(a).ts(21.0).w700().text_color(t.text_primary).child(title),
                     )
                     .child(
                         div()
+                            .a11y_text("body", body.replace('\u{a0}', " "))
                             .mt(px((1.0 - a2) * 8.0 * rise))
                             .opacity(a2)
                             .ts_lh(13.0, 1.4)
@@ -839,6 +841,8 @@ impl Onboarding {
                         let link = |id: &'static str, label: &'static str, url: &'static str| {
                             div()
                                 .id(id)
+                                .role(Role::Link)
+                                .aria_label(label)
                                 .cursor_pointer()
                                 .text_color(t.text_tertiary)
                                 .hover(|s| s.text_color(t.text_secondary))
@@ -886,7 +890,15 @@ impl Onboarding {
             ),
             self.arrive[i].get(),
         );
-        div().absolute().top_0().left_0().w(px(W)).h(px(H)).child(el).into_any_element()
+        div()
+            .a11y_text("how", "Click + and pick a program to start a timelapse. Lookout takes a screenshot every so often while you work. Pause any time.")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(px(W))
+            .h(px(H))
+            .child(el)
+            .into_any_element()
     }
 
     /// The Hack Club flag at 20%, centred, with a soft, slanted shine
@@ -1052,17 +1064,36 @@ impl Render for Onboarding {
                 continue;
             }
             let fade = 1.0 - (d.abs() * 0.9).min(1.0);
-            pages = pages.child(div().absolute().top_0().left(px(d * W)).w(px(W)).h(px(H)).overflow_hidden().opacity(fade).child(self.page_el(i, &t, now)));
+            // Neighbouring pages stay built for the slide; only the current
+            // one is in the accessibility tree.
+            pages = pages.child(
+                div()
+                    .id(("onboarding-page", i))
+                    .role(Role::Group)
+                    .aria_label(format!("Page {} of {PAGES}", i + 1))
+                    .a11y_flags(NodeFlags { hidden: i != self.page, ..Default::default() })
+                    .absolute()
+                    .top_0()
+                    .left(px(d * W))
+                    .w(px(W))
+                    .h(px(H))
+                    .overflow_hidden()
+                    .opacity(fade)
+                    .child(self.page_el(i, &t, now)),
+            );
         }
 
         // Dots: the current one brightens.
-        let mut dots = div().flex().items_center().gap(px(9.0));
+        let mut dots = div().id("onboarding-dots").role(Role::TabList).aria_label("Pages").flex().items_center().gap(px(9.0));
         for i in 0..PAGES {
             let k = self.dots[i].get();
             let me = cx.entity();
             dots = dots.child(
                 div()
                     .id(SharedString::from(format!("dot-{i}")))
+                    .role(Role::Tab)
+                    .aria_label(format!("Page {} of {PAGES}", i + 1))
+                    .aria_selected(i == self.page)
                     .size(px(6.0))
                     .rounded_full()
                     .bg(if t.dark { white(0.22 + 0.63 * k) } else { black(0.14 + 0.62 * k) })

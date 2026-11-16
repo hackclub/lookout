@@ -14,6 +14,7 @@ use lookout_core::{SourceLoss, SourceLossReason};
 use crate::diagnosis::{self, Diagnosis};
 use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
+use crate::ui::a11y::prelude::*;
 use crate::ui::input::{InputEvent, TextInput, new_input};
 use crate::ui::text::{MONO, TextExt};
 
@@ -51,7 +52,10 @@ fn trimmed(s: String) -> Option<String> {
 impl NamingModal {
     pub fn new(too_short: bool, cx: &mut Context<Self>) -> Self {
         let input = new_input("My timelapse", cx);
-        input.update(cx, |i, _| i.max_len = 255);
+        input.update(cx, |i, _| {
+            i.max_len = 255;
+            i.a11y_label = Some("Timelapse name".into());
+        });
         let sub = cx.subscribe(&input, |this, input, ev: &InputEvent, cx| {
             // Enter takes the primary action, "Edit & Save".
             if let InputEvent::Submit = ev {
@@ -93,6 +97,7 @@ impl Render for NamingModal {
         } else {
             "Give it a name, or skip to use the default."
         };
+        crate::ui::overlay::set_dialog_title(cx.entity_id(), title, false);
         let mut card = div()
             .w_full()
             .p(px(24.0))
@@ -102,8 +107,8 @@ impl Render for NamingModal {
             .rounded(px(10.0))
             .text_center()
             .shadow(vec![theme::sh(0.0, 10.0, 40.0, 0.0, theme::black(0.5))])
-            .child(div().ts(16.0).w700().text_color(t.text_primary).mb(px(8.0)).child(title))
-            .child(div().ts(13.0).text_color(t.text_secondary).mb(px(16.0)).child(body));
+            .child(div().a11y_heading("naming-title", title, 2).ts(16.0).w700().text_color(t.text_primary).mb(px(8.0)).child(title))
+            .child(div().a11y_text("naming-body", body).ts(13.0).text_color(t.text_secondary).mb(px(16.0)).child(body));
         if !self.too_short {
             card = card.child(
                 crate::ui::input::field_box(&self.input)
@@ -240,6 +245,7 @@ impl Render for SourceLostPrompt {
         let has_details = self.loss.detail.is_some();
         let e = cx.entity();
         let (e1, e2, e3) = (e.clone(), e.clone(), e);
+        crate::ui::overlay::set_dialog_title(cx.entity_id(), title, true);
         div()
             .flex()
             .flex_col()
@@ -247,8 +253,8 @@ impl Render for SourceLostPrompt {
             .gap(px(16.0))
             .child(
                 div()
-                    .child(div().ts(18.0).w600().text_color(t.text_primary).child(title))
-                    .child(div().mt(px(8.0)).ts_lh(14.0, 1.5).text_color(t.text_secondary).child(body)),
+                    .child(div().a11y_heading("lost-title", title, 2).ts(18.0).w600().text_color(t.text_primary).child(title))
+                    .child(div().a11y_text("lost-body", body.clone()).mt(px(8.0)).ts_lh(14.0, 1.5).text_color(t.text_secondary).child(body)),
             )
             .child(
                 div()
@@ -399,6 +405,7 @@ impl Render for CaptureErrorDialog {
             }
         });
         let e = cx.entity();
+        crate::ui::overlay::set_dialog_title(cx.entity_id(), title.clone(), true);
         let mut col = div()
             .id("capture-error")
             .flex()
@@ -409,14 +416,17 @@ impl Render for CaptureErrorDialog {
             .gap(px(16.0))
             .child(
                 div()
-                    .child(div().ts(18.0).w600().text_color(t.text_primary).child(title))
-                    .child(div().mt(px(8.0)).ts_lh(14.0, 1.5).text_color(t.text_secondary).child(summary)),
+                    .child(div().a11y_heading("cap-title", title.clone(), 2).ts(18.0).w600().text_color(t.text_primary).child(title))
+                    .child(div().a11y_status("cap-summary", summary.clone(), Live::Polite).mt(px(8.0)).ts_lh(14.0, 1.5).text_color(t.text_secondary).child(summary)),
             );
         if let Some(d) = &d {
-            let mut ol = div().flex().flex_col().gap(px(8.0)).pl(px(4.0));
+            let mut ol = div().id("cap-steps").role(Role::List).aria_label("Steps").flex().flex_col().gap(px(8.0)).pl(px(4.0));
             for (i, step) in d.steps.iter().enumerate() {
                 ol = ol.child(
                     div()
+                        .id(("cap-step", i))
+                        .role(Role::ListItem)
+                        .aria_label(format!("{}. {}", i + 1, step))
                         .flex()
                         .gap(px(8.0))
                         .ts_lh(14.0, 1.5)
@@ -440,9 +450,10 @@ impl Render for CaptureErrorDialog {
                         .pl(px(12.0))
                         .pr(px(8.0))
                         .py(px(8.0))
-                        .child(div().flex_1().min_w(px(0.0)).font_family(MONO).ts(13.0).text_color(t.text_primary).overflow_hidden().whitespace_nowrap().child(cmd.clone()))
+                        .child(div().a11y_text("cap-command", cmd.clone()).flex_1().min_w(px(0.0)).font_family(MONO).ts(13.0).text_color(t.text_primary).overflow_hidden().whitespace_nowrap().child(cmd.clone()))
                         .child(
                             Button::new("copy-cmd", if self.copied_command { "Copied" } else { "Copy" })
+                                .aria_label(if self.copied_command { "Copied" } else { "Copy command" })
                                 .variant(Variant::Secondary)
                                 .size(BtnSize::Sm)
                                 .on_click(move |_, _, cx| {
@@ -459,6 +470,9 @@ impl Render for CaptureErrorDialog {
                 .child(
                     div()
                         .id("tech-details")
+                        .role(Role::Button)
+                        .aria_label("Technical details")
+                        .aria_expanded(self.details_open)
                         .ts(13.0)
                         .text_color(t.text_tertiary)
                         .cursor_pointer()
@@ -480,6 +494,7 @@ impl Render for CaptureErrorDialog {
                             .text_color(t.text_error)
                             .max_h(px(160.0))
                             .overflow_hidden()
+                            .a11y_text("tech-details-text", self.error.clone())
                             .child(self.error.clone()),
                     )
                 }),

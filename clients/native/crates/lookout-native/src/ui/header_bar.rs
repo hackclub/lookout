@@ -22,6 +22,7 @@ use gpui_kit::gpui::prelude::FluentBuilder;
 
 use crate::motion::{Anim, Ease};
 use crate::theme::{self, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
@@ -150,6 +151,8 @@ pub struct HeaderBtn {
     destructive: bool,
     /// Dimmed to 60% and inert (a pending or unavailable action).
     disabled: bool,
+    /// Spoken name; defaults to the text label, then the tooltip.
+    aria_label: Option<SharedString>,
 }
 
 impl HeaderBtn {
@@ -171,6 +174,7 @@ impl HeaderBtn {
             label: None,
             destructive: false,
             disabled: false,
+            aria_label: None,
         }
     }
     /// A button whose content is `icon` at `size`, tinted with the button's
@@ -211,6 +215,11 @@ impl HeaderBtn {
     }
     pub fn tooltip(mut self, t: impl Into<SharedString>) -> Self {
         self.tooltip = Some(t.into());
+        self
+    }
+    /// The name screen readers announce, when the tooltip isn't it.
+    pub fn aria_label(mut self, l: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(l.into());
         self
     }
     /// Hover/press in close red (#F9271E, a touch lighter while pressed) with
@@ -291,8 +300,12 @@ impl RenderOnce for HeaderBtn {
         let caption = self.caption;
         let disabled = self.disabled;
         let label = self.label.clone();
+        let a11y_name = self.aria_label.clone().or_else(|| label.clone()).or_else(|| self.tooltip.clone());
         let mut el = div()
             .id(self.id)
+            .role(Role::Button)
+            .when_some(a11y_name, |d, l| d.aria_label(l))
+            .aria_disabled(disabled)
             .map(|d| {
                 if caption {
                     d.w(px(WIN_CAPTION_W)).h(px(HEADER_BAR_HEIGHT))
@@ -349,6 +362,10 @@ impl RenderOnce for HeaderBtn {
                     s.press.set_css(0.0, 100.0, Ease::EASE_OUT);
                     cx.notify();
                 })
+            })
+            .on_a11y_click({
+                let f = f.clone();
+                move |window, cx| f(&ClickEvent::default(), window, cx)
             })
             .on_click(move |ev, window, cx| f(ev, window, cx)));
         let tip_dismissed = st.read(cx).tip_dismissed;
@@ -436,6 +453,11 @@ impl RenderOnce for HeaderBar {
             .min_w(px(0.0))
             .child(
                 div()
+                    .id("hb-title")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label(self.nav.title.clone())
+                    .when_some(self.nav.subtitle.clone(), |d, s| d.aria_description(s))
                     .text_size(px(title_size))
                     .line_height(px(title_size * 1.15))
                     .w700()

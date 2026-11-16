@@ -28,6 +28,8 @@ use gpui_kit::gpui::{
 
 use crate::motion::{Anim, Curve, Spring};
 use crate::theme::{self, Theme, theme};
+use crate::ui::a11y::prelude::*;
+use gpui_kit::gpui::prelude::FluentBuilder;
 use crate::ui::paint;
 use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
@@ -107,6 +109,8 @@ pub struct Button {
     hover_bg: Option<Hsla>,
     drop: Option<Hsla>,
     medium: bool,
+    aria_label: Option<SharedString>,
+    aria_description: Option<SharedString>,
 }
 
 impl Button {
@@ -142,6 +146,8 @@ impl Button {
             hover_bg: None,
             drop: None,
             medium: false,
+            aria_label: None,
+            aria_description: None,
         }
     }
 
@@ -229,6 +235,17 @@ impl Button {
     /// Medium label instead of semibold.
     pub fn medium(mut self) -> Self {
         self.medium = true;
+        self
+    }
+    /// The name screen readers announce. Defaults to the text label, then the
+    /// tooltip; icon-only buttons with neither must set one.
+    pub fn aria_label(mut self, l: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(l.into());
+        self
+    }
+    /// Extra spoken detail, read after the name.
+    pub fn aria_description(mut self, d: impl Into<SharedString>) -> Self {
+        self.aria_description = Some(d.into());
         self
     }
     pub fn child(mut self, el: impl IntoElement) -> Self {
@@ -351,6 +368,8 @@ impl RenderOnce for Button {
         let (py, pxl) = self.pad.unwrap_or((py, pxl));
         let fs = self.font_size.unwrap_or(fs);
 
+        let a11y_name = self.aria_label.clone().or_else(|| self.label.clone()).or_else(|| self.tooltip.clone());
+        let a11y_desc = self.aria_description.clone().or_else(|| self.tooltip.clone().filter(|t| Some(t) != a11y_name.as_ref()));
         let mut label = div()
             .relative()
             .flex()
@@ -377,6 +396,10 @@ impl RenderOnce for Button {
         let on_click = self.on_click.clone();
         let mut root = div()
             .id(self.id.clone())
+            .role(Role::Button)
+            .when_some(a11y_name, |d, l| d.aria_label(l))
+            .when_some(a11y_desc, |d, l| d.aria_description(l))
+            .a11y_flags(NodeFlags { disabled: self.disabled, busy: self.loading, ..Default::default() })
             .relative()
             .flex()
             .items_center()
@@ -458,7 +481,10 @@ impl RenderOnce for Button {
                     });
                 });
             if let Some(f) = on_click {
-                root = root.on_click(move |ev, window, cx| f(ev, window, cx));
+                let f2 = f.clone();
+                root = root
+                    .on_click(move |ev, window, cx| f(ev, window, cx))
+                    .on_a11y_click(move |window, cx| f2(&ClickEvent::default(), window, cx));
             }
         }
         root

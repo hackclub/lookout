@@ -6,11 +6,12 @@ A native rewrite of the Lookout desktop app in Rust with [GPUI](https://gpui.rs)
 in-process: `lookout-core` and the three platform-free crates under `crates/`
 at the repo root.
 
-The north star is that people can't tell it apart from the Tauri app: every
-screen, string, colour token and animation was ported from the original
-source (see `docs/ui-spec.md`, which cites `file:line` for every value). Where
-the original had an actual flaw, the native app deliberately does better; those
-places are listed below.
+Every screen, string, colour token and animation started as a port of the
+Tauri app (`docs/ui-spec.md` cites `file:line` for every original value), but
+matching it is no longer a goal: Lookout Native should feel like it belongs on
+each OS. Where the platform has a better or more native way to do something,
+follow the platform, and list the change under "Where it departs from the
+Tauri app" below.
 
 ## Run it
 
@@ -171,6 +172,26 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   notarizing use the Tauri job's `APPLE_*` secrets; without them the bundle is
   ad-hoc signed. Nothing besides the executable is bundled (AVFoundation,
   VideoToolbox, OS Swift runtime), and the script fails if that changes.
+- **macOS System Settings pane**: `packaging/macos/prefpane.sh` builds
+  `swift/lookout-prefpane` into a universal `Lookout.prefPane`, which
+  `bundle.sh` signs into `Contents/Library/PreferencePanes`. At launch the app
+  copies it to `~/Library/PreferencePanes` (`src/platform/pref_pane.rs`), so
+  Lookout shows up in System Settings with nothing for the user to install.
+  A newer app replaces an older copy, and a pane the user removed stays
+  removed. The pane is Lookout's own Settings screen (menu, Filtered Apps,
+  Linked Programs, Advanced) redrawn in AppKit with the app's tokens, Button
+  squircle and press spring, row hover/press and route slides
+  (`Kit.swift`, `Controls.swift`, `Pages.swift`), icons converted from
+  `assets/icons` by `svg2pdf.py`. It edits settings for real by running
+  `lookout --settings-pane '<json>'` (`src/settings_pane.rs`): with Lookout
+  open that relays over the per-user single-instance socket and the app
+  applies it (store, engine filter list, server reload, unlink revoke);
+  with Lookout closed it edits the files itself. `lookout://settings[/…]`,
+  `lookout://settings/about` and `lookout://onboarding` links only navigate,
+  since any web page can open them. Native CI builds the pane, loads it as
+  System Settings would and saves every page, light and dark, as
+  `tour/prefpane-*.png`; `LOOKOUT_PANE_PAGE=filtered-apps|linked-programs|
+  advanced` opens a page directly.
 - **Windows**: one signed `lookout.exe` that is also its installer and
   uninstaller (`src/installer/`). Run from anywhere but the install folder, it
   opens the installer window; it installs per user to `%LOCALAPPDATA%\Lookout`
@@ -207,7 +228,77 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   Package update notices use the common release version in `latest.json`;
   only AppImages use the native self-updater.
 
-## How the animations were kept identical
+## Accessibility
+
+Screen readers (VoiceOver, Narrator, Orca) see the app through GPUI's
+AccessKit integration: macOS AX, Windows UIA, and AT-SPI on Linux, all fed
+from one tree. GPUI's guide is `vendor/gpui-pre/src/_accessibility.rs`; our
+helpers live in [`src/ui/a11y.rs`](crates/lookout-native/src/ui/a11y.rs)
+(`use crate::ui::a11y::prelude::*;`).
+
+**Conventions for new UI**
+
+- An element reaches assistive technology only with an `.id(..)` **and** a
+  `.role(..)`. String children are invisible to it: name the element with
+  `.aria_label(..)`, or for plain text use `div().a11y_text(id, text)`
+  (a `Label`, which AccessKit reads from its *value*), `a11y_heading(id, text,
+  level)`, or `a11y_status(id, text, Live::Polite)` for a line that should be
+  announced when it changes.
+- The shared controls do this for you: `Button` (name from its text, else
+  `.aria_label`, else the tooltip; disabled/loading are reported),
+  `HeaderBtn`, `PressScale` (`.role/.aria_label/.aria_position`),
+  `TextInput` (`a11y_label`, value, placeholder, caret and selection), menus,
+  sheets and modals. Icon-only buttons need an `.aria_label` or a tooltip.
+- Ids only need to be unique among siblings under the nearest ancestor with
+  an id, but **duplicates panic in debug builds once a screen reader is on**
+  (release builds silently drop the node). Keyed lists use per-item ids.
+- Toggles are `Role::CheckBox` with `.aria_toggled(..)`; selection is
+  `.aria_selected(..)`; disclosure is `.aria_expanded(..)`. Disabled, busy,
+  modal, live and hidden go through `.a11y_flags(NodeFlags { .. })` (one
+  synthetic-children hook per element).
+- Give clickable surfaces `.on_a11y_click(..)`: otherwise GPUI turns the
+  screen reader's "press" into a fake mouse click at the node's centre, which
+  hits the wrong thing when the element is half scrolled away.
+- Never put a ticking value in a name or a live region. The recorder clock is
+  a `Timer` whose value moves once a minute; state changes (Recording, Paused,
+  Stopping) are a separate polite status.
+- A modal view names its dialog with `overlay::set_dialog_title(..)` during
+  render; `Sheet::a11y_label` names a sheet.
+- AccessKit's adapters don't map `ShowContextMenu` or custom actions, so a
+  context-menu-only action needs another way in: `PressScale::a11y_action`
+  adds it as a synthetic child button (the gallery card's "Open in Editor").
+- Labels we wrote that aren't on screen: "Pause recording", "Resume
+  recording", "Stop recording", "Recorded time", "Start a timelapse",
+  "Playhead", "Cuts", "Masks", "Seek", "Copy command", "Session link",
+  "Timelapse name", gallery cards as "Name, Status, 1 hour 12 minutes", editor
+  cuts as "Cut, minutes 3 to 5" and the playhead as "Minute 6 of 47, cut".
+
+**Checking the tree on Linux** (the same tree reaches macOS and Windows).
+Run the app on the virtual desktop and read it over AT-SPI with
+[agent-desktop](https://github.com/lahfir/agent-desktop):
+
+```sh
+desk agent-desktop snapshot --app lookout --compact       # whole tree; add -i for controls only
+desk agent-desktop find --app lookout --role button --name Settings
+desk agent-desktop click <ref>                            # AT-SPI "click" action
+desk agent-desktop set-value <ref> 4                      # sliders (editor playhead)
+```
+
+A panic mentioning "Duplicate a11y node id" is a duplicate id. GPUI also
+logs, once per focus change, when the focused element has no node.
+
+**Known gaps.** AccessKit 0.19's AT-SPI adapter has no EditableText and only
+maps "disabled" for read-only-capable roles, so on Linux text fields can't be
+written through AT-SPI (typing works) and disabled buttons still read as
+enabled; both work on macOS and Windows. The gallery builds only the cards near
+the viewport, so a screen reader sees those (with "n of N" positions), not the
+whole list. The program panel's embedded web page is drawn into a texture and
+its own tree isn't bridged. Only the default "click" action is exposed over
+AT-SPI, so slider Increment/Decrement is macOS/Windows only (SetValue works
+everywhere). VoiceOver's focus fix is a vendored GPUI patch
+(`vendor/PATCHES.md`, zed#66691) that has only been type-checked here.
+
+## How the animations were ported
 
 GPUI has no CSS, so the motion is reimplemented from the libraries' source:
 
@@ -229,7 +320,25 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   tiles, the hover card) is painted with the scale baked into its geometry.
   The button's squircle is `figma-squircle`'s path with 0.7 smoothing.
 
-## Deliberate improvements
+## Where it departs from the Tauri app
+
+- **macOS integration.** Settings… (⌘,) in the app menu; a System Settings
+  pane (see Packaging); a Dock menu with the open timelapse's Pause/Resume and
+  Stop, Start Timelapse and the five most recent timelapses
+  (`platform/dock_menu.rs`); notification buttons (Resume on an unplanned
+  pause, Open on every recorder notice; clicking the notification opens that
+  timelapse, `platform/notifications.rs`); trackpad haptics in the editor when
+  a dragged cut, mask span or mask box edge meets the timeline's end, another
+  cut or the frame's edge (`platform/haptics.rs`); and the system accent colour
+  when it isn't blue (Multicolor and Blue keep Lookout's blue; re-read when
+  Lookout comes to the front).
+- **Windows taskbar.** While a timelapse is open the taskbar button carries a
+  badge (red dot recording, amber pause badge paused, each with a screen-reader
+  description) and the thumbnail preview gets Pause/Resume and Stop buttons
+  that act like the tray's; the button shows indeterminate progress while a
+  timelapse page is compiling (`platform/taskbar.rs`). Glyphs are drawn at the
+  taskbar's DPI in its light/dark colour, and the buttons are re-added if
+  Explorer restarts.
 
 - **One header bar on every platform.** The Tauri app drew the 47px
   Adwaita-style header bar only on Linux; macOS and Windows got a 72px

@@ -24,9 +24,10 @@ use crate::screens::gallery::{GalleryEvent, GalleryPage};
 use crate::screens::placeholder::Placeholder;
 use crate::screens::add_session::{AddEvent, AddSessionPage};
 use crate::screens::permission::{PermissionEvent, PermissionScreen};
-use crate::screens::settings::{ConfirmAction, SettingsEvent, SettingsPage};
+use crate::screens::settings::{ConfirmAction, SettingsEvent, SettingsPage, Sub as SettingsSub};
 use crate::screens::record::{RecordEvent, RecordPage};
 use crate::screens::session::{SessionEvent, SessionPage};
+use crate::ui::a11y::prelude::*;
 use crate::ui::overlay::{ModalSlot, render_modals};
 use crate::ui::menu::{MenuEvent, MenuItem, MenuPopup};
 use crate::ui::sheet::{Sheet, SheetEvent, SheetStyle};
@@ -187,6 +188,8 @@ pub struct MainWindow {
     pending_route: Option<(Route, f32)>,
     pub pending_editor: Option<String>,
     last_deep_link: Option<String>,
+    /// The Settings page to open once the Settings route mounts.
+    pending_settings: Option<SettingsSub>,
     pub focus_requested: bool,
     own_modal: Option<AnyView>,
     redirect_fired: std::collections::HashSet<String>,
@@ -332,6 +335,15 @@ impl MainWindow {
         }));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             this.os_active = window.is_window_active();
+            // macOS has no notification for an accent change that reaches us:
+            // pick it up when Lookout comes back to the front.
+            if is_mac() && this.os_active {
+                let t = Theme::for_appearance(window.appearance()).with_accent(crate::platform::accent());
+                if t.accent != theme(cx).accent {
+                    cx.set_global(t);
+                    cx.refresh_windows();
+                }
+            }
             let active = this.os_active || this.native_menu_open;
             app::state(cx).frontend.wants_preview.store(active, std::sync::atomic::Ordering::Relaxed);
             this.active.set_css(if active { 1.0 } else { 0.0 }, 160.0, Ease::EASE_OUT);
@@ -373,6 +385,7 @@ impl MainWindow {
             pending_route: None,
             pending_editor: None,
             last_deep_link: None,
+            pending_settings: None,
             focus_requested: false,
             own_modal: None,
             redirect_fired: Default::default(),
@@ -476,6 +489,9 @@ impl MainWindow {
             }
             Route::Settings => {
                 let p = cx.new(SettingsPage::new);
+                if let Some(sub) = self.pending_settings.take() {
+                    p.update(cx, |p, cx| p.go(sub, cx));
+                }
                 self._subs.push(cx.subscribe(&p, |this, page, ev: &SettingsEvent, cx| this.on_settings_event(page, ev, cx)));
                 PageView::Settings(p)
             }
@@ -525,14 +541,7 @@ impl MainWindow {
         match ev {
             SettingsEvent::Back => self.go_gallery(cx),
             SettingsEvent::About => self.navigate(Route::Info, cx),
-            SettingsEvent::Reload => {
-                // `window.location.reload()`: start over on the new server.
-                self.slots.clear();
-                self.history.clear();
-                self.forward.clear();
-                self.route = Route::Settings;
-                self.go(Route::Gallery, cx);
-            }
+            SettingsEvent::Reload => self.reload_for_server(cx),
             SettingsEvent::Confirm { title, message, ok, action } => {
                 let page2 = page.clone();
                 let action = match action {
@@ -688,6 +697,10 @@ impl MainWindow {
                 self.pending_menu = Some((items, anchor, true, MenuPurpose::Card { token: token.clone() }));
                 cx.notify();
             }
+            GalleryEvent::Edit(token) => {
+                self.pending_editor = Some(token.clone());
+                cx.notify();
+            }
             GalleryEvent::Archive(token) => {
                 let token = token.clone();
                 let me = cx.entity();
@@ -711,6 +724,28 @@ impl MainWindow {
     /// current one first.
     pub fn handle_deep_links(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
         for url in urls {
+            if let Some(link) = crate::deeplink::parse_settings(&url) {
+                use crate::deeplink::SettingsLink;
+                let sub = match link {
+                    SettingsLink::Menu => SettingsSub::Menu,
+                    SettingsLink::FilteredApps => SettingsSub::FilteredApps,
+                    SettingsLink::LinkedPrograms => SettingsSub::LinkedPrograms,
+                    SettingsLink::Advanced => SettingsSub::Advanced,
+                    SettingsLink::About => {
+                        self.focus_requested = true;
+                        self.navigate(Route::Info, cx);
+                        cx.notify();
+                        return;
+                    }
+                    SettingsLink::Onboarding => {
+                        // Opens its own window: not while this one is mid-update.
+                        cx.defer(crate::windows::onboarding::show_again);
+                        return;
+                    }
+                };
+                self.open_settings(sub, cx);
+                return;
+            }
             if self.last_deep_link.as_deref() == Some(url.as_str()) {
                 return;
             }
@@ -911,10 +946,7 @@ impl MainWindow {
                     let status = store(cx).gallery_cache.get(&token).map(|c| c.summary.status.clone()).unwrap_or_default();
                     self.on_gallery_event(&GalleryEvent::Open(token, status), cx);
                 }
-                "edit" => {
-                    self.pending_editor = Some(token);
-                    cx.notify();
-                }
+                "edit" => self.on_gallery_event(&GalleryEvent::Edit(token), cx),
                 "archive" => self.on_gallery_event(&GalleryEvent::Archive(token), cx),
                 _ => {}
             },
@@ -1072,6 +1104,42 @@ impl MainWindow {
         self.history.push(self.route.clone());
         self.forward.clear();
         self.go(route, cx);
+    }
+
+    /// `window.location.reload()` after a server switch: start over on the
+    /// new server (Settings' Advanced page and the System Settings pane).
+    pub fn reload_for_server(&mut self, cx: &mut Context<Self>) {
+        self.slots.clear();
+        self.history.clear();
+        self.forward.clear();
+        self.route = Route::Settings;
+        self.go(Route::Gallery, cx);
+    }
+
+    /// Whether a timelapse is open (the recorder), when a server switch
+    /// would pull the rug out from under it.
+    pub fn in_timelapse(&self) -> bool {
+        matches!(self.route, Route::Record(_))
+    }
+
+    /// Settings, on one of its pages: the app menu's Settings… (⌘,) and
+    /// `lookout://settings/…` links from the System Settings pane.
+    pub fn open_settings(&mut self, sub: SettingsSub, cx: &mut Context<Self>) {
+        self.focus_requested = true;
+        if self.route != Route::Settings {
+            self.navigate(Route::Settings, cx);
+        }
+        // A new page mounts on the next frame and picks up `pending_settings`;
+        // one already there (or animating out, which mounting brings back) moves now.
+        let live = self.slots.iter().find(|s| s.key == Route::Settings.key()).and_then(|s| match &s.page {
+            PageView::Settings(p) => Some(p.clone()),
+            _ => None,
+        });
+        match live {
+            Some(p) => p.update(cx, |p, cx| p.go(sub, cx)),
+            None => self.pending_settings = Some(sub),
+        }
+        cx.notify();
     }
 
     /// Where the user is, for `platform::relaunch`. The editor placeholder
@@ -1369,7 +1437,8 @@ impl MainWindow {
                             mw.open_add_menu(a, cx)
                         })
                     })
-                    .tooltip("Start"),
+                    .tooltip("Start")
+                    .aria_label("Start a timelapse"),
                 )
                 .child({
                     let probe = cx.entity();
@@ -1479,7 +1548,16 @@ impl Render for MainWindow {
             }
         }
         if let Some((items, anchor, at_pointer, purpose)) = self.pending_menu.take() {
-            let m = cx.new(|cx| MenuPopup::new(items, anchor, at_pointer, window, cx));
+            let menu_name = match &purpose {
+                MenuPurpose::Add => "Start a timelapse",
+                MenuPurpose::Card { .. } => "Timelapse actions",
+                MenuPurpose::Recorder(_) => "Recording options",
+            };
+            let m = cx.new(|cx| {
+                let mut m = MenuPopup::new(items, anchor, at_pointer, window, cx);
+                m.a11y_label = Some(menu_name.into());
+                m
+            });
             let p2 = purpose.clone();
             self._subs.push(cx.observe(&m, |this, m, cx| {
                 if m.read(cx).finished() {
@@ -1496,7 +1574,12 @@ impl Render for MainWindow {
         if let Some((tip, has_hero)) = self.pending_tip.take() {
             let hero: Option<AnyView> = tip.image_url.clone().map(|u| cx.new(|cx| TipHero::new(u, cx)).into());
             let body: AnyView = cx.new(|_| TipBody { tip: tip.clone(), has_hero }).into();
-            let sheet = cx.new(|cx| Sheet::new(hero, body, cx));
+            let tip_title = tip.title.clone();
+            let sheet = cx.new(|cx| {
+                let mut s = Sheet::new(hero, body, cx);
+                s.a11y_label = Some(tip_title.into());
+                s
+            });
             self._subs.push(cx.subscribe(&sheet, |this, _, ev: &SheetEvent, cx| match ev {
                 SheetEvent::Dismiss => this.tip_open = false,
                 SheetEvent::Closed => {
@@ -1510,10 +1593,12 @@ impl Render for MainWindow {
         }
         if let Some((token, url)) = self.pending_panel.take() {
             let (label, icon) = self.program_for(&url, cx);
+            let panel_label = label.clone();
             let body = cx.new(|cx| ProgramPanel::new(token.clone(), url, label, icon, cx));
             let sheet = cx.new(|cx| {
                 let mut s = Sheet::new(None, body.clone().into(), cx);
                 s.style = SheetStyle::Panel;
+                s.a11y_label = Some(panel_label.clone().into());
                 s
             });
             body.update(cx, |b, _| b.sheet = Some(sheet.downgrade()));
@@ -1555,7 +1640,11 @@ impl Render for MainWindow {
         if want_update && self.update_sheet.is_none() {
             let u = self.linux_update.clone().unwrap();
             let body: AnyView = cx.new(|_| UpdateBody::new(u)).into();
-            let sheet = cx.new(|cx| Sheet::new(None, body, cx));
+            let sheet = cx.new(|cx| {
+                let mut s = Sheet::new(None, body, cx);
+                s.a11y_label = Some("Update available".into());
+                s
+            });
             self._subs.push(cx.subscribe(&sheet, |this, _, ev: &SheetEvent, cx| match ev {
                 SheetEvent::Dismiss => {
                     // Closing remembers this version so we ask once per release.
@@ -1799,6 +1888,9 @@ impl Render for EditorPlaceholder {
         let token = self.token.clone();
         div()
             .id("editor-placeholder")
+            .role(Role::Button)
+            .aria_label("Edit your timelapse in the edit window.")
+            .aria_description("Brings the edit window to the front.")
             .size_full()
             .flex()
             .flex_col()
@@ -1896,11 +1988,14 @@ impl Render for PanelPrompt {
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(div().ts(13.0).w500().text_color(t.text_primary).child(format!("{} needs a few details", self.label)))
-                    .child(div().ts_lh(12.0, 1.5).text_color(t.text_tertiary).mt(px(2.0)).child(format!(
-                        "You closed this earlier. Your timelapse is saved either way, but {} asked for some information before it can finish up.",
-                        self.label
-                    )))
+                    .child(div().a11y_heading("panel-prompt-title", format!("{} needs a few details", self.label), 2).ts(13.0).w500().text_color(t.text_primary).child(format!("{} needs a few details", self.label)))
+                    .child({
+                        let body = format!(
+                            "You closed this earlier. Your timelapse is saved either way, but {} asked for some information before it can finish up.",
+                            self.label
+                        );
+                        div().a11y_text("panel-prompt-body", body.clone()).ts_lh(12.0, 1.5).text_color(t.text_tertiary).mt(px(2.0)).child(body)
+                    })
                     .child(div().mt(px(12.0)).child(
                         crate::ui::button::Button::new("panel-continue", "Continue")
                             .variant(crate::ui::button::Variant::Secondary)

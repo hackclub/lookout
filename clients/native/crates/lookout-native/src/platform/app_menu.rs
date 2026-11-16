@@ -1,12 +1,13 @@
 //! The macOS menu bar (`lib.rs:1188-1293` in the Tauri shell): Lookout
-//! (About, Hide, Hide Others, Show All, Quit), File → Start Timelapse (⌘N), Edit,
-//! Window, Help. Other platforms have no app menu.
+//! (About, Settings… ⌘, (new: the Tauri app had none), Hide, Hide Others,
+//! Show All, Quit), File → Start Timelapse (⌘N), Edit, Window, Help. Other
+//! platforms have no app menu.
 
 use gpui_kit::gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 
 actions!(
     lookout_menu,
-    [About, Quit, Hide, HideOthers, ShowAll, StartTimelapse, Minimize, Zoom, CloseWindow, FalloutDocs, HowToTimelapse, GitHubRepo]
+    [About, Settings, Quit, Hide, HideOthers, ShowAll, StartTimelapse, Minimize, Zoom, CloseWindow, FalloutDocs, HowToTimelapse, GitHubRepo]
 );
 
 pub fn init(cx: &mut App) {
@@ -15,6 +16,7 @@ pub fn init(cx: &mut App) {
     }
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", Settings, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-n", StartTimelapse, None),
@@ -42,6 +44,14 @@ pub fn init(cx: &mut App) {
         if let Some(h) = cx.try_global::<crate::windows::MainHandle>().map(|h| h.0) {
             h.update(cx, |mw, _, cx| mw.navigate(crate::windows::main_window::Route::Info, cx)).ok();
         }
+    });
+    cx.on_action(|_: &Settings, cx| {
+        cx.defer(|cx| {
+            crate::windows::focus_main(cx);
+            if let Some(h) = cx.try_global::<crate::windows::MainHandle>().map(|h| h.0) {
+                h.update(cx, |mw, _, cx| mw.open_settings(crate::screens::settings::Sub::Menu, cx)).ok();
+            }
+        })
     });
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -84,6 +94,8 @@ pub fn init(cx: &mut App) {
     cx.set_menus(vec![
         Menu::new("Lookout").items([
             MenuItem::action("About Lookout", About),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", Settings),
             MenuItem::separator(),
             MenuItem::action("Hide Lookout", Hide),
             MenuItem::action("Hide Others", HideOthers),

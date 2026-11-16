@@ -133,6 +133,8 @@ pub fn wire_tray(rt: tokio::runtime::Handle, cx: &mut App) {
         let text = if matches!(ev, RecorderEvent::State) && !visible { String::new() } else { text };
         tray::sync(visible, &text, paused, cx);
         tray_window::sync(cx);
+        crate::platform::dock_menu::sync(cx);
+        crate::platform::taskbar::sync(cx);
     })
     .detach();
     // `LOOKOUT_TRAY_POPUP=1` opens the tray popup shortly after launch, for

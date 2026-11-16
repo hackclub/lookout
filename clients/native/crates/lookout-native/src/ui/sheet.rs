@@ -20,6 +20,7 @@ use gpui_kit::gpui::{
 
 use crate::motion::{Anim, Curve, Ease};
 use crate::theme::{self, is_windows, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 
 pub enum SheetEvent {
@@ -55,6 +56,8 @@ pub struct Sheet {
     /// vaul's `openTime`: a press within 500ms of opening never drags
     /// ("allow scrolling when animating", `shouldDrag`).
     opened_at: Option<Instant>,
+    /// The dialog's spoken name (the sheet's title).
+    pub a11y_label: Option<gpui_kit::gpui::SharedString>,
 }
 
 struct Drag {
@@ -79,6 +82,7 @@ impl Sheet {
             focus: cx.focus_handle(),
             closed_emitted: true,
             opened_at: None,
+            a11y_label: None,
         }
     }
 
@@ -192,6 +196,8 @@ impl Render for Sheet {
             .child(
                 div()
                     .id("sheet-close")
+                    .role(Role::Button)
+                    .aria_label("Close")
                     .absolute()
                     .top(px(20.0))
                     .right(px(18.0))
@@ -215,6 +221,9 @@ impl Render for Sheet {
 
         div()
             .id("sheet-layer")
+            .role(Role::Dialog)
+            .when_some(self.a11y_label.clone(), |d, l| d.aria_label(l))
+            .a11y_flags(NodeFlags { modal: true, ..Default::default() })
             .absolute()
             .inset_0()
             .track_focus(&self.focus)

@@ -19,6 +19,10 @@
 #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Hack Club (TEAMID)"
 #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   notarize + staple (needs an identity)
 #
+# Lookout.prefPane (prefpane.sh) rides along in Contents/Library/
+# PreferencePanes, signed before the app so the app's signature seals it;
+# the app installs it into System Settings at launch.
+#
 # Nothing but the executable goes in Contents/MacOS: video is AVFoundation,
 # camera AVCaptureSession, the recorder VideoToolbox, and the Swift tray is
 # linked statically against the OS Swift runtime (/usr/lib/swift). The script
@@ -121,6 +125,10 @@ if [ -n "${APPLE_CERTIFICATE:-}" ]; then
   security list-keychains -d user -s "$keychain" "${existing[@]}"
   security find-identity -v -p codesigning "$keychain"
 fi
+
+# Nested code is signed first: the app's signature then covers it as is.
+"$here/prefpane.sh" --out "$app/Contents/Library/PreferencePanes" \
+  --icon "$app/Contents/Resources/icon.icns" --sign "$identity"
 
 echo "==> Signing ($([ "$identity" = - ] && echo ad-hoc || echo "$identity"))"
 if [ "$identity" = - ]; then

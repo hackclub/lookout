@@ -16,6 +16,7 @@ use crate::app::{self, api_base, store, store_mut};
 use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease};
 use crate::theme::{self, Theme, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::text::{MONO, TextExt};
@@ -149,6 +150,7 @@ impl Render for TipBody {
                         .text_size(px(12.0))
                         .line_height(px(12.0 * 1.15))
                         .w600()
+                        .a11y_text("tip-badge", b.clone())
                         .child(b),
                 )
             })
@@ -159,9 +161,10 @@ impl Render for TipBody {
                     .w600()
                     .text_color(t.text_primary)
                     .when(!self.has_hero, |d| d.pr(px(42.0)))
+                    .a11y_heading("tip-title", self.tip.title.clone(), 2)
                     .child(self.tip.title.clone()),
             )
-            .child(div().mt(px(8.0)).ts_lh(14.0, 1.45).text_color(t.text_secondary).child(self.tip.body.clone()))
+            .child(div().mt(px(8.0)).ts_lh(14.0, 1.45).text_color(t.text_secondary).a11y_text("tip-body", self.tip.body.clone()).child(self.tip.body.clone()))
     }
 }
 
@@ -193,6 +196,9 @@ pub fn announcement_banner(a: &Announcement, t: &Theme) -> AnyElement {
     };
     let url = a.url.clone();
     div()
+        .id("announcement")
+        .role(Role::Status)
+        .aria_label(a.message.clone())
         .flex()
         .items_center()
         .justify_between()
@@ -207,6 +213,7 @@ pub fn announcement_banner(a: &Announcement, t: &Theme) -> AnyElement {
         .when_some(url, |d, url| {
             d.child(
                 Button::new("announcement-open", "Open")
+                    .aria_description("Opens the announcement in your browser")
                     .variant(Variant::Secondary)
                     .size(BtnSize::Sm)
                     .on_click(move |_, _, cx| cx.open_url(&url)),
@@ -346,13 +353,17 @@ impl Render for UpdateBody {
                     .w600()
                     .text_color(t.text_primary)
                     .pr(px(42.0))
+                    .a11y_heading("update-title", format!("A new version of Lookout ({}) is out.", u.version), 2)
                     .child(format!("A new version of Lookout ({}) is out.", u.version)),
             )
-            .child(div().mt(px(8.0)).ts_lh(14.0, 1.45).text_color(t.text_secondary).child(if u.command.is_some() {
-                "On Linux, Lookout updates through your package manager. Run this to get it:".to_string()
-            } else {
-                u.fallback.clone().unwrap_or_default()
-            }))
+            .child({
+                let text = if u.command.is_some() {
+                    "On Linux, Lookout updates through your package manager. Run this to get it:".to_string()
+                } else {
+                    u.fallback.clone().unwrap_or_default()
+                };
+                div().mt(px(8.0)).ts_lh(14.0, 1.45).text_color(t.text_secondary).a11y_text("update-body", text.clone()).child(text)
+            })
             .map(|d| match u.command.clone() {
                 Some(cmd) => d.child(
                     div()
@@ -367,9 +378,10 @@ impl Render for UpdateBody {
                         .border_1()
                         .border_color(t.border_default)
                         .rounded(px(8.0))
-                        .child(div().flex_1().min_w(px(0.0)).ts_lh(12.0, 1.5).font_family(MONO).text_color(t.text_primary).child(cmd.clone()))
+                        .child(div().flex_1().min_w(px(0.0)).ts_lh(12.0, 1.5).font_family(MONO).text_color(t.text_primary).a11y_text("update-command", cmd.clone()).child(cmd.clone()))
                         .child(
                             Button::empty("update-copy")
+                                .aria_label(if self.copied { "Copied" } else { "Copy command" })
                                 .variant(Variant::Secondary)
                                 .size(BtnSize::Sm)
                                 .gap(6.0)

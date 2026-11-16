@@ -16,6 +16,7 @@ use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing};
+use crate::ui::a11y::prelude::*;
 use crate::ui::header_bar::HeaderBtn;
 use crate::ui::icon::Icon;
 use crate::ui::input::{InputEvent, TextInput, new_input};
@@ -100,7 +101,10 @@ impl EventEmitter<SessionEvent> for SessionPage {}
 impl SessionPage {
     pub fn new(token: String, cx: &mut Context<Self>) -> Self {
         let rename_input = new_input("", cx);
+        rename_input.update(cx, |i, _| i.a11y_label = Some("Session name".into()));
         let mut subs = Vec::new();
+        // Windows: the taskbar's compile progress ends with this page.
+        subs.push(cx.on_release(|this, cx| crate::platform::taskbar::set_compiling(&this.token, false, cx)));
         subs.push(cx.subscribe(&rename_input, |this, _, ev: &InputEvent, cx| match ev {
             InputEvent::Submit => this.submit_rename(cx),
             InputEvent::Cancel | InputEvent::Blur => this.end_rename(cx),
@@ -183,6 +187,7 @@ impl SessionPage {
     }
 
     fn on_status(&mut self, s: Status, cx: &mut Context<Self>) {
+        crate::platform::taskbar::set_compiling(&self.token, matches!(s.status.as_str(), "stopped" | "compiling"), cx);
         let prev = self.prev_status.replace(s.status.clone());
         let finished = matches!(s.status.as_str(), "stopped" | "compiling" | "complete");
         let held = s.edit_hold_until.is_some() && s.status != "failed";
@@ -382,7 +387,7 @@ impl SessionPage {
                     .flex()
                     .items_center()
                     .gap(px(16.0))
-                    .when(!editable, |d| d.child(ProgressRing::new("hold-ring", self.build_progress).size(48.0, 4.0)))
+                    .when(!editable, |d| d.child(ProgressRing::new("hold-ring", self.build_progress).size(48.0, 4.0).aria_label("Preparing timelapse")))
                     .child(
                         div()
                             .flex_1()
@@ -392,6 +397,7 @@ impl SessionPage {
                                     .ts(14.0)
                                     .w700()
                                     .text_color(t.text_primary)
+                                    .a11y_status("hold-title", if editable { "Ready to review" } else { "Preparing your timelapse…" }, Live::Polite)
                                     .child(if editable { "Ready to review" } else { "Preparing your timelapse…" }),
                             )
                             .child({
@@ -404,7 +410,7 @@ impl SessionPage {
                                 let tail = "If you close Lookout, it publishes as recorded.";
                                 let text = format!("{lead}{tail}");
                                 let range = lead.len()..text.len();
-                                div().ts(13.0).text_color(t.text_secondary).mt(px(4.0)).child(
+                                div().ts(13.0).text_color(t.text_secondary).mt(px(4.0)).a11y_text("hold-body", text.clone()).child(
                                     gpui_kit::gpui::StyledText::new(text).with_highlights(vec![(
                                         range,
                                         gpui_kit::gpui::HighlightStyle { color: Some(t.text_tertiary), ..Default::default() },
@@ -460,8 +466,8 @@ impl SessionPage {
                             .items_center()
                             .justify_center()
                             .gap(px(12.0))
-                            .child(div().ts(14.0).w700().text_color(theme::status::danger()).child("Compilation failed"))
-                            .child(div().ts(13.0).text_color(t.text_secondary).child("It will be retried automatically.")),
+                            .child(div().ts(14.0).w700().text_color(theme::status::danger()).a11y_status("failed-title", "Compilation failed", Live::Polite).child("Compilation failed"))
+                            .child(div().ts(13.0).text_color(t.text_secondary).a11y_text("failed-body", "It will be retried automatically.").child("It will be retried automatically.")),
                     ),
                 )
                 .into_any_element();
@@ -486,12 +492,14 @@ impl SessionPage {
                                 .ts(14.0)
                                 .w600()
                                 .text_color(t.text_primary)
+                                .a11y_status("processing-title", if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }, Live::Polite)
                                 .child(if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }),
                         )
                         .child(
                             div()
                                 .ts(13.0)
                                 .text_color(t.text_secondary)
+                                .a11y_text("processing-tracked", format!("Tracked time: {}", crate::ui::a11y::spoken_duration(s.tracked)))
                                 .child(format!("Tracked time: {}", crate::fmt::format_tracked(s.tracked))),
                         ),
                 ),
@@ -606,6 +614,14 @@ impl Render for SessionPage {
             } else {
                 div()
                     .id("session-name")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label(SharedString::from(name.clone()))
+                    .aria_description("Press to rename")
+                    .on_a11y_click({
+                        let e = e_dbl.clone();
+                        move |window, cx| e.update(cx, |p, cx| p.start_rename(window, cx))
+                    })
                     .h(px(32.0))
                     .flex()
                     .items_center()
@@ -633,6 +649,8 @@ impl Render for SessionPage {
                 let press = 1.0 - 0.1 * self.pencil_press.get();
                 div()
                     .id("rename-pencil")
+                    .role(Role::Button)
+                    .aria_label("Rename session")
                     .size(px(24.0))
                     .flex()
                     .items_center()
@@ -668,13 +686,17 @@ impl Render for SessionPage {
                             .ts(11.0)
                             .text_color(t.text_tertiary)
                             .mt(px(2.0 + self.date_y.get()))
+                            .a11y_text("session-date", self.created_at.as_deref().map(|c| crate::fmt::short_date(c, true)).unwrap_or_default())
                             .child(self.created_at.as_deref().map(|c| crate::fmt::short_date(c, true)).unwrap_or_default()),
                     ),
             );
         }
 
-        let stat = |value: AnyElement, label: &'static str| {
+        let stat = |value: AnyElement, label: &'static str, spoken: String| {
             card(&t)
+                .id(label)
+                .role(Role::Group)
+                .aria_label(format!("{label}: {spoken}"))
                 .flex_1()
                 .px(px(24.0))
                 .py(px(12.0))
@@ -691,8 +713,9 @@ impl Render for SessionPage {
                 .child(stat(
                     div().ts(18.0).w700().text_color(t.text_primary).child(crate::fmt::format_tracked(status.tracked)).into_any_element(),
                     "Tracked time",
+                    crate::ui::a11y::spoken_duration(status.tracked),
                 ))
-                .child(stat(badge(&status.status, BadgeSize::Lg, false, &t).into_any_element(), "Status")),
+                .child(stat(badge(&status.status, BadgeSize::Lg, false, &t).into_any_element(), "Status", crate::ui::a11y::status_words(&status.status))),
         );
         div().id("session-scroll").size_full().overflow_y_scroll().track_scroll(&self.scroll).child(col).into_any_element()
     }

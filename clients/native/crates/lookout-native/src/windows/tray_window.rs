@@ -13,6 +13,7 @@ use lookout_core::ControlMode;
 use crate::app::{self, RecorderModel};
 use crate::platform::tray::TrayAction;
 use crate::theme::{self, is_mac, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::NumberFlow;
 use crate::ui::icon::Icon;
@@ -243,6 +244,7 @@ impl Render for TrayApp {
                     .gap(px(12.0))
                     .child(
                         div()
+                            .a11y_status("tray-state", if recording { "Recording" } else { "Paused" }, Live::Polite)
                             .flex()
                             .items_center()
                             .gap(px(8.0))
@@ -250,9 +252,22 @@ impl Render for TrayApp {
                                 d.child(div().size(px(8.0)).rounded_full().bg(theme::status::danger()))
                             })
                             .when(!recording, |d| d.child(Icon::LkPauseGlyph.el(12.0, t.text_tertiary)))
-                            .child(div().ts(13.0).w700().text_color(t.text_primary).child(timer)),
+                            .child(
+                                div()
+                                    .id("tray-clock")
+                                    .role(Role::Timer)
+                                    .aria_label("Recorded time")
+                                    .aria_value(crate::ui::a11y::spoken_duration(secs as f64))
+                                    .ts(13.0)
+                                    .w700()
+                                    .text_color(t.text_primary)
+                                    .child(timer),
+                            ),
                     )
-                    .child(div().ts(12.0).text_color(t.text_secondary).child(format!("{count} {}", if count == 1 { "shot" } else { "shots" }))),
+                    .child({
+                        let shots = format!("{count} {}", if count == 1 { "shot" } else { "shots" });
+                        div().a11y_text("tray-shots", shots.clone()).ts(12.0).text_color(t.text_secondary).child(shots)
+                    }),
             )
             .child(
                 div()
@@ -260,17 +275,20 @@ impl Render for TrayApp {
                     .gap(px(4.0))
                     .child(if recording {
                         Button::new("tray-pause", "Pause")
+                            .aria_label("Pause recording")
                             .variant(Variant::Warning)
                             .size(BtnSize::Sm)
                             .on_click(|_, _, cx| super::handle_tray_action(TrayAction::Pause, cx))
                     } else {
                         Button::new("tray-resume", "Resume")
+                            .aria_label("Resume recording")
                             .variant(Variant::Success)
                             .size(BtnSize::Sm)
                             .on_click(|_, _, cx| super::handle_tray_action(TrayAction::Resume, cx))
                     })
                     .child(
                         Button::new("tray-stop", "Stop")
+                            .aria_label("Stop recording")
                             .variant(Variant::Danger)
                             .size(BtnSize::Sm)
                             .on_click(|_, _, cx| super::handle_tray_action(TrayAction::Stop, cx)),

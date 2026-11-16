@@ -159,6 +159,23 @@ pub struct FinishOutcome {
 pub struct RecorderNotice {
     pub title: String,
     pub body: String,
+    /// What happened, so a shell can offer the right buttons on the
+    /// notification (the desktop app offers Resume on a pause).
+    #[serde(default)]
+    pub kind: NoticeKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NoticeKind {
+    #[default]
+    Other,
+    /// The screen isn't being captured (a capture error or a lost source).
+    CaptureError,
+    /// Recording paused on its own while it was live.
+    Paused,
+    /// The session failed.
+    Failed,
 }
 
 /// Why a recorder action was refused or failed.
@@ -355,6 +372,7 @@ impl Recording {
                 notices.push(RecorderNotice {
                     title: "Lookout — recording error".into(),
                     body: format!("Your screen isn't being captured: {first_line}"),
+                    kind: NoticeKind::CaptureError,
                 });
             }
         }
@@ -367,10 +385,12 @@ impl Recording {
                 Some("paused") if prev.is_some_and(is_live) => notices.push(RecorderNotice {
                     title: "Lookout — recording paused".into(),
                     body: "Your session is paused and isn't capturing screenshots.".into(),
+                    kind: NoticeKind::Paused,
                 }),
                 Some("failed") => notices.push(RecorderNotice {
                     title: "Lookout — session failed".into(),
                     body: "Your recording session ended unexpectedly.".into(),
+                    kind: NoticeKind::Failed,
                 }),
                 _ => {}
             }

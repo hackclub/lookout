@@ -18,6 +18,8 @@ use gpui_kit::gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::theme;
+use crate::ui::a11y::prelude::*;
+use gpui_kit::gpui::prelude::FluentBuilder;
 
 actions!(
     text_input,
@@ -91,6 +93,9 @@ pub struct TextInput {
     was_focused: bool,
     pub text_color: Option<Hsla>,
     pub placeholder_color: Option<Hsla>,
+    /// The field's spoken name (its visible label). Falls back to the
+    /// placeholder, which is also reported as the placeholder.
+    pub a11y_label: Option<SharedString>,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -115,7 +120,26 @@ impl TextInput {
             was_focused: false,
             text_color: None,
             placeholder_color: None,
+            a11y_label: None,
         }
+    }
+
+    /// AccessKit `SetValue` / `ReplaceSelectedText`: what a screen reader's
+    /// or voice control's "type into this field" sends.
+    fn a11y_replace(&mut self, value: &str, whole: bool, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let range = if whole { 0..self.content.len() } else { self.selected_range.clone() };
+        let keep = self.content.chars().count() - self.content[range.clone()].chars().count();
+        let new_text: String = value.chars().take(self.max_len.saturating_sub(keep)).collect();
+        self.content = (self.content[0..range.start].to_owned() + &new_text + &self.content[range.end..]).into();
+        let caret = range.start + new_text.len();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.edited(cx);
+        cx.notify();
     }
 
     pub fn text(&self) -> String {
@@ -691,8 +715,53 @@ impl Render for TextInput {
                 cx.emit(InputEvent::Blur);
             }
         }
+        // Accessibility: a TextInput node with the text as one synthetic
+        // TextRun child, so screen readers can read and move the caret and
+        // selection (AccessKit positions are in characters).
+        let text = self.content.to_string();
+        let to_char = |b: usize| text[..b.min(text.len())].chars().count();
+        let (a, f) = (to_char(self.selected_range.start), to_char(self.selected_range.end));
+        let (anchor, focus) = if self.selection_reversed { (f, a) } else { (a, f) };
+        let a11y_label = self.a11y_label.clone().unwrap_or_else(|| self.placeholder.clone());
+        let disabled = self.disabled;
+        let run_text = text.clone();
+        let a11y_children = move |b: &mut gpui_kit::gpui::A11ySubtreeBuilder| {
+            use gpui_kit::gpui::accesskit::{Node, TextPosition, TextSelection};
+            let mut run = Node::new(Role::TextRun);
+            run.set_character_lengths(run_text.chars().map(|c| c.len_utf8() as u8).collect::<Vec<_>>());
+            run.set_value(run_text);
+            let id = b.synthetic_node_id("run");
+            b.push_child(id, run);
+            let parent = b.parent_node();
+            parent.set_text_selection(TextSelection {
+                anchor: TextPosition { node: id, character_index: anchor },
+                focus: TextPosition { node: id, character_index: focus },
+            });
+            NodeFlags { disabled, ..Default::default() }.apply(parent);
+        };
         div()
             .id("text-input")
+            .role(Role::TextInput)
+            .aria_label(a11y_label)
+            .aria_value(SharedString::from(text))
+            .when(!self.placeholder.is_empty(), |d| d.aria_placeholder(self.placeholder.clone()))
+            .a11y_synthetic_children(a11y_children)
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let me = cx.entity();
+                move |data, _, cx| {
+                    if let Some(gpui_kit::gpui::accesskit::ActionData::Value(v)) = data {
+                        me.update(cx, |this, cx| this.a11y_replace(v, true, cx));
+                    }
+                }
+            })
+            .on_a11y_action(AccessibleAction::ReplaceSelectedText, {
+                let me = cx.entity();
+                move |data, _, cx| {
+                    if let Some(gpui_kit::gpui::accesskit::ActionData::Value(v)) = data {
+                        me.update(cx, |this, cx| this.a11y_replace(v, false, cx));
+                    }
+                }
+            })
             .flex()
             .w_full()
             .key_context("TextInput")

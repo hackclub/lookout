@@ -45,6 +45,35 @@ pub fn parse_pair_callback(raw: &str) -> Option<(String, String)> {
     Some((code, state))
 }
 
+/// Which Settings page a `lookout://settings[/<page>]` link opens (the
+/// System Settings pane's buttons use these). Navigation only: a link from
+/// any web page can reach this, so links never change a setting themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsLink {
+    Menu,
+    FilteredApps,
+    LinkedPrograms,
+    Advanced,
+    /// Settings' "About Lookout".
+    About,
+    /// Settings' "Show onboarding" (`lookout://onboarding`).
+    Onboarding,
+}
+
+pub fn parse_settings(raw: &str) -> Option<SettingsLink> {
+    let url = normalize(raw)?;
+    let segs: Vec<&str> = url.path_segments().map(|s| s.filter(|p| !p.is_empty()).collect()).unwrap_or_default();
+    match segs.as_slice() {
+        ["settings"] => Some(SettingsLink::Menu),
+        ["settings", "filtered-apps"] => Some(SettingsLink::FilteredApps),
+        ["settings", "linked-programs"] => Some(SettingsLink::LinkedPrograms),
+        ["settings", "advanced"] => Some(SettingsLink::Advanced),
+        ["settings", "about"] => Some(SettingsLink::About),
+        ["onboarding"] => Some(SettingsLink::Onboarding),
+        _ => None,
+    }
+}
+
 /// URLs handed to the process on its command line.
 pub fn from_args() -> Vec<String> {
     std::env::args().skip(1).filter(|a| a.starts_with("lookout://")).collect()
@@ -63,5 +92,20 @@ mod tests {
         assert_eq!(extract_token("lookout://session/"), None);
         assert!(parse_pair_callback("lookout://pair?code=x&state=y").is_some());
         assert!(parse_pair_callback("lookout://session?code=x&state=y").is_none());
+    }
+
+    #[test]
+    fn settings() {
+        assert_eq!(parse_settings("lookout://settings"), Some(SettingsLink::Menu));
+        assert_eq!(parse_settings("lookout://settings/"), Some(SettingsLink::Menu));
+        assert_eq!(parse_settings("lookout://settings/filtered-apps"), Some(SettingsLink::FilteredApps));
+        assert_eq!(parse_settings("lookout://settings/linked-programs"), Some(SettingsLink::LinkedPrograms));
+        assert_eq!(parse_settings("lookout://settings/advanced"), Some(SettingsLink::Advanced));
+        assert_eq!(parse_settings("lookout://settings/about"), Some(SettingsLink::About));
+        assert_eq!(parse_settings("lookout://onboarding"), Some(SettingsLink::Onboarding));
+        assert_eq!(parse_settings("lookout://settings/nope"), None);
+        assert_eq!(parse_settings(&format!("lookout://session/{}", "a".repeat(64))), None);
+        // A token link is never mistaken for a settings one, and vice versa.
+        assert_eq!(extract_token("lookout://settings/advanced"), None);
     }
 }

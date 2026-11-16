@@ -163,6 +163,40 @@ jobs:
           grep -E 'LOOKOUT_SMOKE|panicked' smoke.log || true
           grep -q 'LOOKOUT_SMOKE .*result=pass' smoke.log
 
+      # Build the System Settings pane and load it the way System Settings
+      # does, screenshotting both states: Lookout missing, then installed
+      # (a stand-in Lookout.app registered with Launch Services, and a state
+      # file seeded so every row shows). After the smoke run, which owns the
+      # real state file.
+      - name: System Settings pane (macOS)
+        if: runner.os == 'macOS'
+        working-directory: clients/native
+        run: |
+          packaging/macos/prefpane.sh --out "$RUNNER_TEMP/pane"
+          pane="$RUNNER_TEMP/pane/Lookout.prefPane"
+          mkdir -p tour
+          swift packaging/macos/prefpane-check.swift "$pane" tour menu
+          mv tour/prefpane-menu-light.png tour/prefpane-missing-light.png
+          mv tour/prefpane-menu-dark.png tour/prefpane-missing-dark.png
+          app="$RUNNER_TEMP/Lookout.app"
+          mkdir -p "$app/Contents/MacOS"
+          version=$(packaging/version.sh)
+          sed -e "s/@VERSION@/$version/g" -e "s/@BUNDLE_VERSION@/${version%%-*}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          cp target/debug/lookout "$app/Contents/MacOS/lookout"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+          state="$HOME/Library/Application Support/com.hackclub.lookout"
+          mkdir -p "$state"
+          cat > "$state/native-state.json" <<'JSON'
+          {"blacklistedApps": ["com.apple.MobileSMS", "com.tinyspeck.slackmacgap"],
+           "programLinks": {"lapse": {"program": "lapse", "origin": "https://lapse.hackclub.com",
+             "pairUrl": "", "startUrl": "", "pairedAt": "", "deviceLabel": "", "displayName": "Lapse"}},
+           "apiBase": null}
+          JSON
+          swift packaging/macos/prefpane-check.swift "$pane" tour
+          # The pane's edits go through the helper: check one landed.
+          target/debug/lookout --settings-pane '{"op":"setFiltered","apps":["Slack"]}' | tee /dev/stderr | grep -q '"ok":true'
+          grep -q Slack "$state/native-state.json"
+
       - name: Smoke (Linux, Xvfb + lavapipe)
         if: runner.os == 'Linux'
         working-directory: clients/native

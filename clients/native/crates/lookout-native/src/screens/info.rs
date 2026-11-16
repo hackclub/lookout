@@ -11,6 +11,7 @@ use gpui_kit::gpui::{
 };
 
 use crate::theme::{Theme, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
@@ -48,6 +49,8 @@ fn link(id: &'static str, label: &'static str, url: &'static str, t: &Theme) -> 
     let hover = t.text_primary;
     div()
         .id(id)
+        .role(Role::Link)
+        .aria_label(label)
         .ts(12.0)
         .text_color(t.text_secondary)
         .hover(move |s| s.text_color(hover))
@@ -77,10 +80,10 @@ impl Render for InfoPage {
                 .items_center()
                 .justify_center()
                 .when_some(icon, |d, i| d.child(img(i).size(px(96.0)).mb(px(16.0))))
-                .child(div().ts(22.0).w600().text_color(t.text_primary).child("Lookout"))
-                .child(div().mt(px(4.0)).ts(13.0).text_color(t.text_secondary).child(SharedString::from(version)))
-                .child(div().mt(px(2.0)).ts(12.0).text_color(t.text_tertiary).child(SharedString::from(platform)))
-                .when_some(server, |d, s| d.child(div().mt(px(2.0)).ts(12.0).text_color(t.text_tertiary).child(s)))
+                .child(div().id("about-name").role(Role::Heading).aria_level(1).aria_label("Lookout").ts(22.0).w600().text_color(t.text_primary).child("Lookout"))
+                .child(div().id("about-version").role(Role::Label).aria_value(version.clone()).mt(px(4.0)).ts(13.0).text_color(t.text_secondary).child(SharedString::from(version)))
+                .child(div().id("about-platform").role(Role::Label).aria_value(platform.replace(" · ", ", ")).mt(px(2.0)).ts(12.0).text_color(t.text_tertiary).child(SharedString::from(platform)))
+                .when_some(server, |d, s| d.child(div().id("about-server").role(Role::Label).aria_value(s.clone()).mt(px(2.0)).ts(12.0).text_color(t.text_tertiary).child(s)))
                 .child(
                     div()
                         .mt(px(20.0))
@@ -113,6 +116,9 @@ pub fn hack_club_footer(id: &'static str, t: &Theme) -> impl IntoElement {
             // 526×184 artwork, letters knocked out, in the text colour.
             div()
                 .id(id)
+                .role(Role::Link)
+                .aria_label("Hack Club")
+                .aria_description("Made with love by teens at Hack Club, a 501(c)(3) nonprofit")
                 .child(gpui_kit::gpui::svg().path(Icon::HackClubFlag.path()).w(px(80.0)).h(px(28.0)).text_color(t.text_primary))
                 .on_click(|_, _, cx| cx.open_url("https://hackclub.com")),
         )

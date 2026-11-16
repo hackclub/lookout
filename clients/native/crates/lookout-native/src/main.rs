@@ -32,6 +32,7 @@ mod platform;
 mod player;
 mod screens;
 mod services;
+mod settings_pane;
 mod smoke;
 mod startup;
 mod store;
@@ -54,6 +55,14 @@ fn main() {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         // SAFETY: first thing in main, still single-threaded.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+    // The System Settings pane's helper: answer one request and exit, before
+    // anything app-like (updater, single instance, windows) can start.
+    {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some(settings_pane::ARG) {
+            settings_pane::cli(&args.next().unwrap_or_default());
+        }
     }
     logbuf::init();
     // The crash reporter is this binary run again: send it straight into
@@ -109,6 +118,8 @@ fn main() {
     // install a staged update and relaunch (exits in both cases).
     updater::boot(&initial_urls);
     startup::mark("updater");
+    // macOS: put (or refresh) Lookout's pane in System Settings, off the main thread.
+    platform::pref_pane::install_in_background();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -148,6 +159,9 @@ fn main() {
         ui::input::bind_keys(cx);
         platform::app_menu::init(cx);
         app::init(cx, rt.clone());
+        settings_pane::serve(cx);
+        platform::notifications::init(cx);
+        platform::dock_menu::init(cx);
         hang::start(cx);
         // First launch: the onboarding window comes first, and the app
         // proper starts once it's finished.

@@ -133,12 +133,7 @@ fn channel() -> Channel {
 /// The Settings toggle. Leaving Beta drops a staged beta build, so opting
 /// out never installs one; the installed beta stays until Stable passes it.
 pub fn set_beta(on: bool, cx: &mut App) {
-    with_state(|s| {
-        s.beta = on;
-        if !on && s.staged.as_ref().is_some_and(|st| !version::parse(&st.version).pre.is_empty()) {
-            s.staged = None;
-        }
-    });
+    set_beta_saved(on);
     if let Some(u) = updater(cx) {
         u.update(cx, |u, cx| {
             if !on && matches!(u.phase, UpdatePhase::Ready { .. }) && with_state(|s| s.staged.is_none()) {
@@ -148,6 +143,17 @@ pub fn set_beta(on: bool, cx: &mut App) {
             u.recheck(cx);
         });
     }
+}
+
+/// [`set_beta`]'s saved part, for when the app isn't running (the System
+/// Settings pane): the running app's updater picks it up at its next check.
+pub fn set_beta_saved(on: bool) {
+    with_state(|s| {
+        s.beta = on;
+        if !on && s.staged.as_ref().is_some_and(|st| !version::parse(&st.version).pre.is_empty()) {
+            s.staged = None;
+        }
+    });
 }
 
 /// Notes to show once, after an update landed: `(version, notes)`.

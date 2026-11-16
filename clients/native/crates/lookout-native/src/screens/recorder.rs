@@ -18,6 +18,7 @@ use crate::screens::modals::{
 };
 use crate::screens::source_picker::Sel;
 use crate::theme::{self, is_mac, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, error_page};
 use crate::ui::icon::Icon;
@@ -76,9 +77,9 @@ impl RecorderView {
             this.sync_modals(cx);
             cx.notify();
         }));
-        subs.push(cx.subscribe(&model, |_, _, ev: &RecorderEvent, cx| {
-            if let RecorderEvent::Notice { title, body } = ev {
-                crate::platform::notify(title, body, cx);
+        subs.push(cx.subscribe(&model, |this, _, ev: &RecorderEvent, cx| {
+            if let RecorderEvent::Notice { title, body, kind } = ev {
+                crate::platform::notify_recorder(&this.token, title, body, *kind, cx);
             }
         }));
         subs.push(cx.observe(&previews::entity(cx), |_, _, cx| cx.notify()));
@@ -409,7 +410,18 @@ impl Render for RecorderView {
         // the whole window every display frame (~40% CPU plus as much in
         // WindowServer at 120Hz), so while recording we only repaint once a
         // second for the clock.
+        // Spoken: the state as a live status (announced when it changes),
+        // and the clock as a timer whose value moves once a minute — never
+        // the ticking seconds.
+        let state_words = match state.phase {
+            RecorderPhase::Pausing => "Pausing",
+            RecorderPhase::Resuming => "Resuming",
+            RecorderPhase::StopPausing | RecorderPhase::StopFinishing | RecorderPhase::StopPrompting => "Stopping",
+            _ if recording => "Recording",
+            _ => "Paused",
+        };
         let status = div()
+            .a11y_status("rec-state", state_words, Live::Polite)
             .flex_none()
             .flex()
             .items_center()
@@ -430,13 +442,22 @@ impl Render for RecorderView {
                         d.child(div().size(px(10.0)).rounded_full().bg(theme::status::danger()).flex_none())
                     })
                     .when(!recording, |d| d.child(Icon::LkPauseGlyph.el(14.0, t.text_tertiary)))
-                    .child(div().ts(32.0).w700().text_color(t.text_primary).child(crate::fmt::format_time(display))),
+                    .child(
+                        div()
+                            .id("rec-clock")
+                            .role(Role::Timer)
+                            .aria_label("Recorded time")
+                            .aria_value(crate::ui::a11y::spoken_duration(display as f64))
+                            .ts(32.0)
+                            .w700()
+                            .text_color(t.text_primary)
+                            .child(crate::fmt::format_time(display)),
+                    ),
             )
-            .child(div().ts(13.0).text_color(t.text_secondary).child(format!(
-                "{} {}",
-                state.capture_count,
-                if state.capture_count == 1 { "capture" } else { "captures" }
-            )));
+            .child({
+                let captures = format!("{} {}", state.capture_count, if state.capture_count == 1 { "capture" } else { "captures" });
+                div().a11y_text("rec-captures", captures.clone()).ts(13.0).text_color(t.text_secondary).child(captures)
+            });
 
         // Preview: core-pushed frames win; otherwise poll each source at 1fps.
         let camera = matches!(state.source, RecordingSource::Camera { .. });
@@ -489,6 +510,7 @@ impl Render for RecorderView {
                 .gap(px(12.0))
                 .child(
                     Button::new("rec-pause", "Pause")
+                        .aria_label("Pause recording")
                         .variant(Variant::Warning)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -498,6 +520,7 @@ impl Render for RecorderView {
                 )
                 .child(
                     Button::new("rec-stop", "Stop")
+                        .aria_label("Stop recording")
                         .variant(Variant::Danger)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -512,6 +535,7 @@ impl Render for RecorderView {
                 .gap(px(12.0))
                 .child(
                     Button::new("rec-resume", "Resume")
+                        .aria_label("Resume recording")
                         .variant(Variant::Success)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -521,6 +545,7 @@ impl Render for RecorderView {
                 )
                 .child(
                     Button::new("rec-stop", "Stop")
+                        .aria_label("Stop recording")
                         .variant(Variant::Danger)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -548,6 +573,7 @@ impl Render for RecorderView {
                         .mb(px(12.0))
                         .ts(12.0)
                         .text_color(theme::status::warning())
+                        .a11y_status("rec-stale", "Screenshots haven't been captured in a while. Your recording may not be saving.", Live::Assertive)
                         .child("Screenshots haven't been captured in a while. Your recording may not be saving."),
                 )
             })

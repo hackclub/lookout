@@ -19,6 +19,7 @@ use gpui_kit::gpui::{
 
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, Theme, is_windows, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::text::TextExt;
 
@@ -131,8 +132,20 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radiu
                 ModalWidth::Max(w) => w.min(window_w * 0.92),
                 ModalWidth::Bare(w) => w.min(window_w - 40.0),
             };
+            let view_id = slot.id;
             let panel = div()
                 .id(("modal-panel", slot.id))
+                .role(Role::Dialog)
+                // Named by the modal view itself (`set_dialog_title`), which
+                // has rendered by the time this node is built.
+                .a11y_synthetic_children(move |b| {
+                    let node = b.parent_node();
+                    NodeFlags { modal: true, ..Default::default() }.apply(node);
+                    if let Some((role, title)) = DIALOG_TITLES.with(|m| m.borrow().get(&view_id).cloned()) {
+                        node.set_role(role);
+                        node.set_label(title.to_string());
+                    }
+                })
                 .w(px(width))
                 .max_h_full()
                 .mt(px(slot.y.get() * 2.0))
@@ -184,6 +197,25 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radiu
             backdrop.child(panel).into_any_element()
         })
         .collect()
+}
+
+thread_local! {
+    static DIALOG_TITLES: std::cell::RefCell<std::collections::HashMap<gpui_kit::gpui::EntityId, (Role, SharedString)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Name the modal dialog that shows view `id` (call from the view's render).
+/// `alert` makes it an alert dialog (a confirmation or error).
+pub fn set_dialog_title(id: gpui_kit::gpui::EntityId, title: impl Into<SharedString>, alert: bool) {
+    let role = if alert { Role::AlertDialog } else { Role::Dialog };
+    DIALOG_TITLES.with(|m| {
+        let mut m = m.borrow_mut();
+        // Views come and go; keep the map from growing without bound.
+        if m.len() > 64 {
+            m.clear();
+        }
+        m.insert(id, (role, title.into()));
+    });
 }
 
 // ── Confirm dialog (Tauri `confirm()` / `message()`) ────────────────────
@@ -248,7 +280,11 @@ impl Render for ConfirmDialog {
         } else {
             buttons = buttons.children(cancel_btn).child(ok_btn);
         }
+        set_dialog_title(cx.entity_id(), self.title.clone(), true);
         div()
+            .id("confirm-dialog")
+            .role(Role::Group)
+            .aria_label(self.message.replace("\n\n", " "))
             .track_focus(&self.focus)
             .on_key_down(move |ev, window, cx| match ev.keystroke.key.as_str() {
                 "escape" => cancel2(window, cx),

@@ -19,6 +19,7 @@ use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::platform::camera::CameraDevice;
 use crate::previews;
 use crate::theme::{self, Theme, eid, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, PressState, Variant, press_values};
 use crate::ui::feedback::error_page;
 use crate::ui::paint;
@@ -533,7 +534,7 @@ impl Render for SourcePicker {
                 .p(px(24.0))
                 .gap(px(12.0))
                 .child(Spinner::new(SpinnerSize::Md))
-                .child(div().ts(14.0).text_color(t.text_secondary).text_center().child("Detecting displays..."))
+                .child(div().ts(14.0).text_color(t.text_secondary).text_center().a11y_status("picker-detecting", "Detecting displays...", Live::Polite).child("Detecting displays..."))
                 .into_any_element();
         };
         let monitors_len = sources.monitors.len();
@@ -687,6 +688,8 @@ impl Render for SourcePicker {
                     .child(edge_faded(
                         div()
                             .id("source-list")
+                            .role(Role::RadioGroup)
+                            .aria_label("Sources")
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
@@ -814,6 +817,7 @@ impl SourcePicker {
                                 .ts(12.0)
                                 .text_center()
                                 .text_color(t.text_error)
+                                .a11y_text(eid("preview-error-text", tile.sel.key()), "Preview unavailable. Retrying…")
                                 .child("Preview unavailable. Retrying…")
                                 .child(Button::new(eid("preview-error", tile.sel.key()), "Details")
                                     .variant(Variant::Ghost)
@@ -900,6 +904,9 @@ impl SourcePicker {
             .collect();
 
         let mut b = div()
+            .id("picker-preview")
+            .role(Role::Image)
+            .aria_label(if any_tile { "Preview" } else if camera_selected { "Starting camera preview" } else { "No source selected" })
             .relative()
             .rounded(px(10.0))
             .overflow_hidden()
@@ -920,6 +927,9 @@ impl SourcePicker {
         let bar_origin = self.tab_bounds.get(&255).map(|b| f32::from(b.origin.x)).unwrap_or(0.0);
         let probe = cx.entity();
         let mut bar = div()
+            .id("source-tabs")
+            .role(Role::TabList)
+            .aria_label("Source type")
             .relative()
             .flex()
             .gap(px(4.0))
@@ -952,6 +962,9 @@ impl SourcePicker {
             bar = bar.child(
                 div()
                     .id(("tab", i as usize))
+                    .role(Role::Tab)
+                    .aria_label(SharedString::from(label.trim().to_string()))
+                    .aria_selected(active)
                     .relative()
                     .flex_1()
                     .flex()
@@ -1017,7 +1030,7 @@ impl SourcePicker {
                             .into_any_element()
                     });
                     let id = w.id;
-                    let row = source_row(&sel, title, Some(sub.into()), badge, self.selected.contains(&sel), t, cx)
+                    let row = source_row(&sel, title, Some(sub.into()), badge, w.is_minimized.then_some("Minimized"), self.selected.contains(&sel), t, cx)
                         .on_hover(cx.listener(move |p, hovered: &bool, _, cx| {
                             if *hovered {
                                 p.hovered_window = Some(id);
@@ -1034,7 +1047,7 @@ impl SourcePicker {
                     let sel = Sel::Camera(c.id.clone());
                     let label: SharedString =
                         if c.label.is_empty() { format!("Camera {}", i + 1).into() } else { c.label.clone().into() };
-                    out.push(source_row(&sel, label, None, None, self.selected.contains(&sel), t, cx).into_any_element());
+                    out.push(source_row(&sel, label, None, None, None, self.selected.contains(&sel), t, cx).into_any_element());
                 }
             }
             Tab::Screens => {}
@@ -1060,7 +1073,7 @@ impl SourcePicker {
                         .child("Primary")
                         .into_any_element()
                 });
-                out.push(source_row(&sel, m.name.clone().into(), Some(sub.into()), badge, self.selected.contains(&sel), t, cx).into_any_element());
+                out.push(source_row(&sel, m.name.clone().into(), Some(sub.into()), badge, m.is_primary.then_some("Primary"), self.selected.contains(&sel), t, cx).into_any_element());
             }
         }
         out
@@ -1084,6 +1097,7 @@ impl SourcePicker {
                     .text_center()
                     .ts(13.0)
                     .text_color(t.text_secondary)
+                    .a11y_text("cast-note", "Wayland requires explicit permission to capture screens or windows.")
                     .child("Wayland requires explicit permission to capture screens or windows."),
             );
         if !pipewire.is_empty() {
@@ -1101,7 +1115,7 @@ impl SourcePicker {
                         .rounded(px(8.0))
                         .w_full()
                         .child(radio(true, t))
-                        .child(div().ts(13.0).w600().text_color(t.text_primary).child(format!("Cast Stream {}", i + 1))),
+                        .child(div().ts(13.0).w600().text_color(t.text_primary).a11y_text(("cast-stream", i), format!("Cast Stream {}, selected", i + 1)).child(format!("Cast Stream {}", i + 1))),
                 );
             }
             col = col.child(rows).child(
@@ -1118,6 +1132,7 @@ impl SourcePicker {
                     )
                     .child(
                         Button::new("cast-add", "+")
+                            .aria_label("Add more screens or windows")
                             .variant(Variant::Secondary)
                             .size(BtnSize::Md)
                             .fixed(40.0, 34.0)
@@ -1128,6 +1143,7 @@ impl SourcePicker {
         } else {
             col = col.child(
                 Button::new("cast-first", "+ Add new Screen/Window")
+                    .aria_label("Add new screen or window")
                     .variant(Variant::Secondary)
                     .size(BtnSize::Md)
                     .on_click(move |_, _, cx| e3.update(cx, |p, cx| p.cast(false, cx))),
@@ -1161,6 +1177,7 @@ fn source_row(
     title: SharedString,
     subtitle: Option<SharedString>,
     badge: Option<AnyElement>,
+    badge_text: Option<&'static str>,
     selected: bool,
     t: &Theme,
     cx: &mut Context<SourcePicker>,
@@ -1182,8 +1199,18 @@ fn source_row(
     let (fill, border) = if selected { (t.bg_selected, t.border_selected) } else { (t.bg_surface, t.border_default) };
     let (s1, s2, s3) = (st.clone(), st.clone(), st);
     let sel_click = sel.clone();
+    // Spoken: "Built-in Display, radio button, checked, 2560x1600, Primary".
+    let a11y_desc = [subtitle.as_ref().map(|s| s.to_string()), badge_text.map(str::to_string)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
     div()
         .id(eid("source-row", &key))
+        .role(Role::RadioButton)
+        .aria_label(title.clone())
+        .when(!a11y_desc.is_empty(), |d| d.aria_description(a11y_desc))
+        .aria_toggled(if selected { Toggled::True } else { Toggled::False })
         .relative()
         .flex()
         .items_center()

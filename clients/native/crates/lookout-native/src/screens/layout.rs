@@ -7,6 +7,7 @@ use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{AnyElement, App, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
 use crate::theme::Theme;
+use crate::ui::a11y::prelude::*;
 use crate::ui::primitives::back_button;
 use crate::ui::text::TextExt;
 
@@ -42,17 +43,18 @@ pub fn page_layout(
                 .text_center()
                 .px(px(24.0))
                 .children(icon)
-                .when_some(title, |d, title| d.child(div().ts(20.0).w700().text_color(t.text_primary).mb(px(8.0)).child(title)))
+                .when_some(title, |d, title| d.child(div().a11y_heading("page-title", title.clone(), 1).ts(20.0).w700().text_color(t.text_primary).mb(px(8.0)).child(title)))
                 .when_some(subtitle, |d, s| {
                     d.child(
                         div()
+                            .a11y_text("page-subtitle", s.clone())
                             .ts_lh(13.0, 1.6)
                             .text_color(t.text_secondary)
                             .when(has_hint, |d| d.mb(px(16.0)))
                             .child(s),
                     )
                 })
-                .when_some(hint, |d, h| d.child(div().ts_lh(12.0, 1.5).text_color(t.text_tertiary).child(h)))
+                .when_some(hint, |d, h| d.child(div().a11y_text("page-hint", h.clone()).ts_lh(12.0, 1.5).text_color(t.text_tertiary).child(h)))
                 .children(children),
         )
         .when(!actions.is_empty(), |d| d.child(div().flex_none().flex().flex_col().gap(px(12.0)).children(actions)))

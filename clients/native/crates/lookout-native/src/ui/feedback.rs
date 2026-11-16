@@ -11,6 +11,7 @@ use gpui_kit::gpui::{
 
 use crate::motion::{self, Anim, Ease};
 use crate::theme::{self, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::paint;
 use crate::ui::text::{MONO, TextExt};
@@ -84,8 +85,20 @@ impl RenderOnce for ErrorBanner {
             text = text.child(div().mt(px(14.0)).opacity(0.8).child(r));
         }
         let id = self.id.clone();
+        // Spoken as an alert when it appears: title (or "Error"), then the
+        // error and the reassurance.
+        let mut spoken = self.error.to_string();
+        if let Some(r) = &self.reassurance {
+            spoken.push_str(". ");
+            spoken.push_str(r);
+        }
         div()
             .id(self.id)
+            .role(Role::Alert)
+            .aria_label(self.title.clone().unwrap_or_else(|| "Error".into()))
+            .aria_description(spoken.clone())
+            .aria_value(spoken)
+            .aria_live(Live::Assertive)
             .flex()
             .items_start()
             .gap(px(8.0))
@@ -100,8 +113,8 @@ impl RenderOnce for ErrorBanner {
             .ts(13.0)
             .child(text)
             .children(self.action.map(|(l, f)| banner_btn(SharedString::from(format!("{id:?}-action")), &l, err, f)))
-            .children(self.on_copy.map(|f| banner_btn(SharedString::from(format!("{id:?}-copy")), "Copy", err, f)))
-            .children(self.on_dismiss.map(|f| banner_btn(SharedString::from(format!("{id:?}-x")), "×", err, f).font_size(16.0)))
+            .children(self.on_copy.map(|f| banner_btn(SharedString::from(format!("{id:?}-copy")), "Copy", err, f).aria_label("Copy error")))
+            .children(self.on_dismiss.map(|f| banner_btn(SharedString::from(format!("{id:?}-x")), "×", err, f).font_size(16.0).aria_label("Dismiss")))
     }
 }
 
@@ -121,9 +134,14 @@ pub fn error_page(
         .justify_center()
         .p(px(24.0))
         .text_center()
-        .child(div().ts(20.0).w700().text_color(theme::status::danger()).mb(px(8.0)).child(title.into()))
-        .child(
+        .child({
+            let title = title.into();
+            div().a11y_heading("errpage-title", title.clone(), 1).ts(20.0).w700().text_color(theme::status::danger()).mb(px(8.0)).child(title)
+        })
+        .child({
+            let error = error.into();
             div()
+                .a11y_status("errpage-error", error.clone(), Live::Assertive)
                 .font_family(MONO)
                 .ts(11.0)
                 .max_w(px(400.0))
@@ -131,8 +149,8 @@ pub fn error_page(
                 .overflow_hidden()
                 .text_color(t.text_error)
                 .mb(px(16.0))
-                .child(error.into()),
-        )
+                .child(error)
+        })
         .child(
             div()
                 .flex()
@@ -162,6 +180,7 @@ pub struct ProgressRing {
     track: Option<Hsla>,
     transition_ms: f32,
     ease: Ease,
+    aria_label: Option<SharedString>,
 }
 
 impl ProgressRing {
@@ -176,7 +195,13 @@ impl ProgressRing {
             track: None,
             transition_ms: 250.0,
             ease: Ease::Linear,
+            aria_label: None,
         }
+    }
+    /// What the ring measures, for screen readers ("Export progress").
+    pub fn aria_label(mut self, l: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(l.into());
+        self
     }
     pub fn size(mut self, s: f32, stroke: f32) -> Self {
         self.size = s;
@@ -227,6 +252,13 @@ impl RenderOnce for ProgressRing {
         let (size, stroke) = (self.size, self.stroke);
         let percent = ((p * 100.0).floor() as i64).min(99);
         div()
+            .id(self.id.clone())
+            .role(Role::ProgressIndicator)
+            .when_some(self.aria_label.clone(), |d, l| d.aria_label(l))
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(100.0)
+            .aria_numeric_value(percent as f64)
+            .aria_value(SharedString::from(format!("{percent}%")))
             .relative()
             .size(px(size))
             .flex_none()
@@ -576,6 +608,8 @@ pub fn minutes_flow(id: &str, minutes: f64, color: Hsla) -> impl IntoElement {
     // at 59m → 1h 0m the *first* NumberFlow rolls 59 → 1 and the minutes
     // one mounts fresh.
     let k = |i: usize| SharedString::from(format!("{id}-{i}"));
+    // Spoken by the caller as part of its sentence (the digits roll; the
+    // words shouldn't).
     let mut row = div().flex().items_center().text_color(color);
     if h > 0 {
         row = row

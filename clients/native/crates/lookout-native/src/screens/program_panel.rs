@@ -31,6 +31,7 @@ use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::platform::webview::{EngineMissing, PanelWebView, WebEvent};
 use crate::theme::theme;
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::icon::Icon;
 use crate::ui::sheet::Sheet;
@@ -347,11 +348,14 @@ impl Render for ProgramPanel {
                 .p(px(20.0))
                 .text_center()
                 .child(Icon::WarningCircleFill.el(26.0, t.text_tertiary))
-                .child(div().ts_lh(12.0, 1.5).text_color(t.text_secondary).child(if self.no_engine {
-                    format!("{} can't open inside Lookout because WebKitGTK isn't installed. Open it in your browser instead.", self.label)
-                } else {
-                    format!("{} couldn't load here. Please close this panel and try again.", self.label)
-                }))
+                .child({
+                    let msg = if self.no_engine {
+                        format!("{} can't open inside Lookout because WebKitGTK isn't installed. Open it in your browser instead.", self.label)
+                    } else {
+                        format!("{} couldn't load here. Please close this panel and try again.", self.label)
+                    };
+                    div().a11y_status("panel-error-text", msg.clone(), Live::Polite).ts_lh(12.0, 1.5).text_color(t.text_secondary).child(msg)
+                })
                 .when(self.no_engine, |d| {
                     let url = self.url.clone();
                     d.child(
@@ -366,6 +370,10 @@ impl Render for ProgramPanel {
                 .size_full()
                 .relative()
                 .id("panel-web-content")
+                // The embedded page draws offscreen into a texture; its own
+                // accessibility tree isn't bridged into ours (yet).
+                .role(Role::Group)
+                .aria_label(self.label.clone())
                 .track_focus(&self.focus)
                 .when(self.web.as_ref().is_some_and(|web| web.composited()) && show_web, |mut d| {
                     for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
@@ -505,6 +513,8 @@ impl Render for ProgramPanel {
                             .child(
                                 div()
                                     .id("panel-close")
+                                    .role(Role::Button)
+                                    .aria_label("Close")
                                     .size(px(22.0))
                                     .rounded_full()
                                     .flex()

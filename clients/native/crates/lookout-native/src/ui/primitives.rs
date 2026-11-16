@@ -12,6 +12,7 @@ use gpui_kit::gpui::{
 
 use crate::motion::{self, Curve, Spring};
 use crate::theme::{self, Theme, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::button::{PressState, press_values};
 use crate::ui::text::TextExt;
 
@@ -216,11 +217,66 @@ pub struct PressScale {
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_right_click: Option<Rc<dyn Fn(gpui_kit::gpui::Point<Pixels>, &mut Window, &mut App)>>,
     full: bool,
+    role: Option<Role>,
+    aria_label: Option<SharedString>,
+    aria_description: Option<SharedString>,
+    set_pos: Option<(usize, usize)>,
+    extra_actions: Vec<crate::ui::a11y::ExtraAction>,
+    on_scroll_into_view: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
 
 impl PressScale {
     pub fn new(id: impl Into<ElementId>, scale: f32, content: impl IntoElement) -> Self {
-        Self { id: id.into(), scale, content: content.into_any_element(), on_click: None, on_right_click: None, full: false }
+        Self {
+            id: id.into(),
+            scale,
+            content: content.into_any_element(),
+            on_click: None,
+            on_right_click: None,
+            full: false,
+            role: None,
+            aria_label: None,
+            aria_description: None,
+            set_pos: None,
+            extra_actions: Vec::new(),
+            on_scroll_into_view: None,
+        }
+    }
+    /// A screen reader moving to this surface asks to scroll it into view
+    /// (GPUI doesn't do that on its own).
+    pub fn on_scroll_into_view(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_scroll_into_view = Some(Rc::new(f));
+        self
+    }
+    /// An action screen readers reach as a button inside this surface (for
+    /// what's otherwise only in its context menu).
+    pub fn a11y_action(
+        mut self,
+        label: impl Into<SharedString>,
+        description: Option<SharedString>,
+        f: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.extra_actions.push(crate::ui::a11y::ExtraAction { label: label.into(), description, run: Rc::new(f) });
+        self
+    }
+    /// 1-based position in a list of `size` (for list items).
+    pub fn aria_position(mut self, pos: usize, size: usize) -> Self {
+        self.set_pos = Some((pos, size));
+        self
+    }
+    /// Expose the surface to assistive technology as one node. Defaults to
+    /// a Button when it has a click handler.
+    pub fn role(mut self, r: Role) -> Self {
+        self.role = Some(r);
+        self
+    }
+    pub fn aria_label(mut self, l: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(l.into());
+        self
+    }
+    pub fn aria_description(mut self, d: impl Into<SharedString>) -> Self {
+        self.aria_description = Some(d.into());
+        self
     }
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(f));
@@ -239,7 +295,7 @@ impl PressScale {
 struct Measured(Bounds<Pixels>);
 
 impl RenderOnce for PressScale {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, |_, _| PressState::new());
         let measured = window.use_keyed_state((self.id.clone(), "m"), cx, |_, _| Measured(Bounds::default()));
         let (_, scale) = press_values(&state, window, cx);
@@ -253,6 +309,9 @@ impl RenderOnce for PressScale {
         let s2 = state.clone();
         let s3 = state.clone();
         let m = measured.clone();
+        let extra = Rc::new(std::mem::take(&mut self.extra_actions));
+        let extra_ids: Rc<std::cell::RefCell<Vec<gpui_kit::gpui::accesskit::NodeId>>> = Rc::default();
+        let (extra_p, ids_p) = (extra.clone(), extra_ids.clone());
         let mut root = div()
             .id(self.id.clone())
             .relative()
@@ -263,7 +322,7 @@ impl RenderOnce for PressScale {
                     move |bounds, _, cx| {
                         m.update(cx, |mm, _| mm.0 = bounds);
                     },
-                    |_, _, _, _| {},
+                    move |_, _, window, _| crate::ui::a11y::register_extra_actions(window, &extra_p, &ids_p),
                 )
                 .absolute()
                 .inset_0(),
@@ -292,6 +351,37 @@ impl RenderOnce for PressScale {
             });
         if self.full {
             root = root.size_full();
+        }
+        let role = self.role.or(if self.on_click.is_some() && self.aria_label.is_some() { Some(Role::Button) } else { None });
+        if let Some(r) = role {
+            root = root.role(r);
+        }
+        if let Some(l) = self.aria_label {
+            root = root.aria_label(l);
+        }
+        if let Some(d) = self.aria_description {
+            root = root.aria_description(d);
+        }
+        if let Some((pos, size)) = self.set_pos {
+            root = root.aria_position_in_set(pos).aria_size_of_set(size);
+        }
+        if let Some(f) = self.on_scroll_into_view.clone() {
+            root = root.on_a11y_action(AccessibleAction::ScrollIntoView, move |_, window, cx| f(window, cx));
+        }
+        if !extra.is_empty() {
+            root = root.a11y_synthetic_children(move |b| crate::ui::a11y::push_extra_actions(b, &extra, &extra_ids));
+        }
+        if let Some(f) = self.on_right_click.clone() {
+            // The screen reader's "show menu" opens the context menu at the
+            // surface's centre.
+            let m = measured.clone();
+            root = root.on_a11y_action(AccessibleAction::ShowContextMenu, move |_, window, cx| {
+                let b = m.read(cx).0;
+                f(b.center(), window, cx)
+            });
+        }
+        if let Some(f) = self.on_click.clone() {
+            root = root.on_a11y_click(move |window, cx| f(&ClickEvent::default(), window, cx));
         }
         if let Some(f) = self.on_click {
             root = root.on_click(move |ev, window, cx| {
@@ -425,7 +515,7 @@ pub fn edge_fade(top: bool, height: f32, bg: Hsla) -> impl IntoElement {
 /// Back button label the way each platform's Tauri build drew it.
 pub fn back_button(id: impl Into<ElementId>, label: &'static str, t: &Theme, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> crate::ui::button::Button {
     use crate::ui::button::{BtnSize, Button, Variant};
-    let b = Button::empty(id).variant(Variant::Secondary).size(BtnSize::Sm).card_style(t).on_click(on_click);
+    let b = Button::empty(id).variant(Variant::Secondary).size(BtnSize::Sm).card_style(t).aria_label(label).on_click(on_click);
     if theme::is_mac() {
         b.child(format!("← {label}"))
     } else {

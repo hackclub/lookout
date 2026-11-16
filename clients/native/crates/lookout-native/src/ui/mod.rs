@@ -1,6 +1,7 @@
 //! Lookout's component library — ports of `@lookout/react`'s primitives and
 //! the desktop app's shared pieces, drawn to match pixel for pixel.
 
+pub mod a11y;
 pub mod button;
 pub mod feedback;
 pub mod header_bar;

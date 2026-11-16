@@ -61,6 +61,20 @@ The crates.io 0.3.10 release, vendored only for this patch:
   The next `start` (resize, activation, screen change) tries the link again;
   `stop` cancels the timer.
 
+- `window.rs` (zed-industries/zed#66691, open upstream and unchanged through
+  gpui-pre 0.3.13 and Zed `main` as of 2026-11-15): `a11y_init` creates the
+  AccessKit adapter with `SubclassingAdapter::new(native_view)` instead of
+  `SubclassingAdapter::for_window(native_window)`. `GPUIView` is the first
+  responder, and AppKit resolves `[NSApp accessibilityFocusedUIElement]` (what
+  VoiceOver and dictation apps ask first) from the first responder; with the
+  content view subclassed, the answer was the window even while a control in
+  the tree had focus. This is the fix proposed in the issue, which reports it
+  working in-process on macOS 27. The retain-cycle comment in `Drop for
+  MacWindow` now names `GPUIView`; dropping the adapter there still breaks the
+  cycle. Only type-checked from Linux (`lookout-maccheck`) so far: check with
+  VoiceOver (focus a text field, ⌘-Tab away and back; VoiceOver should land
+  on the field, not the window). Drop the patch once upstream fixes #66691.
+
 ## Upgrading GPUI
 
 Re-copy the new release into each directory, then re-apply the hunks above

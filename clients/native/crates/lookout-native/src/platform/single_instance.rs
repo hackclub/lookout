@@ -3,6 +3,9 @@
 //! uses a socket in the runtime dir; Windows a per-user named pipe (not a
 //! loopback port: Hyper-V and WSL's mirrored networking reserve whole port
 //! ranges, and a failed bind made every launch a second app).
+//!
+//! On Unix the socket also carries the System Settings pane's requests
+//! (`{"pane": {...}}`, see `settings_pane`), answered on the same connection.
 
 /// Either the primary instance (with a receiver of forwarded links), or a
 /// secondary that already forwarded its arguments and should exit.
@@ -12,7 +15,7 @@ pub enum Instance {
 }
 
 #[cfg(unix)]
-fn path() -> std::path::PathBuf {
+pub fn path() -> std::path::PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     dir.join(format!("{}.native.sock", crate::store::APP_ID))
 }
@@ -36,10 +39,26 @@ pub fn acquire(urls: &[String]) -> Instance {
                     .spawn(move || {
                         for stream in listener.incoming().flatten() {
                             let mut line = String::new();
-                            if BufReader::new(stream).read_line(&mut line).is_ok() {
-                                let urls: Vec<String> = serde_json::from_str(line.trim()).unwrap_or_default();
-                                let _ = tx.send(urls);
+                            if BufReader::new(&stream).read_line(&mut line).is_err() {
+                                continue;
                             }
+                            if let Ok(serde_json::Value::Object(mut m)) = serde_json::from_str(line.trim()) {
+                                if let Some(req) = m.remove("pane") {
+                                    // Answered on its own thread: a server probe or an
+                                    // unlink takes seconds, and links mustn't wait.
+                                    std::thread::spawn(move || {
+                                        let (reply_tx, reply_rx) = flume::bounded(1);
+                                        crate::settings_pane::relay(req, reply_tx);
+                                        let reply = reply_rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap_or_else(|_| {
+                                            serde_json::json!({ "ok": false, "error": "Lookout took too long to answer." })
+                                        });
+                                        let _ = writeln!(&stream, "{reply}");
+                                    });
+                                    continue;
+                                }
+                            }
+                            let urls: Vec<String> = serde_json::from_str(line.trim()).unwrap_or_default();
+                            let _ = tx.send(urls);
                         }
                     })
                     .ok();

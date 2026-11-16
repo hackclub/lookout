@@ -31,6 +31,7 @@ use gpui_kit::gpui::{
 use crate::motion::{self, Anim, Curve, Ease};
 use crate::player::{self, Backend, Frame, Status};
 use crate::theme;
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 use crate::ui::spinner::{Spinner, SpinnerSize};
 use crate::ui::text::TextExt;
@@ -516,10 +517,12 @@ impl Drop for VideoPlayer {
 // ── Rendering ─────────────────────────────────────────────────────────
 
 /// A round icon button in the control bar.
-fn ctl_button(id: impl Into<ElementId>, active: bool, tip: Option<&'static str>, child: impl IntoElement) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+fn ctl_button(id: impl Into<ElementId>, label: &'static str, active: bool, tip: Option<&'static str>, child: impl IntoElement) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
     // video.js: 36px circular buttons; hover/expanded fill at 10% white.
     let d = div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label)
         .size(px(36.0))
         .flex_none()
         .flex()
@@ -593,8 +596,8 @@ impl VideoPlayer {
             .bg(theme::rgba8(11, 13, 18, 1.0))
             .rounded(px(self.radius))
             .child(Icon::WarningCircleFill.el(28.0, theme::white(0.5)))
-            .child(div().ts(17.0).w600().text_color(theme::hex(0xf4f5f7)).child("Can't play this timelapse"))
-            .child(div().max_w(px(460.0)).ts_lh(13.0, 1.5).text_color(theme::hex(0xaab0ba)).child(detail))
+            .child(div().a11y_status("video-error-title", "Can't play this timelapse", Live::Polite).ts(17.0).w600().text_color(theme::hex(0xf4f5f7)).child("Can't play this timelapse"))
+            .child(div().a11y_text("video-error-detail", detail.clone()).max_w(px(460.0)).ts_lh(13.0, 1.5).text_color(theme::hex(0xaab0ba)).child(detail))
             .child(
                 div()
                     .mt(px(4.0))
@@ -605,6 +608,8 @@ impl VideoPlayer {
                     .child(
                         div()
                             .id("video-download")
+                            .role(Role::Link)
+                            .aria_label("Open the file in another app")
                             .text_color(theme::hex(0x6ea8ff))
                             .cursor_pointer()
                             .hover(|s| s.underline())
@@ -690,6 +695,18 @@ impl VideoPlayer {
             .child(
                 div()
                     .id("video-surface")
+                    // The controls hide while playing, so the picture itself
+                    // is the always-reachable play/pause button.
+                    .role(Role::Button)
+                    .aria_label(if self.playing { "Pause" } else if self.status.ended { "Replay" } else { "Play" })
+                    .aria_description(format!(
+                        "Timelapse, {}",
+                        crate::ui::a11y::playhead_value_text(self.position.floor(), self.duration.floor())
+                    ))
+                    .on_a11y_click({
+                        let e = entity.clone();
+                        move |_, cx| e.update(cx, |v, cx| if v.status.has_frame { v.toggle(cx) })
+                    })
                     .absolute()
                     .inset_0()
                     .on_mouse_down(
@@ -771,8 +788,36 @@ impl VideoPlayer {
         // 12px white thumb that only shows under the pointer) ──
         let probe = entity.clone();
         let global = entity.clone();
+        let seek_by = |delta: f64| {
+            let e = entity.clone();
+            move |_: Option<&gpui_kit::gpui::accesskit::ActionData>, _: &mut Window, cx: &mut gpui_kit::gpui::App| {
+                e.update(cx, |v, cx| {
+                    let t = v.position + delta;
+                    v.seek(t, cx);
+                    v.poke();
+                })
+            }
+        };
         let slider = div()
             .id("video-bar")
+            .role(Role::Slider)
+            .aria_label("Seek")
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(d.max(0.0))
+            .aria_numeric_value(self.position.floor())
+            .aria_numeric_value_step(5.0)
+            .aria_value(crate::ui::a11y::playhead_value_text(self.position.floor(), d.floor()))
+            .on_a11y_action(AccessibleAction::Increment, seek_by(5.0))
+            .on_a11y_action(AccessibleAction::Decrement, seek_by(-5.0))
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let e = entity.clone();
+                move |data, _, cx| {
+                    if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(t)) = data {
+                        let t = *t;
+                        e.update(cx, |v, cx| v.seek(t, cx));
+                    }
+                }
+            })
             .relative()
             .flex_1()
             .min_w(px(72.0))
@@ -851,7 +896,7 @@ impl VideoPlayer {
         let pp = self.pp.get();
         let ended = self.status.ended;
         let play_icon = if ended { Icon::VpReplay } else { Icon::VpPlay };
-        let play_pause = ctl_button("video-play", false, Some("Play / Pause (Space)"), {
+        let play_pause = ctl_button("video-play", if self.playing { "Pause" } else if ended { "Replay" } else { "Play" }, false, Some("Play / Pause (Space)"), {
             div()
                 .relative()
                 .size(px(20.0))
@@ -889,6 +934,13 @@ impl VideoPlayer {
             };
             div()
                 .id("video-time")
+                .role(Role::Button)
+                .aria_label(if self.show_remaining {
+                    format!("{} remaining", crate::ui::a11y::spoken_clock((d - self.position).max(0.0).floor()))
+                } else {
+                    crate::ui::a11y::playhead_value_text(self.position.floor(), d.floor())
+                })
+                .aria_description(if self.show_remaining { "Show elapsed time" } else { "Show remaining time" })
                 .ml(px(8.0))
                 .flex()
                 .gap(px(4.0))
@@ -905,9 +957,10 @@ impl VideoPlayer {
         };
 
         let settings_probe = entity.clone();
-        let settings = ctl_button("video-settings", self.speed_open, (!self.speed_open).then_some("Settings"), {
+        let settings = ctl_button("video-settings", "Playback settings", self.speed_open, (!self.speed_open).then_some("Settings"), {
             Icon::GearSixFill.el(20.0, theme::white(1.0))
         })
+        .aria_expanded(self.speed_open)
         .relative()
         .child(
             canvas(move |b, _, cx| settings_probe.update(cx, |v, _| v.speed_bounds = b), |_, _, _, _| {})
@@ -920,7 +973,7 @@ impl VideoPlayer {
             cx.notify();
         }));
 
-        let fs_btn = ctl_button("video-fullscreen", false, Some(if fs { "Exit full screen (F)" } else { "Full screen (F)" }), {
+        let fs_btn = ctl_button("video-fullscreen", if fs { "Exit full screen" } else { "Full screen" }, false, Some(if fs { "Exit full screen (F)" } else { "Full screen (F)" }), {
             (if fs { Icon::VpShrink } else { Icon::VpExpand }).el(20.0, theme::white(1.0))
         })
         .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.toggle_fullscreen(window, cx)));
@@ -1020,6 +1073,9 @@ impl VideoPlayer {
         let row = |id: SharedString, label: String, checked: bool| {
             div()
                 .id(id)
+                .role(Role::MenuItemRadio)
+                .aria_label(SharedString::from(label.clone()))
+                .aria_toggled(if checked { Toggled::True } else { Toggled::False })
                 .h(px(32.0))
                 .px(px(10.0))
                 .rounded(px(8.0))
@@ -1040,6 +1096,8 @@ impl VideoPlayer {
         };
         let mut menu = div()
             .id("video-settings-menu")
+            .role(Role::Menu)
+            .aria_label("Playback settings")
             .absolute()
             .right(px(right.max(8.0)))
             .bottom(px(bottom))
@@ -1068,7 +1126,7 @@ impl VideoPlayer {
         }
         menu = menu
             .child(div().my(px(4.0)).mx(px(6.0)).h(px(1.0)).bg(theme::white(0.08)))
-            .child(row("video-loop".into(), "Loop".into(), self.looping).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+            .child(row("video-loop".into(), "Loop".into(), self.looping).role(Role::MenuItemCheckBox).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 v.toggle_loop(cx);
             })));

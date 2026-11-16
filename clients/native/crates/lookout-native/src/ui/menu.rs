@@ -24,6 +24,7 @@ use gpui_kit::gpui::{
 use crate::images::{self, Remote};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, Theme, is_linux, is_mac, theme};
+use crate::ui::a11y::prelude::*;
 use crate::ui::icon::Icon;
 use crate::ui::paint;
 use crate::ui::text::TextExt;
@@ -77,6 +78,8 @@ pub struct MenuPopup {
     focus: FocusHandle,
     measured: Bounds<Pixels>,
     look: Look,
+    /// The menu's spoken name ("Start a timelapse").
+    pub a11y_label: Option<SharedString>,
 }
 
 impl EventEmitter<MenuEvent> for MenuPopup {}
@@ -114,6 +117,7 @@ impl MenuPopup {
             focus,
             measured: Bounds::default(),
             look,
+            a11y_label: None,
         }
     }
 
@@ -230,6 +234,8 @@ impl Render for MenuPopup {
         };
         let me = cx.entity();
         let probe = cx.entity();
+        let item_count = self.items.iter().filter(|it| matches!(it, MenuItem::Item { .. })).count();
+        let mut item_pos = 0usize;
         let rows: Vec<AnyElement> = self
             .items
             .iter()
@@ -261,8 +267,15 @@ impl Render for MenuPopup {
                     let id = id.clone();
                     let me2 = me.clone();
                     let me3 = me.clone();
+                    item_pos += 1;
                     div()
                         .id(("menu-row", i))
+                        .role(Role::MenuItem)
+                        .aria_label(SharedString::from(label.clone()))
+                        .aria_position_in_set(item_pos)
+                        .aria_size_of_set(item_count)
+                        .aria_disabled(disabled)
+                        .when(highlighted, |d| d.aria_active_descendant())
                         .flex()
                         .items_center()
                         .map(|d| match look {
@@ -380,6 +393,9 @@ impl Render for MenuPopup {
         let me_bg = cx.entity();
         div()
             .id("menu-layer")
+            .role(Role::Menu)
+            .when_some(self.a11y_label.clone(), |d, l| d.aria_label(l))
+            .aria_orientation(gpui_kit::gpui::Orientation::Vertical)
             .absolute()
             .inset_0()
             .track_focus(&self.focus)
