@@ -111,6 +111,56 @@ describe("GET /api/media/:id/thumbnail.jpg", () => {
   });
 });
 
+describe("unpublished thumbnails (edit-hold preview)", () => {
+  // During an edit hold the thumbnail is the first frame of the uncut,
+  // unmasked preview: it must not be publicly reachable.
+  it("404s on the public media route", async () => {
+    process.env.R2_PUBLIC_DOMAIN = "cdn.example.com";
+    const id = await seedSession({
+      status: "stopped",
+      videoR2Key: null,
+      editHoldUntil: new Date(Date.now() + 60_000),
+    });
+    const r = await app.inject({ method: "GET", url: `/api/media/${id}/thumbnail.jpg` });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it("gives the token holder a presigned URL instead", async () => {
+    process.env.R2_PUBLIC_DOMAIN = "cdn.example.com";
+    const id = await seedSession({
+      status: "stopped",
+      videoR2Key: null,
+      editHoldUntil: new Date(Date.now() + 60_000),
+    });
+    const [{ token }] = await db
+      .select({ token: schema.sessions.token })
+      .from(schema.sessions)
+      .where(sql`${schema.sessions.id} = ${id}`);
+
+    const get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().thumbnailUrl).toBe("https://r2.test/fake-upload-url");
+
+    const batch = await app.inject({
+      method: "POST",
+      url: "/api/sessions/batch",
+      payload: { tokens: [token] },
+    });
+    expect(batch.json().sessions[0].thumbnailUrl).toBe("https://r2.test/fake-upload-url");
+  });
+
+  it("keeps the permanent media URL once published", async () => {
+    const id = await seedSession();
+    const [{ token }] = await db
+      .select({ token: schema.sessions.token })
+      .from(schema.sessions)
+      .where(sql`${schema.sessions.id} = ${id}`);
+    const get = await app.inject({ method: "GET", url: `/api/sessions/${token}` });
+    expect(get.json().thumbnailUrl).toBe(
+      `${process.env.BASE_URL}/api/media/${id}/thumbnail.jpg`,
+    );
+  });
+});
+
 describe("public media from a third-party origin (LOOKOUT-BACKEND-F)", () => {
   it.each(["thumbnail.jpg", "video.mp4"])(
     "serves %s with Access-Control-Allow-Origin: *",

@@ -283,9 +283,12 @@ export async function internalRoutes(app: FastifyInstance) {
             startedAt: s.startedAt?.toISOString() ?? null,
             createdAt: s.createdAt.toISOString(),
             totalActiveSeconds: s.totalActiveSeconds,
-            thumbnailUrl: s.thumbnailR2Key
-              ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
-              : null,
+            // Published only: before that the thumbnail is the user's
+            // unmasked, uncut preview frame (and /api/media 404s it).
+            thumbnailUrl:
+              s.status === "complete" && s.thumbnailR2Key
+                ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
+                : null,
             videoUrl: s.videoR2Key
               ? `${baseUrl}/api/media/${s.id}/video.mp4`
               : null,
@@ -307,6 +310,14 @@ export async function internalRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       const { sessionId } = request.params;
+
+      // Owner-scoped like the writes below: this response carries the
+      // session token, and session ids are public (every shared media URL
+      // has one), so an unscoped read handed any key-holding program the
+      // capability to record into and edit another program's session.
+      if (!(await writableSession(request, sessionId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
 
       const session = await db.query.sessions.findFirst({
         where: eq(schema.sessions.id, sessionId),
@@ -389,9 +400,10 @@ export async function internalRoutes(app: FastifyInstance) {
       return {
         session: {
           ...sessionData,
-          thumbnailUrl: thumbnailR2Key
-            ? `${baseUrl}/api/media/${session.id}/thumbnail.jpg`
-            : null,
+          thumbnailUrl:
+            session.status === "complete" && thumbnailR2Key
+              ? `${baseUrl}/api/media/${session.id}/thumbnail.jpg`
+              : null,
           videoUrl: videoR2Key
             ? `${baseUrl}/api/media/${session.id}/video.mp4`
             : null,
@@ -500,6 +512,11 @@ export async function internalRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       const { sessionId } = request.params;
+
+      // Only the owning program may stop or recompile a session.
+      if (!(await writableSession(request, sessionId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
 
       const session = await db.query.sessions.findFirst({
         where: eq(schema.sessions.id, sessionId),
@@ -837,6 +854,11 @@ export async function internalRoutes(app: FastifyInstance) {
     },
     async (request, reply) => {
       const { sessionId } = request.params;
+
+      // Only the owning program may stop or recompile a session.
+      if (!(await writableSession(request, sessionId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
 
       const session = await db.query.sessions.findFirst({
         where: eq(schema.sessions.id, sessionId),

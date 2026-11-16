@@ -802,7 +802,7 @@ GET /api/media/:sessionId/video.webm      →  302 to the static "please update"
 - `Cache-Control: public, max-age=1800` on `thumbnail.jpg` and `video.mp4` (the *redirect itself* is cacheable for 30 min — the presigned URL it points at lives 1 hour).
 - `Cache-Control: public, max-age=86400` on `video.webm` — pre-0.2.0 binaries hit this; we tell them to update. WebM encoding was dropped in 0.2.0.
 - `video.mp4` returns 404 unless the session is `complete` with a stored video.
-- `thumbnail.jpg` returns 404 if no thumbnail has been compiled yet.
+- `thumbnail.jpg` returns 404 unless the session is `complete` with a thumbnail. Before that (during an edit hold) the thumbnail is the uncut, unmasked preview frame, so it is private: the token-authenticated session endpoints (`GET /api/sessions/:token`, `/thumbnail`, `/batch`) return a short-lived presigned `thumbnailUrl` instead, and the internal endpoints return `null`.
 - These are the URLs surfaced in `videoUrl` / `thumbnailUrl` / `videoWebmUrl` response fields elsewhere — never link to the presigned R2 URLs directly because they expire.
 
 ---
@@ -960,6 +960,8 @@ offset would skip or repeat rows as they arrive.
 GET /api/internal/sessions/:sessionId
 ```
 
+Only the program that created the session can read it; any other key gets `404 Session not found`.
+
 Returns full session details including internal fields.
 
 **Path Parameters:**
@@ -1076,7 +1078,7 @@ Force stops a session regardless of current state and enqueues compilation.
 ```
 
 **Errors:**
-- `404` — Session not found
+- `404` — Session not found, or belongs to another program
 - `409` — Session already in terminal state
 
 ---
@@ -1102,7 +1104,7 @@ Re-enqueues compilation for a failed session.
 ```
 
 **Errors:**
-- `404` — Session not found
+- `404` — Session not found, or belongs to another program
 - `409` — Session not in `failed` state, or scheduled for deletion
 
 ---

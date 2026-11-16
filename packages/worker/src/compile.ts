@@ -67,6 +67,35 @@ function uncutOriginalKey(sessionId: string): string {
   return `timelapses/${sessionId}/original-${randomBytes(16).toString("hex")}.mp4`;
 }
 
+/**
+ * R2 key for a session's thumbnail — unguessable, and new on every build.
+ *
+ * The thumbnail is the first frame of whatever was just built, and during an
+ * edit hold that is the UNCUT, UNMASKED original. A predictable key
+ * (`timelapses/<sessionId>/thumbnail.jpg`, as it used to be) made that frame
+ * fetchable from the public bucket by anyone holding a share link, before the
+ * user's masks and cuts were applied — and since it was served `immutable`,
+ * caches kept the unmasked frame for a year after the edited publish
+ * overwrote it. A fresh random key per build fixes both: nothing can guess an
+ * unpublished frame, and no key is ever rewritten with different bytes, so
+ * `immutable` is honest. The superseded key is deleted once the row points at
+ * the new one (see replaceThumbnail).
+ */
+function newThumbnailKey(sessionId: string): string {
+  return `timelapses/${sessionId}/thumbnail-${randomBytes(16).toString("hex")}.jpg`;
+}
+
+/** Drop the thumbnail a build just replaced. Call only AFTER the row points
+ *  at the new key, so a crash in between can't leave a dangling reference. */
+async function dropSupersededThumbnail(
+  previousKey: string | null | undefined,
+  currentKey: string,
+): Promise<void> {
+  if (previousKey && previousKey !== currentKey) {
+    await deleteObjectQuiet(previousKey);
+  }
+}
+
 /** Whether a session is currently inside its edit hold. */
 function holdActiveOn(session: { editHoldUntil: Date | null }): boolean {
   return (
@@ -754,7 +783,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     await extractThumbnail(publishPath, thumbnailPath);
 
     // Step 5: Upload all artifacts to R2 and verify
-    const thumbnailR2Key = `timelapses/${sessionId}/thumbnail.jpg`;
+    const thumbnailR2Key = newThumbnailKey(sessionId);
     const thumbnailBytes = await fs.readFile(thumbnailPath);
     await r2Client.send(
       new PutObjectCommand({
@@ -846,6 +875,8 @@ export async function compileTimelapse(sessionId: string): Promise<{
         })
         .where(eq(schema.sessions.id, sessionId));
 
+      await dropSupersededThumbnail(session.thumbnailR2Key, thumbnailR2Key);
+
       if (holdActive) {
         console.log(
           `Session ${sessionId} preview built, held for editing until ` +
@@ -889,6 +920,8 @@ export async function compileTimelapse(sessionId: string): Promise<{
         updatedAt: new Date(),
       })
       .where(eq(schema.sessions.id, sessionId));
+
+    await dropSupersededThumbnail(session.thumbnailR2Key, thumbnailR2Key);
 
     if (holdActive) {
       console.log(
@@ -1194,7 +1227,7 @@ async function applyCutCompile(
   const thumbnailPath = path.join(tmpDir, "thumbnail.jpg");
   await extractThumbnail(publishPath, thumbnailPath);
 
-  const thumbnailR2Key = `timelapses/${sessionId}/thumbnail.jpg`;
+  const thumbnailR2Key = newThumbnailKey(sessionId);
   const thumbnailBytes = await fs.readFile(thumbnailPath);
   await r2Client.send(
     new PutObjectCommand({
@@ -1202,7 +1235,8 @@ async function applyCutCompile(
       Key: thumbnailR2Key,
       Body: thumbnailBytes,
       ContentType: "image/jpeg",
-      CacheControl: "public, max-age=86400",
+      // Safe now that every build gets its own key (see newThumbnailKey).
+      CacheControl: "public, max-age=31536000, immutable",
     }),
   );
 
@@ -1263,6 +1297,7 @@ async function applyCutCompile(
   if (hasEdits) {
     await deleteObjectQuiet(originalR2Key);
   }
+  await dropSupersededThumbnail(session.thumbnailR2Key, thumbnailR2Key);
 
   return { videoUrl, videoR2Key: publishR2Key, thumbnailUrl, thumbnailR2Key };
 }

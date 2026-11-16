@@ -220,6 +220,29 @@ async function findSession(token: string) {
   });
 }
 
+/**
+ * Thumbnail URL for the session's TOKEN HOLDER.
+ *
+ * Published sessions get the permanent public media URL. Before that — in
+ * practice, during an edit hold — the thumbnail is the first frame of the
+ * uncut, unmasked preview, so it must not be public: /api/media refuses it,
+ * and the owner gets a short-lived presigned URL instead.
+ */
+async function ownerThumbnailUrl(
+  session: { id: string; status: string; thumbnailR2Key: string | null },
+  baseUrl: string,
+): Promise<string | null> {
+  if (!session.thumbnailR2Key) return null;
+  if (session.status === "complete") {
+    return `${baseUrl}/api/media/${session.id}/thumbnail.jpg`;
+  }
+  return getSignedUrl(
+    r2Client,
+    new GetObjectCommand({ Bucket: R2_BUCKET, Key: session.thumbnailR2Key }),
+    { expiresIn: 3600 },
+  );
+}
+
 /** Count total confirmed screenshots */
 async function getScreenshotCount(sessionId: string): Promise<number> {
   const [{ count }] = await db
@@ -311,9 +334,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         startedAt: session.startedAt?.toISOString() ?? null,
         totalActiveSeconds: session.totalActiveSeconds,
         createdAt: session.createdAt.toISOString(),
-        thumbnailUrl: session.thumbnailR2Key
-          ? `${baseUrl}/api/media/${session.id}/thumbnail.jpg`
-          : null,
+        thumbnailUrl: await ownerThumbnailUrl(session, baseUrl),
         videoUrl: session.videoR2Key
           ? `${baseUrl}/api/media/${session.id}/video.mp4`
           : null,
@@ -1957,12 +1978,11 @@ export async function sessionRoutes(app: FastifyInstance) {
       const session = await findSession(request.params.token);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
-      if (!session.thumbnailR2Key) {
+      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+      const thumbnailUrl = await ownerThumbnailUrl(session, baseUrl);
+      if (!thumbnailUrl) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
-
-      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
-      const thumbnailUrl = `${baseUrl}/api/media/${session.id}/thumbnail.jpg`;
 
       return { thumbnailUrl };
     },
@@ -2056,11 +2076,9 @@ export async function sessionRoutes(app: FastifyInstance) {
 
       // Generate permanent thumbnail URLs via redirect endpoint
       const baseUrl = process.env.BASE_URL || "http://localhost:3000";
-      const sessions = rows.map((s) => {
+      const sessions = await Promise.all(rows.map(async (s) => {
           const c = countMap.get(s.id) ?? { bucketTrackedSeconds: 0, screenshotCount: 0 };
-          const thumbnailUrl = s.thumbnailR2Key
-            ? `${baseUrl}/api/media/${s.id}/thumbnail.jpg`
-            : null;
+          const thumbnailUrl = await ownerThumbnailUrl(s, baseUrl);
           // Credit-mode: trust sessions.tracked_seconds (maintained per-credit).
           // Bucket-mode: prefer stored value (survives screenshot cleanup),
           // fall back to live screenshot bucket count for active sessions.
@@ -2085,7 +2103,7 @@ export async function sessionRoutes(app: FastifyInstance) {
             videoWebmUrl: s.videoR2Key ? `${baseUrl}/please-update.webm` : null,
             metadata: s.metadata ?? {},
           };
-        });
+        }));
 
       // Sort newest first
       sessions.sort(
@@ -2129,7 +2147,14 @@ export async function sessionRoutes(app: FastifyInstance) {
           isNull(schema.sessions.deleteAfter),
         ),
       });
-      if (!session || !session.thumbnailR2Key) {
+      // Published only, like the video. An unpublished thumbnail is the
+      // first frame of the uncut, unmasked edit-hold preview; its owner
+      // reaches it through the token routes instead (ownerThumbnailUrl).
+      if (
+        !session ||
+        session.status !== "complete" ||
+        !session.thumbnailR2Key
+      ) {
         return reply.code(404).send({ error: "Thumbnail not available" });
       }
 

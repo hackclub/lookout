@@ -4,6 +4,7 @@ import {
   isTransientDbError,
   retryWhileDbUnavailable,
 } from "@lookout/shared";
+import { redactDeep, redactedReqSerializer } from "./lib/redact.js";
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
@@ -16,7 +17,14 @@ Sentry.init({
       event.fingerprint = DB_UNAVAILABLE_FINGERPRINT;
       event.level = "warning";
     }
-    return event;
+    // Session tokens ride in request URLs; keep them out of Sentry.
+    return redactDeep(event);
+  },
+  beforeSendTransaction(event) {
+    return redactDeep(event);
+  },
+  beforeBreadcrumb(breadcrumb) {
+    return redactDeep(breadcrumb);
   },
 });
 
@@ -40,7 +48,10 @@ import { registerTimeoutJobs } from "./lib/timeouts.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const app = Fastify({ logger: true });
+// Request logs carry the URL, and session tokens ride in URLs: scrub them.
+const app = Fastify({
+  logger: { serializers: { req: redactedReqSerializer } },
+});
 
 // CORS + the shared error handler (503 for DB outages), as in buildApp().
 await registerCommon(app);
