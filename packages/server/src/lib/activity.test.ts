@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_MAX_SAMPLES, sanitizeActivity } from "./activity.js";
+import { ACTIVITY_MAX_KEYS, ACTIVITY_MAX_SAMPLES, sanitizeActivity } from "./activity.js";
 
 const sample = (over: Record<string, unknown> = {}) => ({
   at: 1_750_000_000_000,
@@ -68,5 +68,26 @@ describe("sanitizeActivity", () => {
     const out = sanitizeActivity({ v: 1, samples });
     expect(out?.samples).toHaveLength(ACTIVITY_MAX_SAMPLES);
     expect(out?.samples[0].at).toBe(6);
+  });
+
+  it("keeps a key count, drops a malformed one without dropping the sample", () => {
+    const out = sanitizeActivity({
+      v: 1,
+      samples: [
+        sample({ method: "win32", keys: 42 }),
+        sample({ keys: 0 }),
+        sample({ keys: ACTIVITY_MAX_KEYS }),
+        sample({ keys: -1 }),
+        sample({ keys: 1.5 }),
+        sample({ keys: "12" }),
+        sample({ keys: ACTIVITY_MAX_KEYS + 1 }),
+        sample({ keys: null }),
+        sample(),
+      ],
+    });
+    expect(out?.samples.map((s) => s.keys)).toEqual([
+      42, 0, ACTIVITY_MAX_KEYS, undefined, undefined, undefined, undefined, undefined, undefined,
+    ]);
+    expect(out?.samples[3]).not.toHaveProperty("keys");
   });
 });

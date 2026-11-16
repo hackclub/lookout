@@ -24,6 +24,12 @@ export const ACTIVITY_MAX_SAMPLES = 120;
 const MAX_APP_LENGTH = 256;
 const MAX_WINDOWS = 32;
 const METHOD_SHAPE = /^[a-z0-9-]{1,32}$/;
+/**
+ * Key-downs between two samples, at most. Samples are seconds apart, but the
+ * first of a run can carry everything typed since the app started; far past
+ * any real typing either way, so a bigger number is malformed and dropped.
+ */
+export const ACTIVITY_MAX_KEYS = 100_000;
 
 export type ActivityCursor = {
   display: number;
@@ -38,6 +44,8 @@ export type ActivitySample = {
   cursor: ActivityCursor | null;
   frontmost: { app: string; captured: boolean | null } | null;
   windows?: { id: number; active: boolean }[];
+  /** Key-downs since the previous sample (a count only). Windows clients. */
+  keys?: number;
 };
 
 export type Activity = { v: number; samples: ActivitySample[] };
@@ -87,6 +95,10 @@ function sanitizeSample(raw: unknown): ActivitySample | null {
       .slice(0, MAX_WINDOWS)
       .map(({ id, active }) => ({ id, active }));
     if (windows.length > 0) sample.windows = windows;
+  }
+  const { keys } = raw;
+  if (Number.isInteger(keys) && (keys as number) >= 0 && (keys as number) <= ACTIVITY_MAX_KEYS) {
+    sample.keys = keys as number;
   }
   return sample;
 }

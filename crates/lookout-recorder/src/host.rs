@@ -147,6 +147,11 @@ pub struct ActivitySample {
     /// windows are being captured.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowFocus>,
+    /// Key-downs since the previous sample: a count only, never which keys.
+    /// `None` (left out) where the platform can't count them — everywhere
+    /// but Windows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys: Option<u32>,
 }
 
 /// The pointer, as a fraction of the display it's on.

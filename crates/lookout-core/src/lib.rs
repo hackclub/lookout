@@ -49,6 +49,10 @@ pub mod capture_loop;
 pub mod clips;
 mod crop;
 pub mod host;
+/// Windows key-press counter (WH_KEYBOARD_LL). EXPERIMENT: the
+/// native/keyhook-av-test branch, to see whether antivirus flags it.
+#[cfg(windows)]
+pub mod keyhook;
 #[cfg(test)]
 pub(crate) mod mock_server;
 mod pipewire;

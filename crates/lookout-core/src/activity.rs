@@ -77,6 +77,9 @@ pub(crate) struct Snapshot {
     /// from what was recorded (Wayland's PipeWire nodes, resolved to the
     /// screens and windows they are).
     pub sources: Option<Vec<CaptureSource>>,
+    /// Key-downs since the previous snapshot (Windows only; `None` where
+    /// they can't be counted).
+    pub keys: Option<u32>,
 }
 
 /// A screencast stream the portal opened (Wayland), and the PipeWire
@@ -173,6 +176,7 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
         method: snap.method,
         cursor,
         frontmost,
+        keys: snap.keys,
         windows: windows
             .iter()
             .filter(|id| !snap.unknown_windows.contains(id))
@@ -530,6 +534,13 @@ mod platform {
             focused,
             focused_rect,
             app,
+            keys: {
+                // Normal behaviour: the hook starts with the first sample of a
+                // recording. (The keyhook-av-test build also starts it at app
+                // launch, from the native client's main.)
+                crate::keyhook::install();
+                crate::keyhook::take()
+            },
             ..Default::default()
         })
     }
@@ -959,6 +970,16 @@ mod tests {
 
         let s = build(&snap, &[CaptureSource::Monitor { id: 2 }]);
         assert!(s.cursor.unwrap().in_capture);
+    }
+
+    #[test]
+    fn the_key_count_is_sent_only_where_it_was_counted() {
+        let counted = build(&Snapshot { method: "test", keys: Some(7), ..Default::default() }, &[]);
+        assert_eq!(counted.keys, Some(7));
+        assert_eq!(serde_json::to_value(&counted).unwrap()["keys"], 7);
+
+        let uncounted = build(&Snapshot { method: "test", ..Default::default() }, &[]);
+        assert!(serde_json::to_value(&uncounted).unwrap().get("keys").is_none());
     }
 
     #[test]

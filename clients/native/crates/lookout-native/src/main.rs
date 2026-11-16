@@ -114,6 +114,12 @@ fn main() {
         platform::startup_failure::exit(f);
     }
     crash::self_test();
+    // EXPERIMENT ONLY (native/keyhook-av-test, not for main): install the
+    // key-press counter's WH_KEYBOARD_LL hook at launch rather than with the
+    // first recording sample, so antivirus sandboxes — which never sign in or
+    // record — see the hook. Normal builds start it from activity sampling.
+    #[cfg(windows)]
+    lookout_core::keyhook::install();
     // Before any window: roll back a version that never became healthy, or
     // install a staged update and relaunch (exits in both cases).
     updater::boot(&initial_urls);

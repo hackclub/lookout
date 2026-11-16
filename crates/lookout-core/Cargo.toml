@@ -59,6 +59,8 @@ windows = { version = "0.62", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    # GetModuleHandleW, for the key-press counter's hook (keyhook.rs).
+    "Win32_System_LibraryLoader",
     # GetCurrentProcess, for the GDI-object leak check in test_support.
     "Win32_System_Threading",
     # Per-monitor DPI awareness while sampling the pointer (activity.rs).
