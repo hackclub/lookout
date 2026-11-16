@@ -27,7 +27,8 @@ case "$(uname -m)" in
 esac
 version="$("$root/packaging/version.sh")"
 # Debian sorts ~ before the final release; RPM separates the release field.
-pkgversion="${version/-/~}"
+# A quoted "~": bare, bash expands it to $HOME in the replacement.
+pkgversion="${version/-/"~"}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 work="$(mktemp -d)"
