@@ -51,11 +51,13 @@ func snapshot(_ view: NSView, _ appearance: NSAppearance.Name, to url: URL) {
                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
-    // System Settings' window background, which the pane sits on.
-    var bg = NSColor.windowBackgroundColor
-    window.effectiveAppearance.performAsCurrentDrawingAppearance { bg = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? bg }
-    bg.setFill()
-    NSRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh).fill()
+    // System Settings' window background, which the pane sits on, resolved
+    // and filled in the pane's appearance (a dynamic colour otherwise
+    // resolves light in this bitmap context).
+    window.effectiveAppearance.performAsCurrentDrawingAppearance {
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh).fill()
+    }
     rep.draw(in: NSRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh))
     NSGraphicsContext.restoreGraphicsState()
     guard let png = out.representation(using: .png, properties: [:]) else { fail("no PNG") }
