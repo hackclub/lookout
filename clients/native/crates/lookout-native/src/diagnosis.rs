@@ -449,7 +449,9 @@ mod tests {
 
     #[test]
     fn portal_not_found_is_diagnosed_even_before_the_probe_answers() {
-        let d = diagnose(PORTAL_NOT_FOUND, None).expect("diagnosis");
+        // Linux before the environment probe answers: no details yet, but on
+        // Linux (spelled out so the test also runs on macOS/Windows CI).
+        let d = diagnose(PORTAL_NOT_FOUND, Some(&linux(|_| {}))).expect("diagnosis");
         assert_eq!(d.title, "No screen-sharing backend installed");
         assert!(!d.record_in_browser);
     }
