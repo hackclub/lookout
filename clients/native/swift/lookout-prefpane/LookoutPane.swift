@@ -18,8 +18,6 @@ final class LookoutPane: NSPreferencePane {
     override func loadMainView() -> NSView {
         Icon.bundle = bundle
         let r = PaneRoot(frame: NSRect(x: 0, y: 0, width: PaneRoot.width, height: PaneRoot.height), paneBundle: bundle)
-        // Fill whatever room System Settings gives the pane.
-        r.autoresizingMask = [.width, .height]
         root = r
         mainView = r
         mainViewDidLoad()
@@ -123,8 +121,9 @@ final class Bridge {
 
 final class PaneRoot: FlippedView, Animating {
     /// System Settings widens its window to fit a pane wider than its own
-    /// detail column (the classic 668pt pane did), so ask for no more than
-    /// that column and stretch to whatever we're given.
+    /// detail column (the classic 668pt pane did), so ask for that column's
+    /// width. Fixed, not stretchy: a stretchy pane keeps whatever width the
+    /// window last had.
     static let width: CGFloat = 500
     static let height: CGFloat = 560
     static let appID = "com.hackclub.lookout"
@@ -396,12 +395,14 @@ final class PaneRoot: FlippedView, Animating {
                                          samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                          colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return image }
-        rep.size = NSSize(width: side, height: side)
+        // The context is laid out in the rep's pixels, so draw at pixel size
+        // and only then say it's `side` points (2x).
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = ctx
         ctx.imageInterpolation = .high
-        image.draw(in: NSRect(x: 0, y: 0, width: side, height: side), from: .zero, operation: .copy, fraction: 1)
+        image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(px), height: CGFloat(px)), from: .zero, operation: .copy, fraction: 1)
         NSGraphicsContext.restoreGraphicsState()
+        rep.size = NSSize(width: side, height: side)
         let out = NSImage(size: rep.size)
         out.addRepresentation(rep)
         return out

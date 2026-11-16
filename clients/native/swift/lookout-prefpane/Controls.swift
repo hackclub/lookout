@@ -183,6 +183,10 @@ class PressRow: FlippedView, Animating, HoverSyncing {
     private func setHovered(_ on: Bool) {
         guard on != hovered else { return }
         hovered = on
+        // Only one row in a list is ever lit, even if AppKit loses an exit.
+        if on, let siblings = superview?.subviews {
+            for case let r as PressRow in siblings where r !== self { r.setHovered(false) }
+        }
         hover.setCSS(on ? 1 : 0, 120, .easeOut)
         animate()
     }
@@ -438,7 +442,16 @@ protocol HoverSyncing: AnyObject {
 /// Whether the pointer is over the visible part of `view`.
 func pointerInside(_ view: NSView) -> Bool {
     guard let w = view.window, w.isVisible else { return false }
-    let p = view.convert(w.mouseLocationOutsideOfEventStream, from: nil)
+    // Inside System Settings `mouseLocationOutsideOfEventStream` can be
+    // stale, so prefer the event being handled (the scroll itself).
+    let loc: NSPoint
+    let pointerEvents: [NSEvent.EventType] = [.scrollWheel, .mouseMoved, .mouseEntered, .mouseExited, .leftMouseDragged]
+    if let e = NSApp.currentEvent, e.window === w, pointerEvents.contains(e.type) {
+        loc = e.locationInWindow
+    } else {
+        loc = w.convertPoint(fromScreen: NSEvent.mouseLocation)
+    }
+    let p = view.convert(loc, from: nil)
     return view.visibleRect.contains(p)
 }
 
@@ -507,6 +520,10 @@ final class RoundButton: FlippedView, Animating, HoverSyncing {
     private func setHovered(_ on: Bool) {
         guard on != hovered else { return }
         hovered = on
+        // Only one row in a list is ever lit, even if AppKit loses an exit.
+        if on, let siblings = superview?.subviews {
+            for case let r as PressRow in siblings where r !== self { r.setHovered(false) }
+        }
         hover.setCSS(on ? 1 : 0, 100, .easeOut)
         animate()
     }

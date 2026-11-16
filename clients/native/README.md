@@ -185,7 +185,7 @@ Release builds stamp the tag's version first (`packaging/version.sh --set`).
   `assets/icons` by `svg2pdf.py`. Its menu opens with an About-style header
   (icon, version, Website/Docs/GitHub/Privacy & Terms links, Open Lookout)
   instead of an About row; sub-pages use the header bar's round back button.
-  It asks for a 500pt-wide view and stretches to fit, so System Settings
+  It asks for a fixed 500pt-wide view, so System Settings
   doesn't widen its window for it (the classic 668pt pane did), and the
   Filtered Apps list only builds the rows on screen. It edits settings for real by running
   `lookout --settings-pane '<json>'` (`src/settings_pane.rs`): with Lookout
