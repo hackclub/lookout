@@ -5,6 +5,7 @@
 
 use gpui_kit::gpui::{App, Hsla, IntoElement, RenderOnce, Styled, Window, canvas, div, px, ParentElement};
 
+
 use crate::motion;
 use crate::theme::theme;
 use crate::ui::paint;
@@ -31,11 +32,19 @@ pub struct Spinner {
     size: SpinnerSize,
     color: Option<Hsla>,
     base: Option<Hsla>,
+    a11y: Option<(gpui_kit::gpui::ElementId, gpui_kit::gpui::SharedString)>,
 }
 
 impl Spinner {
     pub fn new(size: SpinnerSize) -> Self {
-        Self { size, color: None, base: None }
+        Self { size, color: None, base: None, a11y: None }
+    }
+    /// Expose the spinner to screen readers as a busy progress indicator
+    /// named `label` ("Loading timelapses"). Unlabelled spinners stay out
+    /// of the tree (inside a busy Button, the button reports busy).
+    pub fn labelled(mut self, id: impl Into<gpui_kit::gpui::ElementId>, label: impl Into<gpui_kit::gpui::SharedString>) -> Self {
+        self.a11y = Some((id.into(), label.into()));
+        self
     }
     pub fn color(mut self, c: Hsla) -> Self {
         self.color = Some(c);
@@ -55,24 +64,34 @@ impl RenderOnce for Spinner {
         let s = self.size.px();
         window.request_animation_frame();
         let angle = motion::spin_angle(1000.0);
-        div().size(px(s)).flex_none().child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    let scale = f32::from(bounds.size.width) / 24.0;
-                    let c = paint::bounds_center(bounds);
-                    let (r, w) = (10.0 * scale, 2.0 * scale);
-                    if let Some(p) = paint::ring(c, r, w) {
-                        window.paint_path(p, base);
-                    }
-                    let a0 = angle;
-                    let a1 = angle + std::f32::consts::FRAC_PI_2;
-                    if let Some(p) = paint::round_capped_arc(c, r, w, a0, a1) {
-                        window.paint_path(p, arc);
-                    }
-                },
-            )
-            .size_full(),
+        let ring = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let scale = f32::from(bounds.size.width) / 24.0;
+                let c = paint::bounds_center(bounds);
+                let (r, w) = (10.0 * scale, 2.0 * scale);
+                if let Some(p) = paint::ring(c, r, w) {
+                    window.paint_path(p, base);
+                }
+                let a0 = angle;
+                let a1 = angle + std::f32::consts::FRAC_PI_2;
+                if let Some(p) = paint::round_capped_arc(c, r, w, a0, a1) {
+                    window.paint_path(p, arc);
+                }
+            },
         )
+        .size_full();
+        let el = div().size(px(s)).flex_none().child(ring);
+        match self.a11y {
+            Some((id, label)) => {
+                use crate::ui::a11y::prelude::*;
+                el.id(id)
+                    .role(Role::ProgressIndicator)
+                    .aria_label(label)
+                    .a11y_flags(NodeFlags { busy: true, ..Default::default() })
+                    .into_any_element()
+            }
+            None => el.into_any_element(),
+        }
     }
 }

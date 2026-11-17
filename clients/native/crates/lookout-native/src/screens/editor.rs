@@ -15,6 +15,13 @@
 //! The timeline zooms (buttons, `=`/`-`/`0`, pinch, Ctrl/⌘-scroll, a mouse
 //! wheel) and pans (two-finger or Shift-scroll, the overview bar), and
 //! follows the playhead while playing.
+//!
+//! Everything works from the keyboard too. The editor keeps keyboard focus
+//! on its root and walks an internal list of stops with Tab ([`em::Stop`]:
+//! playhead, each cut and its two edges, each mask's box and span, the
+//! overview bar); arrows act on the stop, which is drawn with a focus ring
+//! and reported to screen readers as the focused node (active descendant).
+//! [`SHORTCUTS`] is the list behind the `?` sheet and the README.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -23,14 +30,14 @@ use std::time::{Duration, Instant};
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
     AnyElement, App, AppContext, Bounds, Context, Corners, CursorStyle, DispatchPhase, Entity, EventEmitter,
-    FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    FocusHandle, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollEvent,
     SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, canvas, div, point, px,
 };
 use lookout_core::SessionConfig;
 
 use crate::app::{self, api_base};
-use crate::editor_math::{self as em, CutInterval, Mask, Region, VideoUnit, View};
+use crate::editor_math::{self as em, CutInterval, Mask, Part, Region, Stop, VideoUnit, View};
 use crate::filmstrip::{self, Filmstrip};
 use crate::motion::{Anim, Curve, Ease, Spring};
 use crate::theme::{self, Theme, theme};
@@ -60,7 +67,69 @@ const MAX_UNIT_PX: f32 = 640.0;
 const TILE_CACHE: usize = 700;
 /// Lane colours, matched by each mask's box on the video.
 const LANE_COLORS: [u32; 3] = [0x3b82f6, 0x8b5cf6, 0xeab308];
+/// The same hues a shade darker for light mode, so a lane's edge keeps
+/// 3:1 against the window (yellow-500 on white is under 2:1).
+const LANE_COLORS_LIGHT: [u32; 3] = [0x2563eb, 0x7c3aed, 0xa16207];
 const QUART: Ease = Ease::EASE_OUT_QUART;
+/// A keyboard nudge of a mask box, as a fraction of the frame (Shift: ×10).
+const MASK_NUDGE: f32 = 0.01;
+/// Frame step on the playhead (`,` / `.`), in video seconds.
+const FRAME_STEP: f64 = 1.0 / 30.0;
+
+gpui_kit::gpui::actions!(timelapse_editor, [NextStop, PrevStop]);
+
+/// The editor's key context: its Tab bindings win over any global ones.
+const KEY_CONTEXT: &str = "TimelapseEditor";
+
+fn bind_keys(cx: &mut App) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        cx.bind_keys([
+            KeyBinding::new("tab", NextStop, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", PrevStop, Some(KEY_CONTEXT)),
+        ])
+    });
+}
+
+/// The editor's keyboard shortcuts, by section: `(keys, what they do)`.
+/// Shown in the `?` sheet; keep README → Accessibility in step.
+pub fn shortcuts() -> Vec<(&'static str, Vec<(String, &'static str)>)> {
+    let cmd = if crate::theme::is_mac() { "⌘" } else { "Ctrl+" };
+    let alt = if crate::theme::is_mac() { "⌥" } else { "Alt+" };
+    vec![
+        ("Playback", vec![
+            ("Space or K".into(), "Play or pause"),
+            ("← →".into(), "Move the playhead a minute (Shift: 10 minutes)"),
+            (", .".into(), "Step one frame"),
+            ("Home End".into(), "Go to the start or the end"),
+        ]),
+        ("Timeline", vec![
+            ("Tab".into(), "Next stop: playhead, each cut and its edges, each mask, the overview bar (Shift: back)"),
+            ("↑ ↓".into(), "Previous or next cut or mask"),
+            ("= −".into(), "Zoom in or out"),
+            ("0".into(), "Fit the whole timeline"),
+            ("← → on the overview".into(), "Scroll the timeline (Shift: a page)"),
+        ]),
+        ("Cuts", vec![
+            ("X".into(), "Cut the minute under the playhead"),
+            ("← → on a cut".into(), "Move it a minute (Shift: 10 minutes)"),
+            ("← → on an edge".into(), "Move that edge"),
+            ("Delete".into(), "Remove the cut or mask"),
+            ("Esc".into(), "Back to the playhead"),
+        ]),
+        ("Masks", vec![
+            ("M".into(), "Add a mask at the playhead"),
+            ("Arrows on a mask".into(), "Move it (Shift: further)"),
+            (if alt == "⌥" { "⌥ + arrows" } else { "Alt + arrows" }.into(), "Resize it"),
+            ("← → on its span".into(), "Move it in time, or move an edge"),
+        ]),
+        ("Finish", vec![
+            (format!("{cmd}Enter"), "Publish"),
+            (format!("{cmd}W"), "Close (asks, then publishes)"),
+            ("?".into(), "Show these shortcuts"),
+        ]),
+    ]
+}
 
 /// `editorStyles.ts` reduced-motion block: every editor transition collapses
 /// to 1ms under `prefers-reduced-motion: reduce`.
@@ -73,8 +142,9 @@ fn ed_hover(scale: f32) -> f32 {
     if crate::motion::reduce_motion() { 1.0 } else { scale }
 }
 
-fn lane_color(lane: usize) -> Hsla {
-    theme::hex(LANE_COLORS[lane % LANE_COLORS.len()])
+fn lane_color(lane: usize, dark: bool) -> Hsla {
+    let set = if dark { LANE_COLORS } else { LANE_COLORS_LIGHT };
+    theme::hex(set[lane % set.len()])
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +159,8 @@ pub enum EditorEvent {
     Applied(ApplyResult),
     CutsChanged { removed: usize, masks: usize, dirty: bool },
     SessionName(String),
+    /// Show the keyboard shortcuts sheet (`?`).
+    ShowShortcuts,
 }
 
 enum Phase {
@@ -185,6 +257,14 @@ pub struct TimelapseEditor {
     prep_started: Instant,
     real_anchor: Option<(f32, Instant)>,
     focus: FocusHandle,
+    /// Where the keyboard is. Follows the selection both ways.
+    stop: Stop,
+    /// The last input was a key: draw the focus ring (`:focus-visible`).
+    kb: bool,
+    /// Polite announcement for screen readers, and a flip so a repeat of
+    /// the same words is spoken again.
+    announce: String,
+    announce_flip: bool,
     cut_ring: Anim,
     hover_region: Option<usize>,
     region_hover: Anim,
@@ -245,7 +325,11 @@ impl TimelapseEditor {
             progress: 0.0,
             prep_started: Instant::now(),
             real_anchor: None,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
+            stop: Stop::Playhead,
+            kb: false,
+            announce: String::new(),
+            announce_flip: false,
             cut_ring: Anim::new(0.0),
             hover_region: None,
             region_hover: Anim::new(0.0),
@@ -263,6 +347,7 @@ impl TimelapseEditor {
             _tick: None,
             _subs: Vec::new(),
         };
+        bind_keys(cx);
         e.load(cx);
         e.start_lease(cx);
         // Closing the editor frees its filmstrip tiles from the atlas.
@@ -529,12 +614,25 @@ impl TimelapseEditor {
             return;
         }
         let at = em::unit_at_time(self.time, self.n());
+        let already = em::region_at_time(at as f64, &self.normalized()).is_some();
         let mut next = self.regions.clone();
         next.push(Region { start: at, end: at + 1 });
         self.regions = em::normalize(&next);
         self.selected = self.regions.iter().position(|r| at >= r.start && at < r.end);
         self.sel_mask = None;
+        if let Some(i) = self.selected {
+            self.stop = Stop::Cut(i, Part::Body);
+        }
         self.emit_cuts(cx);
+        let r = self.selected.and_then(|i| self.regions.get(i).copied());
+        if let Some(r) = r {
+            let span = crate::ui::a11y::minute_span(r.start as f64, r.end as f64);
+            if already {
+                self.say(format!("Already cut, {span}"));
+            } else {
+                self.say(format!("Cut added, {span}. {}", self.kept_text()));
+            }
+        }
     }
 
     fn next_mask_id(&mut self) -> String {
@@ -566,8 +664,14 @@ impl TimelapseEditor {
         let (start, end) = self.new_mask_span();
         let id = self.next_mask_id();
         self.masks.push(Mask { id: id.clone(), start, end, x: 0.35, y: 0.38, w: 0.3, h: 0.24 });
-        self.select_mask(Some(id));
+        self.select_mask(Some(id.clone()));
+        self.stop = Stop::MaskBox(id);
         self.emit_cuts(cx);
+        let alt = if crate::theme::is_mac() { "Option" } else { "Alt" };
+        self.say(format!(
+            "{} added. Arrow keys move it, {alt} and arrow keys resize it.",
+            crate::ui::a11y::mask_label(self.masks.len(), start, end)
+        ));
     }
 
     fn select_mask(&mut self, id: Option<String>) {
@@ -585,11 +689,43 @@ impl TimelapseEditor {
         if let Some(id) = self.sel_mask.take() {
             self.masks.retain(|m| m.id != id);
             self.emit_cuts(cx);
+            self.say("Mask deleted");
         } else if let Some(i) = self.selected.take() {
             if i < self.regions.len() {
                 self.regions.remove(i);
             }
             self.emit_cuts(cx);
+            self.say(format!("Cut removed. {}", self.kept_text()));
+        }
+    }
+
+    /// Delete from the keyboard: the cut or mask under the keyboard (or
+    /// the selection), then on to its neighbour so the user keeps their
+    /// place.
+    fn delete_at_stop(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.stop.clone() {
+            Stop::Cut(i, _) => {
+                self.regions = em::normalize(&self.regions);
+                self.selected = Some(i);
+                self.sel_mask = None;
+                self.delete_selection(cx);
+                let next = if i < self.regions.len() { Some(i) } else { i.checked_sub(1).filter(|j| *j < self.regions.len()) };
+                self.set_stop(next.map(|j| Stop::Cut(j, Part::Body)).unwrap_or(Stop::Playhead), cx);
+                true
+            }
+            Stop::MaskBox(id) | Stop::MaskSpan(id, _) => {
+                let i = self.masks.iter().position(|m| m.id == id).unwrap_or(0);
+                self.select_mask(Some(id));
+                self.delete_selection(cx);
+                let next = self.masks.get(i).or_else(|| i.checked_sub(1).and_then(|j| self.masks.get(j))).map(|m| m.id.clone());
+                self.set_stop(next.map(Stop::MaskBox).unwrap_or(Stop::Playhead), cx);
+                true
+            }
+            Stop::Playhead | Stop::Overview if self.selected.is_some() || self.sel_mask.is_some() => {
+                self.delete_selection(cx);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -598,7 +734,56 @@ impl TimelapseEditor {
         self.masks.clear();
         self.selected = None;
         self.sel_mask = None;
+        self.stop = Stop::Playhead;
         self.emit_cuts(cx);
+        self.say(format!("All cuts and masks cleared. {}", self.kept_text()));
+    }
+
+    // ── Spoken feedback ────────────────────────────────────────────────
+
+    /// Queue a polite announcement. Only for discrete events (a key, the
+    /// end of a drag), never per frame of a drag or playback.
+    fn say(&mut self, text: impl Into<String>) {
+        self.announce = text.into();
+        self.announce_flip = !self.announce_flip;
+    }
+
+    /// "44 minutes after cuts, 3 minutes removed".
+    fn kept_text(&self) -> String {
+        let cuts = em::regions_to_cuts(&self.normalized(), &self.units);
+        let removed = em::count_cut_units(&self.units, &cuts);
+        crate::ui::a11y::kept_summary(self.n().saturating_sub(removed), removed)
+    }
+
+    /// The part of the timeline in view: "Minutes 10 to 33 of 47", or
+    /// "Whole timeline".
+    fn view_text(&self) -> String {
+        let n = self.n();
+        let v = self.target_view();
+        if v.zoom <= 1.0 + 1e-3 {
+            return "Whole timeline".into();
+        }
+        let vis = v.visible(n);
+        let span = crate::ui::a11y::minute_span(v.start, v.start + vis);
+        let mut c = span.chars();
+        let span = c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default();
+        format!("{span} of {n}")
+    }
+
+    /// Where the view is headed (the view itself mid-animation lags).
+    fn target_view(&self) -> View {
+        self.view_anim.as_ref().map(|a| a.to).unwrap_or(self.view)
+    }
+
+    /// The zoom as spoken: "Fit" or "2.5 times".
+    fn zoom_text(&self) -> String {
+        let zoom = self.target_view().zoom;
+        if zoom <= 1.0 + 1e-3 {
+            "Fit".into()
+        } else {
+            let z = (zoom * 10.0).round() / 10.0;
+            format!("{} times", if z.fract() == 0.0 { format!("{z:.0}") } else { format!("{z:.1}") })
+        }
     }
 
     fn emit_cuts(&mut self, cx: &mut Context<Self>) {
@@ -606,6 +791,12 @@ impl TimelapseEditor {
         let dirty = cuts != self.saved_cuts || self.masks != self.saved_masks;
         cx.emit(EditorEvent::CutsChanged { removed: self.normalized().len(), masks: self.masks.len(), dirty });
         cx.notify();
+    }
+
+    /// The editor's focus, to hand the keyboard back after a sheet over
+    /// it closes.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     pub fn current_cuts(&self) -> Vec<CutInterval> {
@@ -824,6 +1015,7 @@ impl TimelapseEditor {
         if self.saving {
             return;
         }
+        self.kb = false;
         self.view_anim = None;
         match &drag {
             Drag::Scrub => {
@@ -1049,6 +1241,9 @@ impl TimelapseEditor {
                 self.regions = em::normalize(&self.regions);
                 self.selected = dragged.and_then(|d| self.regions.iter().position(|r| d.start >= r.start && d.start < r.end));
                 self.emit_cuts(cx);
+                if let Some(r) = self.selected.and_then(|i| self.regions.get(i).copied()) {
+                    self.say(format!("{}. {}", crate::ui::a11y::cut_label(r.start as f64, r.end as f64), self.kept_text()));
+                }
             }
             Drag::Stage { .. } => {
                 // A plain click: deselect a box, else play/pause.
@@ -1062,6 +1257,9 @@ impl TimelapseEditor {
                 if tiny {
                     self.masks.retain(|m| m.id != id);
                     self.sel_mask = None;
+                } else if let Some(i) = self.masks.iter().position(|m| m.id == id) {
+                    let m = &self.masks[i];
+                    self.say(format!("{} added", crate::ui::a11y::mask_label(i + 1, m.start, m.end)));
                 }
                 self.emit_cuts(cx);
             }
@@ -1232,33 +1430,313 @@ impl TimelapseEditor {
 
     // ── Keys ───────────────────────────────────────────────────────────
 
-    fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let k = &ev.keystroke;
-        if k.modifiers.platform || k.modifiers.control {
-            return;
+    /// Keep the keyboard stop and the selection in step: selecting with
+    /// the mouse moves the keyboard there; a stop whose cut or mask went
+    /// away falls back to the playhead.
+    fn reconcile_stop(&mut self) {
+        let ok = match &self.stop {
+            Stop::Cut(i, _) => self.selected == Some(*i) && *i < self.regions.len(),
+            Stop::MaskBox(id) | Stop::MaskSpan(id, _) => self.sel_mask.as_deref() == Some(id.as_str()),
+            Stop::Playhead | Stop::Overview => self.selected.is_none() && self.sel_mask.is_none(),
+        };
+        if !ok {
+            self.stop = match (&self.selected, &self.sel_mask) {
+                (Some(i), _) => Stop::Cut(*i, Part::Body),
+                (_, Some(id)) => Stop::MaskBox(id.clone()),
+                _ => Stop::Playhead,
+            };
         }
-        match k.key.as_str() {
-            "space" | "k" => self.toggle_play(cx),
-            "x" | "c" => self.cut_here(cx),
-            "m" => self.add_mask(cx),
-            "delete" | "backspace" => self.delete_selection(cx),
-            "escape" => {
+    }
+
+    fn mask_ids(&self) -> Vec<String> {
+        self.masks.iter().map(|m| m.id.clone()).collect()
+    }
+
+    /// Move the keyboard to `stop`: select what it's on and bring it into
+    /// view (a mask's box only shows while the playhead is in its span).
+    fn set_stop(&mut self, stop: Stop, cx: &mut Context<Self>) {
+        match &stop {
+            Stop::Cut(i, part) => {
+                self.selected = Some(*i);
+                self.sel_mask = None;
+                if let Some(r) = self.regions.get(*i).copied() {
+                    let (s, e) = match part {
+                        Part::Body => (r.start as f64, r.end as f64),
+                        Part::Start => (r.start as f64, r.start as f64),
+                        Part::End => (r.end as f64, r.end as f64),
+                    };
+                    self.reveal_span(s, e);
+                }
+            }
+            Stop::MaskBox(id) | Stop::MaskSpan(id, _) => {
+                self.select_mask(Some(id.clone()));
+                if let Some(m) = self.masks.iter().find(|m| m.id == *id).cloned() {
+                    if !m.active_at(self.time) {
+                        self.seek(m.start + 0.02, cx);
+                    }
+                    self.reveal_span(m.start, m.end);
+                }
+            }
+            Stop::Playhead => {
+                self.selected = None;
+                self.sel_mask = None;
+                self.reveal(self.time);
+            }
+            Stop::Overview => {
                 self.selected = None;
                 self.sel_mask = None;
             }
-            "=" | "+" => self.zoom_by(1.5, None, true, cx),
-            "-" => self.zoom_by(1.0 / 1.5, None, true, cx),
-            "0" => self.zoom_fit(cx),
-            "left" | "right" => {
-                let step = if k.modifiers.shift { 10.0 } else { 1.0 };
-                let t = self.time + if k.key == "left" { -step } else { step };
-                self.seek(t, cx);
-                self.reveal(self.time);
-            }
-            _ => return,
         }
-        cx.stop_propagation();
+        self.stop = stop;
         cx.notify();
+    }
+
+    /// Bring `[s, e]` into view (its start, if it's wider than the view).
+    fn reveal_span(&mut self, s: f64, e: f64) {
+        let v = self.target_view();
+        let vis = v.visible(self.n());
+        if s < v.start || e > v.start + vis {
+            let mid = if e - s >= vis * 0.8 { s + vis * 0.4 } else { (s + e) / 2.0 };
+            self.pan_to(mid - vis / 2.0);
+        }
+    }
+
+    /// Tab / Shift+Tab: the next stop, or out of the editor to whatever
+    /// else takes focus (wrapping round when nothing does).
+    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        self.kb = true;
+        self.regions = em::normalize(&self.regions);
+        let all = em::stops(self.regions.len(), &self.mask_ids());
+        if let Some(next) = em::step_stop(&self.stop, &all, forward) {
+            self.set_stop(next, cx);
+            return;
+        }
+        if forward { window.focus_next(cx) } else { window.focus_prev(cx) }
+        let wrap = if self.focus.is_focused(window) && !forward { Stop::Overview } else { Stop::Playhead };
+        self.set_stop(wrap, cx);
+    }
+
+    fn can_publish(&self) -> bool {
+        let cuts = self.current_cuts();
+        !self.saving && self.n() > 0 && em::count_cut_units(&self.units, &cuts) < self.n()
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let m = k.modifiers;
+        if self.saving {
+            return;
+        }
+        if m.platform || m.control {
+            if k.key == "enter" && !m.alt && !m.shift {
+                if self.can_publish() {
+                    self.save(cx);
+                } else if !self.saving {
+                    self.say("You can't remove the entire timelapse");
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+        let big = m.shift;
+        let handled = match k.key.as_str() {
+            "space" | "k" if !m.alt => {
+                self.toggle_play(cx);
+                true
+            }
+            "x" | "c" if !m.alt => {
+                self.cut_here(cx);
+                true
+            }
+            "m" if !m.alt => {
+                if self.masks_supported && !self.can_add_mask() {
+                    self.say("No room for another mask here: up to 3 can overlap");
+                }
+                self.add_mask(cx);
+                true
+            }
+            "delete" | "backspace" => self.delete_at_stop(cx),
+            "escape" => {
+                if self.stop != Stop::Playhead || self.selected.is_some() || self.sel_mask.is_some() {
+                    self.set_stop(Stop::Playhead, cx);
+                    true
+                } else {
+                    false
+                }
+            }
+            "=" | "+" => {
+                self.zoom_by(1.5, None, true, cx);
+                self.say(format!("Zoom {}. {}", self.zoom_text(), self.view_text()));
+                true
+            }
+            "-" => {
+                self.zoom_by(1.0 / 1.5, None, true, cx);
+                self.say(format!("Zoom {}. {}", self.zoom_text(), self.view_text()));
+                true
+            }
+            "0" => {
+                self.zoom_fit(cx);
+                self.say("Whole timeline");
+                true
+            }
+            "?" => {
+                cx.emit(EditorEvent::ShowShortcuts);
+                true
+            }
+            "/" if m.shift => {
+                cx.emit(EditorEvent::ShowShortcuts);
+                true
+            }
+            "left" | "right" | "up" | "down" | "home" | "end" | "," | "." => self.arrow(k.key.as_str(), m, big, cx),
+            _ => false,
+        };
+        if handled {
+            self.kb = true;
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// Arrows, Home/End and `,`/`.`: what they do depends on the stop.
+    fn arrow(&mut self, key: &str, m: Modifiers, big: bool, cx: &mut Context<Self>) -> bool {
+        let n = self.n() as i64;
+        if n == 0 {
+            return false;
+        }
+        let step: i64 = if big { 10 } else { 1 };
+        let sign: i64 = if matches!(key, "left" | "up" | "," | "home") { -1 } else { 1 };
+        let hop = |e: &mut Self, cx: &mut Context<Self>| {
+            let next = em::step_item(&e.stop, e.regions.len(), &e.mask_ids(), sign > 0);
+            if let Some(s) = next {
+                e.set_stop(s, cx);
+            }
+        };
+        match self.stop.clone() {
+            Stop::Playhead => match key {
+                "left" | "right" => {
+                    self.seek(self.time + (sign * step) as f64, cx);
+                    self.reveal(self.time);
+                }
+                "," | "." => {
+                    self.seek(self.time + sign as f64 * FRAME_STEP, cx);
+                    self.reveal(self.time);
+                }
+                "home" | "end" => {
+                    self.seek(if sign < 0 { 0.0 } else { n as f64 }, cx);
+                    self.reveal(self.time);
+                }
+                _ => hop(self, cx),
+            },
+            Stop::Cut(i, part) => match key {
+                "left" | "right" => self.nudge_cut(i, part, sign * step, cx),
+                "home" | "end" => self.nudge_cut(i, part, sign * n, cx),
+                "up" | "down" => hop(self, cx),
+                _ => return false,
+            },
+            Stop::MaskBox(id) => {
+                let d = MASK_NUDGE * if big { 10.0 } else { 1.0 };
+                let (dx, dy) = match key {
+                    "left" => (-d, 0.0),
+                    "right" => (d, 0.0),
+                    "up" => (0.0, -d),
+                    "down" => (0.0, d),
+                    _ => return false,
+                };
+                self.nudge_mask_box(&id, dx, dy, m.alt, cx);
+            }
+            Stop::MaskSpan(id, part) => match key {
+                "left" | "right" => self.nudge_mask_span(&id, part, (sign * step) as f64, cx),
+                "home" | "end" => self.nudge_mask_span(&id, part, (sign * n) as f64, cx),
+                "up" | "down" => hop(self, cx),
+                _ => return false,
+            },
+            Stop::Overview => match key {
+                "left" | "right" => {
+                    let v = self.target_view();
+                    let vis = v.visible(self.n());
+                    self.pan_to(v.start + sign as f64 * vis * if big { 1.0 } else { 0.1 });
+                    self.say(self.view_text());
+                }
+                "home" | "end" => {
+                    self.pan_to(if sign < 0 { 0.0 } else { n as f64 });
+                    self.say(self.view_text());
+                }
+                "up" | "down" => hop(self, cx),
+                _ => return false,
+            },
+        }
+        true
+    }
+
+    /// Move a cut (or one of its edges) by `delta` units. Running into the
+    /// next cut merges them, as dragging does.
+    fn nudge_cut(&mut self, i: usize, part: Part, delta: i64, cx: &mut Context<Self>) {
+        let n = self.n() as i64;
+        self.regions = em::normalize(&self.regions);
+        let Some(r) = self.regions.get(i).copied() else { return };
+        let moved = em::nudge_region(r, part, delta, n);
+        if moved == r {
+            return;
+        }
+        let before = self.regions.len();
+        self.regions[i] = moved;
+        self.regions = em::normalize(&self.regions);
+        let merged = self.regions.len() < before;
+        let idx = self.regions.iter().position(|x| x.start <= moved.start && moved.start < x.end).unwrap_or(0);
+        let now = self.regions[idx];
+        self.selected = Some(idx);
+        self.sel_mask = None;
+        // Merging can hand the edge to the merged cut; keep the same part.
+        self.stop = Stop::Cut(idx, part);
+        // Show the frame at the edge that moved, like dragging it.
+        let t = match part {
+            Part::Body | Part::Start => now.start as f64 + 0.02,
+            Part::End => (n as f64 - 0.05).min(now.end as f64 + 0.02),
+        };
+        self.seek(t, cx);
+        self.reveal_span(if part == Part::End { now.end as f64 } else { now.start as f64 }, if part == Part::Start { now.start as f64 } else { now.end as f64 });
+        self.emit_cuts(cx);
+        // A grip is a slider (its value is spoken); the body says where it went.
+        if part == Part::Body || merged {
+            let what = if merged { "Merged" } else { "Cut" };
+            self.say(format!("{what}, {}. {}", crate::ui::a11y::minute_span(now.start as f64, now.end as f64), self.kept_text()));
+        }
+    }
+
+    fn nudge_mask_span(&mut self, id: &str, part: Part, delta: f64, cx: &mut Context<Self>) {
+        let n = self.n() as f64;
+        let Some(m) = self.masks.iter().find(|m| m.id == id).cloned() else { return };
+        let (s, e) = em::nudge_mask_span(m.start, m.end, part, delta, n);
+        let others: Vec<Mask> = self.masks.iter().filter(|x| x.id != id).cloned().collect();
+        if em::masks_overlapping(&others, s, e, None) >= em::MAX_MASK_LANES {
+            self.say("No room: up to 3 masks can overlap");
+            return;
+        }
+        if let Some(mm) = self.mask_mut(id) {
+            mm.start = s;
+            mm.end = e;
+        }
+        let t = match part {
+            Part::Body | Part::Start => s + 0.02,
+            Part::End => (e - 0.03).max(s),
+        };
+        self.seek(t, cx);
+        self.reveal_span(s, e);
+        self.emit_cuts(cx);
+        if part == Part::Body {
+            let number = self.masks.iter().position(|x| x.id == id).map(|i| i + 1).unwrap_or(1);
+            self.say(crate::ui::a11y::mask_label(number, s, e));
+        }
+    }
+
+    fn nudge_mask_box(&mut self, id: &str, dx: f32, dy: f32, resize: bool, cx: &mut Context<Self>) {
+        let Some(m) = self.mask_mut(id) else { return };
+        let (x, y, w, h) = em::nudge_mask_box((m.x, m.y, m.w, m.h), dx, dy, resize);
+        (m.x, m.y, m.w, m.h) = (x, y, w, h);
+        self.emit_cuts(cx);
     }
 }
 
@@ -1444,9 +1922,16 @@ impl Render for TimelapseEditor {
             }
             Phase::Ready => {}
         }
-        if !self.focus.is_focused(window) && self.drag.is_none() {
+        // Take focus when the window has none (on open, and when a sheet
+        // over it closes), but never pull it away from something else.
+        if self.drag.is_none() && window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
+        self.reconcile_stop();
+        // `:focus-visible`: the ring shows once a key moved the focus.
+        let ring_on = self.kb && self.focus.is_focused(window);
+        let ring_c = t.focus_ring;
+        let stop = self.stop.clone();
         if let Some(v) = &self.video {
             let v = v.read(cx);
             self.aspect = v.aspect();
@@ -1507,7 +1992,7 @@ impl Render for TimelapseEditor {
         let mut overlay = video_box(div()).id("editor-overlay");
         for m in self.masks.iter().filter(|m| m.active_at(self.time) || matches!(&self.drag, Some(Drag::MaskDraw { id, .. }) if *id == m.id)) {
             let lane = self.masks.iter().position(|x| x.id == m.id).map(|i| lanes[i]).unwrap_or(0);
-            overlay = overlay.child(self.render_mask_box(m, lane, vw, vh, &t, cx));
+            overlay = overlay.child(self.render_mask_box(m, lane, vw, vh, ring_on.then_some(ring_c), cx));
         }
         if ring_o > 0.001 {
             overlay = overlay.child(
@@ -1588,6 +2073,7 @@ impl Render for TimelapseEditor {
             .aria_numeric_value_step(1.0)
             .aria_numeric_value((unit_now + 1) as f64)
             .aria_value(crate::ui::a11y::editor_playhead_text(self.time, n, in_cut))
+            .when(stop == Stop::Playhead, |d| d.aria_active_descendant())
             .on_a11y_action(AccessibleAction::Increment, step_to(1))
             .on_a11y_action(AccessibleAction::Decrement, step_to(-1))
             .on_a11y_action(AccessibleAction::SetValue, {
@@ -1636,7 +2122,8 @@ impl Render for TimelapseEditor {
                                 .ts(12.0)
                                 .w500()
                                 .font_features(tnum.clone())
-                                .text_color(t.text_tertiary)
+                                // Secondary, not tertiary: 12px labels need 4.5:1.
+                                .text_color(t.text_secondary)
                                 .whitespace_nowrap()
                                 .child(em::timecode(u)),
                         );
@@ -1649,7 +2136,7 @@ impl Render for TimelapseEditor {
                             .w(px(1.0))
                             .h(px(if major { 9.0 } else { 5.0 }))
                             .rounded(px(0.5))
-                            .bg(if major { t.text_tertiary } else { t.text_quaternary }),
+                            .bg(if major { t.text_secondary } else { t.text_tertiary }),
                     );
                 }
                 u += minor;
@@ -1745,16 +2232,58 @@ impl Render for TimelapseEditor {
             let selected = self.selected == Some(i);
             let hovered = self.hover_region == Some(i);
             let fill = if hovered { theme::mix(t.cut_fill, t.cut_fill_hover, rh) } else { t.cut_fill };
-            let stripe = t.cut_stripe;
+            // Stronger than the theme's stripe so a cut reads by its
+            // hatching (not just its red) over any thumbnail.
+            let stripe = t.cut_border.opacity(if t.dark { 0.42 } else { 0.5 });
+            let kpart = match &stop {
+                Stop::Cut(j, p) if *j == i => Some(*p),
+                _ => None,
+            };
             let border = t.cut_border;
             let ring = if selected { 4.0 } else { 3.0 };
             let label = (vr - vl >= 52.0).then(|| em::span_label((r.end - r.start) as f64));
             let (lo, ro) = (left - vl, right - vl);
             let handle = |start: bool, cx: &mut Context<Self>| {
                 let hov = self.hover_handle == Some((i, start));
-                let gs = if hov { grip_scale } else { 1.0 };
+                let part = if start { Part::Start } else { Part::End };
+                let focused = kpart == Some(part);
+                let ring = ring_on && focused;
+                let gs = if hov { grip_scale } else if ring { ed_hover(1.15) } else { 1.0 };
+                // Each edge is a slider over minutes, counted from 1: the
+                // start is the first minute removed, the end the last.
+                let (value, lo_v, hi_v) = if start {
+                    (r.start + 1, 1, r.end)
+                } else {
+                    (r.end, r.start + 1, n as i64)
+                };
+                let nudge = |delta: i64| {
+                    let e = cx.entity();
+                    move |_: Option<&gpui_kit::gpui::accesskit::ActionData>, _: &mut Window, cx: &mut App| {
+                        e.update(cx, |e, cx| e.nudge_cut(i, part, delta, cx))
+                    }
+                };
                 div()
                     .id(("handle", i * 2 + start as usize))
+                    .role(Role::Slider)
+                    .aria_label(if start { "Start of cut" } else { "End of cut" })
+                    .aria_orientation(gpui_kit::gpui::Orientation::Horizontal)
+                    .aria_min_numeric_value(lo_v as f64)
+                    .aria_max_numeric_value(hi_v as f64)
+                    .aria_numeric_value_step(1.0)
+                    .aria_numeric_value(value as f64)
+                    .aria_value(format!("minute {value}"))
+                    .when(focused, |d| d.aria_active_descendant())
+                    .on_a11y_action(AccessibleAction::Increment, nudge(1))
+                    .on_a11y_action(AccessibleAction::Decrement, nudge(-1))
+                    .on_a11y_action(AccessibleAction::SetValue, {
+                        let e = cx.entity();
+                        move |data, _, cx| {
+                            if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(v)) = data {
+                                let delta = v.round() as i64 - value;
+                                e.update(cx, |e, cx| e.nudge_cut(i, part, delta, cx));
+                            }
+                        }
+                    })
                     .absolute()
                     .top_0()
                     .bottom_0()
@@ -1770,6 +2299,7 @@ impl Render for TimelapseEditor {
                             .h(px(30.0 * gs.min(1.15)))
                             .rounded(px(5.0))
                             .bg(theme::hex(0xffffff))
+                            .when(ring, |d| d.border(px(2.0)).border_color(ring_c))
                             .shadow(vec![theme::sh(0.0, 1.0, 4.0, 0.0, theme::black(0.4))])
                             .flex()
                             .items_center()
@@ -1807,6 +2337,7 @@ impl Render for TimelapseEditor {
                     .role(Role::ListItem)
                     .aria_label(crate::ui::a11y::cut_label(r.start as f64, r.end as f64))
                     .aria_selected(selected)
+                    .when(kpart == Some(Part::Body), |d| d.aria_active_descendant())
                     .on_a11y_click({
                         let e = cx.entity();
                         move |_, cx| {
@@ -1836,6 +2367,18 @@ impl Render for TimelapseEditor {
                                 window.paint_quad(gpui_kit::gpui::fill(full, fill).corner_radii(rr));
                                 paint_hatch(full, paint::inset(full, 1.0), stripe, window);
                                 window.paint_quad(gpui_kit::gpui::quad(full, rr, gpui_kit::gpui::transparent_black(), px(ring), border, Default::default()));
+                                // Selected: a white inner outline too, so it
+                                // doesn't hinge on a 1px-thicker red edge.
+                                if selected && rw > 10.0 {
+                                    window.paint_quad(gpui_kit::gpui::quad(
+                                        paint::inset(full, ring + 1.0),
+                                        px(5.0),
+                                        gpui_kit::gpui::transparent_black(),
+                                        px(1.5),
+                                        theme::white(0.9),
+                                        Default::default(),
+                                    ));
+                                }
                             });
                         })
                         .absolute()
@@ -1871,6 +2414,19 @@ impl Render for TimelapseEditor {
                         let grab = e.unit_at_x(ev.position.x) - r.start as f64;
                         e.on_down(Drag::Region { index: i, mode: DragMode::Move, grab, anchor: r.start }, ev.position, cx);
                     }))
+                    .when(ring_on && kpart == Some(Part::Body), |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(-3.0))
+                                .bottom(px(-3.0))
+                                .left(px(lo - 3.0))
+                                .w(px(rw.max(2.0) + 6.0))
+                                .rounded(px(10.0))
+                                .border(px(2.0))
+                                .border_color(ring_c),
+                        )
+                    })
                     .children(h_start)
                     .children(h_end),
             );
@@ -1893,7 +2449,7 @@ impl Render for TimelapseEditor {
                 if right < -10.0 || left > w + 10.0 {
                     continue;
                 }
-                lanes_el = lanes_el.child(self.render_mask_bar(&m, lane, left, right, w, cx));
+                lanes_el = lanes_el.child(self.render_mask_bar(&m, lane, left, right, w, ring_on.then_some(ring_c), cx));
             }
         }
 
@@ -1959,6 +2515,9 @@ impl Render for TimelapseEditor {
                             .absolute()
                             .inset_0(),
                         )
+                        .when(ring_on && stop == Stop::Playhead, |d| {
+                            d.child(div().absolute().inset_0().rounded(px(7.0)).border(px(2.0)).border_color(ring_c))
+                        })
                         .on_hover(cx.listener(|e, h: &bool, _, cx| {
                             e.head_hover = *h;
                             if e.drag.is_none() {
@@ -2014,8 +2573,41 @@ impl Render for TimelapseEditor {
             t.bg_body.opacity(0.7),
             t.text_secondary,
         );
+        let pan_by = |frac: f64| {
+            let e = cx.entity();
+            move |_: Option<&gpui_kit::gpui::accesskit::ActionData>, _: &mut Window, cx: &mut App| {
+                e.update(cx, |e, cx| {
+                    let v = e.target_view();
+                    e.pan_to(v.start + frac * v.visible(e.n()));
+                    cx.notify();
+                })
+            }
+        };
         let minimap = div()
             .id("editor-minimap")
+            .role(Role::ScrollBar)
+            .aria_label("Timeline view")
+            .aria_orientation(gpui_kit::gpui::Orientation::Horizontal)
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value((n as f64 - vis).max(0.0))
+            .aria_numeric_value_step((vis * 0.1).max(1.0))
+            .aria_numeric_value((self.view.start * 10.0).round() / 10.0)
+            .aria_value(self.view_text())
+            .when(stop == Stop::Overview, |d| d.aria_active_descendant())
+            .on_a11y_action(AccessibleAction::Increment, pan_by(0.1))
+            .on_a11y_action(AccessibleAction::Decrement, pan_by(-0.1))
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let e = cx.entity();
+                move |data, _, cx| {
+                    if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(v)) = data {
+                        let v = *v;
+                        e.update(cx, |e, cx| {
+                            e.pan_to(v);
+                            cx.notify();
+                        })
+                    }
+                }
+            })
             .relative()
             .mt(px(12.0))
             .h(px(MINI_H))
@@ -2047,6 +2639,19 @@ impl Render for TimelapseEditor {
                 .absolute()
                 .inset_0(),
             )
+            .when(ring_on && stop == Stop::Overview, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-3.0))
+                        .bottom(px(-3.0))
+                        .left(px(-3.0))
+                        .right(px(-3.0))
+                        .rounded(px(MINI_H / 2.0 + 3.0))
+                        .border(px(2.0))
+                        .border_color(ring_c),
+                )
+            })
             .on_mouse_down(MouseButton::Left, cx.listener(|e, ev: &MouseDownEvent, _, cx| {
                 if e.view.zoom <= 1.0 + 1e-3 {
                     return;
@@ -2120,8 +2725,8 @@ impl Render for TimelapseEditor {
         let text_btn = |id: &'static str, icon: Icon, label: &'static str| {
             tool(id).padding(10.0, 16.0).font_size(14.0).gap(8.0).aria_label(label).child(icon.el(16.0, t.text_primary)).child(label)
         };
-        let (e_play, e_in, e_out, e_cut, e_mask, e_del, e_clear, e_pub) =
-            (cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity());
+        let (e_play, e_in, e_out, e_cut, e_mask, e_del, e_clear, e_pub, e_help) =
+            (cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity(), cx.entity());
         let can_mask = self.can_add_mask();
         let toolbar = div()
             .flex()
@@ -2138,14 +2743,49 @@ impl Render for TimelapseEditor {
                     .on_click(move |_, _, cx| e_play.update(cx, |e, cx| e.toggle_play(cx))),
             )
             .child(
-                icon_btn("editor-zoom-in", Icon::ZoomIn, "Zoom in", "Zoom in (=)")
-                    .disabled(self.view.zoom >= max_zoom - 1e-3)
-                    .on_click(move |_, _, cx| e_in.update(cx, |e, cx| e.zoom_by(1.6, None, true, cx))),
-            )
-            .child(
-                icon_btn("editor-zoom-out", Icon::ZoomOut, "Zoom out", "Zoom out (−)")
-                    .disabled(!zoomed)
-                    .on_click(move |_, _, cx| e_out.update(cx, |e, cx| e.zoom_by(1.0 / 1.6, None, true, cx))),
+                // The two buttons are also one slider for assistive
+                // technology: the zoom as a value it can set.
+                div()
+                    .id("editor-zoom")
+                    .role(Role::Slider)
+                    .aria_label("Zoom")
+                    .aria_orientation(gpui_kit::gpui::Orientation::Horizontal)
+                    .aria_min_numeric_value(1.0)
+                    .aria_max_numeric_value(max_zoom)
+                    .aria_numeric_value((self.target_view().zoom * 10.0).round() / 10.0)
+                    .aria_value(self.zoom_text())
+                    .on_a11y_action(AccessibleAction::Increment, {
+                        let e = cx.entity();
+                        move |_, _, cx| e.update(cx, |e, cx| e.zoom_by(1.6, None, true, cx))
+                    })
+                    .on_a11y_action(AccessibleAction::Decrement, {
+                        let e = cx.entity();
+                        move |_, _, cx| e.update(cx, |e, cx| e.zoom_by(1.0 / 1.6, None, true, cx))
+                    })
+                    .on_a11y_action(AccessibleAction::SetValue, {
+                        let e = cx.entity();
+                        move |data, _, cx| {
+                            if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(v)) = data {
+                                let v = *v;
+                                e.update(cx, |e, cx| {
+                                    let f = v.max(1.0) / e.target_view().zoom;
+                                    e.zoom_by(f, None, false, cx)
+                                })
+                            }
+                        }
+                    })
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        icon_btn("editor-zoom-in", Icon::ZoomIn, "Zoom in", "Zoom in (=)")
+                            .disabled(self.view.zoom >= max_zoom - 1e-3)
+                            .on_click(move |_, _, cx| e_in.update(cx, |e, cx| e.zoom_by(1.6, None, true, cx))),
+                    )
+                    .child(
+                        icon_btn("editor-zoom-out", Icon::ZoomOut, "Zoom out", "Zoom out (−). 0 fits the whole timeline")
+                            .disabled(!zoomed)
+                            .on_click(move |_, _, cx| e_out.update(cx, |e, cx| e.zoom_by(1.0 / 1.6, None, true, cx))),
+                    ),
             )
             .child(div().w(px(4.0)))
             .child(
@@ -2190,7 +2830,7 @@ impl Render for TimelapseEditor {
                         .padding(10.0, 14.0)
                         .font_size(14.0)
                         .gap(7.0)
-                        .tooltip("Delete (⌫)")
+                        .tooltip(if crate::theme::is_mac() { "Delete (⌫)" } else { "Delete (Delete)" })
                         .child(Icon::TrashBold.el(15.0, t.text_primary))
                         .child(if self.sel_mask.is_some() { "Delete mask" } else { "Remove cut" })
                         .on_click(move |_, _, cx| e_del.update(cx, |e, cx| e.delete_selection(cx))),
@@ -2217,14 +2857,45 @@ impl Render for TimelapseEditor {
                     .on_click(move |_, _, cx| e_pub.update(cx, |e, cx| e.save(cx)));
                 if all_cut {
                     b = b.tooltip("You can't remove the entire timelapse");
+                } else {
+                    b = b.tooltip(if crate::theme::is_mac() { "Publish (⌘Enter)" } else { "Publish (Ctrl+Enter)" });
                 }
                 b
-            });
+            })
+            .child(
+                Button::new("editor-shortcuts", "?")
+                    .variant(Variant::Ghost)
+                    .radius(10.0)
+                    .fixed(CTRL - 8.0, CTRL)
+                    .padding(0.0, 0.0)
+                    .font_size(16.0)
+                    .aria_label("Keyboard shortcuts")
+                    .tooltip("Keyboard shortcuts (?)")
+                    .on_click(move |_, _, cx| e_help.update(cx, |_, cx| cx.emit(EditorEvent::ShowShortcuts))),
+            );
 
+        let announce = format!("{}{}", self.announce, if self.announce_flip { " " } else { "" });
         div()
             .id("timelapse-editor")
+            .role(Role::Group)
+            .aria_label("Timelapse editor")
+            .aria_description("Tab moves between the playhead, cuts, masks and the overview. Press question mark for keyboard shortcuts.")
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(|e, _: &NextStop, window, cx| e.tab(true, window, cx)))
+            .on_action(cx.listener(|e, _: &PrevStop, window, cx| e.tab(false, window, cx)))
+            .relative()
+            .child(
+                // Spoken, not shown: what the last edit did.
+                div()
+                    .a11y_status("editor-announce", announce, Live::Polite)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(px(1.0))
+                    .overflow_hidden(),
+            )
             .size_full()
             .min_h(px(0.0))
             .flex()
@@ -2247,8 +2918,10 @@ impl Render for TimelapseEditor {
 impl TimelapseEditor {
     /// A mask's box on the video: mosaic fill, lane-coloured border, and
     /// eight grips when selected.
-    fn render_mask_box(&self, m: &Mask, lane: usize, vw: f32, vh: f32, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let color = lane_color(lane);
+    /// `ring`: the focus ring's colour while the keyboard shows it.
+    fn render_mask_box(&self, m: &Mask, lane: usize, vw: f32, vh: f32, ring: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
+        let kfocus = self.stop == Stop::MaskBox(m.id.clone());
+        let color = lane_color(lane, theme(cx).dark);
         let selected = self.sel_mask.as_deref() == Some(m.id.as_str());
         let (x, y, w, h) = (m.x * vw, m.y * vh, (m.w * vw).max(1.0), (m.h * vh).max(1.0));
         let id = m.id.clone();
@@ -2260,8 +2933,14 @@ impl TimelapseEditor {
             .id(SharedString::from(format!("mask-box-{}", m.id)))
             .role(Role::Button)
             .aria_label(format!("Mask {number}"))
-            .aria_description("Pixelated on the video")
+            .aria_value(mask_box_text(m))
+            .aria_description(if crate::theme::is_mac() {
+                "Pixelated on the video. Arrow keys move it, Option and arrow keys resize it."
+            } else {
+                "Pixelated on the video. Arrow keys move it, Alt and arrow keys resize it."
+            })
             .aria_selected(selected)
+            .when(kfocus, |d| d.aria_active_descendant())
             .on_a11y_click({
                 let me = cx.entity();
                 move |_, cx| {
@@ -2315,6 +2994,34 @@ impl TimelapseEditor {
                 .absolute()
                 .inset_0(),
             )
+            // Its number, so boxes and lanes pair up without relying on colour.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.0))
+                    .left(px(3.0))
+                    .px(px(4.0))
+                    .rounded(px(3.0))
+                    .bg(theme::black(0.65))
+                    .ts(10.0)
+                    .w700()
+                    .text_color(theme::hex(0xffffff))
+                    .when(w < 22.0 || h < 18.0, |d| d.invisible())
+                    .child(number.to_string()),
+            )
+            .when_some(ring.filter(|_| kfocus), |d, c| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.0))
+                        .left(px(-4.0))
+                        .right(px(-4.0))
+                        .bottom(px(-4.0))
+                        .rounded(px(6.0))
+                        .border(px(2.0))
+                        .border_color(c),
+                )
+            })
             .on_mouse_down(MouseButton::Left, cx.listener(move |e, ev: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 let Some(m) = e.masks.iter().find(|m| m.id == id).cloned() else { return };
@@ -2356,13 +3063,18 @@ impl TimelapseEditor {
                 );
             }
         }
-        let _ = t;
         el.into_any_element()
     }
 
     /// A mask's span on its lane.
-    fn render_mask_bar(&self, m: &Mask, lane: usize, left: f32, right: f32, w: f32, cx: &mut Context<Self>) -> AnyElement {
-        let color = lane_color(lane);
+    fn render_mask_bar(&self, m: &Mask, lane: usize, left: f32, right: f32, w: f32, ring: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
+        let color = lane_color(lane, theme(cx).dark);
+        let text_c = theme(cx).text_primary;
+        let kpart = match &self.stop {
+            Stop::MaskSpan(id, p) if *id == m.id => Some(*p),
+            _ => None,
+        };
+        let number = self.masks.iter().position(|x| x.id == m.id).map(|i| i + 1).unwrap_or(1);
         let selected = self.sel_mask.as_deref() == Some(m.id.as_str());
         let hovered = self.hover_mask.as_deref() == Some(m.id.as_str());
         let top = 6.0 + lane as f32 * (LANE_H + LANE_GAP);
@@ -2373,8 +3085,39 @@ impl TimelapseEditor {
         let fill = color.opacity(if selected { 0.6 } else if hovered { 0.42 } else { 0.3 });
         let grip = |start: bool, cx: &mut Context<Self>| {
             let id = m.id.clone();
+            let part = if start { Part::Start } else { Part::End };
+            let focused = kpart == Some(part);
+            let value = if start { m.start } else { m.end };
+            let nudge = |delta: f64| {
+                let e = cx.entity();
+                let id = m.id.clone();
+                move |_: Option<&gpui_kit::gpui::accesskit::ActionData>, _: &mut Window, cx: &mut App| {
+                    e.update(cx, |e, cx| e.nudge_mask_span(&id, part, delta, cx))
+                }
+            };
             div()
                 .id(SharedString::from(format!("mask-span-{}-{}", m.id, start as u8)))
+                .role(Role::Slider)
+                .aria_label(format!("{} of mask {number}", if start { "Start" } else { "End" }))
+                .aria_orientation(gpui_kit::gpui::Orientation::Horizontal)
+                .aria_min_numeric_value(0.0)
+                .aria_max_numeric_value(self.n() as f64)
+                .aria_numeric_value_step(1.0)
+                .aria_numeric_value((value * 100.0).round() / 100.0)
+                .aria_value(crate::ui::a11y::spoken_clock(value * 60.0))
+                .when(focused, |d| d.aria_active_descendant())
+                .on_a11y_action(AccessibleAction::Increment, nudge(1.0))
+                .on_a11y_action(AccessibleAction::Decrement, nudge(-1.0))
+                .on_a11y_action(AccessibleAction::SetValue, {
+                    let e = cx.entity();
+                    let id = m.id.clone();
+                    move |data, _, cx| {
+                        if let Some(gpui_kit::gpui::accesskit::ActionData::NumericValue(v)) = data {
+                            let delta = *v - value;
+                            e.update(cx, |e, cx| e.nudge_mask_span(&id, part, delta, cx));
+                        }
+                    }
+                })
                 .absolute()
                 .top_0()
                 .bottom_0()
@@ -2385,7 +3128,16 @@ impl TimelapseEditor {
                 .flex()
                 .items_center()
                 .map(|d| if start { d.justify_end().pr(px(2.0)) } else { d.justify_start().pl(px(2.0)) })
-                .when(selected || hovered, |d| d.child(div().w(px(2.0)).h(px(LANE_H - 8.0)).rounded(px(1.0)).bg(theme::white(0.95))))
+                .when(selected || hovered || focused, |d| {
+                    d.child(
+                        div()
+                            .w(px(if focused && ring.is_some() { 4.0 } else { 2.0 }))
+                            .h(px(LANE_H - 6.0))
+                            .rounded(px(1.0))
+                            .bg(theme::white(0.95))
+                            .when_some(ring.filter(|_| focused), |d, c| d.border(px(1.0)).border_color(c)),
+                    )
+                })
                 .on_mouse_down(MouseButton::Left, cx.listener(move |e, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     e.select_mask(Some(id.clone()));
@@ -2395,13 +3147,14 @@ impl TimelapseEditor {
         let (g0, g1) = ((left >= -7.0).then(|| grip(true, cx)), (right <= w + 7.0).then(|| grip(false, cx)));
         let id = m.id.clone();
         let id_h = m.id.clone();
-        let number = self.masks.iter().position(|x| x.id == m.id).map(|i| i + 1).unwrap_or(1);
         let id_a = m.id.clone();
+        let body_ring = ring.filter(|_| kpart == Some(Part::Body));
         div()
             .id(SharedString::from(format!("mask-span-{}", m.id)))
             .role(Role::ListItem)
             .aria_label(crate::ui::a11y::mask_label(number, m.start, m.end))
             .aria_selected(selected)
+            .when(kpart == Some(Part::Body), |d| d.aria_active_descendant())
             .on_a11y_click({
                 let me = cx.entity();
                 move |_, cx| {
@@ -2423,8 +3176,15 @@ impl TimelapseEditor {
             .h(px(LANE_H))
             .rounded(px(5.0))
             .bg(fill)
-            .border(px(if selected { 1.5 } else { 1.0 }))
-            .border_color(color)
+            .border(px(if body_ring.is_some() { 2.0 } else if selected { 1.5 } else { 1.0 }))
+            .border_color(body_ring.unwrap_or(color))
+            .flex()
+            .items_center()
+            .pl(px(5.0))
+            .text_color(text_c)
+            .ts(10.0)
+            .w700()
+            .when(width >= 18.0, |d| d.child(number.to_string()))
             .cursor(CursorStyle::OpenHand)
             .on_hover(cx.listener(move |e, h: &bool, _, cx| {
                 if *h {
@@ -2453,3 +3213,138 @@ impl TimelapseEditor {
 
 #[allow(unused)]
 fn _u(_: AnyElement, _: SharedString, _: Hsla, _: &Theme) {}
+
+/// A mask box's place on the frame, spoken: "35% from the left, 38% from
+/// the top, 30% wide, 24% tall".
+fn mask_box_text(m: &Mask) -> String {
+    let pc = |v: f32| (v * 100.0).round() as i32;
+    format!("{}% from the left, {}% from the top, {}% wide, {}% tall", pc(m.x), pc(m.y), pc(m.w), pc(m.h))
+}
+
+/// The `?` sheet: every editor shortcut, by section, in two columns.
+/// ↑/↓, Page Up/Down and Home/End scroll it when the window is short.
+pub struct ShortcutsDialog {
+    focus: FocusHandle,
+    scroll: gpui_kit::gpui::ScrollHandle,
+    on_close: std::rc::Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
+impl ShortcutsDialog {
+    pub fn new(cx: &mut Context<Self>, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        Self { focus: cx.focus_handle(), scroll: gpui_kit::gpui::ScrollHandle::new(), on_close: std::rc::Rc::new(on_close) }
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let k = ev.keystroke.key.as_str();
+        let page = f32::from(window.viewport_size().height) * 0.5;
+        let off = self.scroll.offset();
+        let max = f32::from(self.scroll.max_offset().y);
+        // Offsets run negative as the content scrolls up.
+        let y = -f32::from(off.y);
+        let to = match k {
+            "escape" | "enter" => {
+                cx.stop_propagation();
+                (self.on_close)(window, cx);
+                return;
+            }
+            "down" => y + 40.0,
+            "up" => y - 40.0,
+            "pagedown" | "space" => y + page,
+            "pageup" => y - page,
+            "home" => 0.0,
+            "end" => max,
+            _ => return,
+        };
+        self.scroll.set_offset(gpui_kit::gpui::point(off.x, px(-to.clamp(0.0, max))));
+        cx.stop_propagation();
+        cx.notify();
+    }
+}
+
+impl Render for ShortcutsDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx).clone();
+        if !self.focus.contains_focused(window, cx) {
+            window.focus(&self.focus, cx);
+        }
+        crate::ui::overlay::set_dialog_title(cx.entity_id(), "Keyboard shortcuts", false);
+        let close = self.on_close.clone();
+        let sections = shortcuts();
+        let split = 2;
+        let section_el = |si: usize, section: &'static str, rows: Vec<(String, &'static str)>| {
+            let mut sec = div()
+                .id(("shortcut-section", si))
+                .role(Role::List)
+                .aria_label(section)
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(div().ts(12.0).w600().text_color(t.text_secondary).child(section));
+            for (ri, (keys, what)) in rows.into_iter().enumerate() {
+                sec = sec.child(
+                    div()
+                        .id(("shortcut", ri))
+                        .role(Role::ListItem)
+                        .aria_label(format!("{keys}: {what}"))
+                        .flex()
+                        .gap(px(10.0))
+                        .items_start()
+                        .child(
+                            div().flex_none().w(px(132.0)).flex().child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(5.0))
+                                    .border_1()
+                                    .border_color(t.border_hover)
+                                    .bg(t.bg_sunken)
+                                    .ts(12.0)
+                                    .w600()
+                                    .text_color(t.text_primary)
+                                    .child(keys),
+                            ),
+                        )
+                        .child(div().flex_1().min_w(px(0.0)).ts_lh(13.0, 1.4).text_color(t.text_primary).child(what)),
+                );
+            }
+            sec
+        };
+        let mut left = div().flex_1().min_w(px(220.0)).flex().flex_col().gap(px(14.0));
+        let mut right = div().flex_1().min_w(px(220.0)).flex().flex_col().gap(px(14.0));
+        for (si, (section, rows)) in sections.into_iter().enumerate() {
+            let el = section_el(si, section, rows);
+            if si < split { left = left.child(el) } else { right = right.child(el) }
+        }
+        let max_h = (f32::from(window.viewport_size().height) - 200.0).max(160.0);
+        div()
+            .id("shortcuts-dialog")
+            .role(Role::Group)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            .child(div().a11y_heading("shortcuts-title", "Keyboard shortcuts", 1).ts(18.0).w600().text_color(t.text_primary).child("Keyboard shortcuts"))
+            .child(
+                div()
+                    .id("shortcuts-list")
+                    .track_scroll(&self.scroll)
+                    .overflow_y_scroll()
+                    .max_h(px(max_h))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(24.0))
+                    .child(left)
+                    .child(right),
+            )
+            .child(
+                div().flex().justify_end().child(
+                    Button::new("shortcuts-done", "Done")
+                        .variant(Variant::Primary)
+                        .size(BtnSize::Md)
+                        .on_click(move |_, window, cx| close(window, cx)),
+                ),
+            )
+    }
+}

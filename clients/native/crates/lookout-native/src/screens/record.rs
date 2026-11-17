@@ -121,6 +121,13 @@ impl RecordPage {
             _subs: subs,
         };
         page.check_session(cx);
+        // Coming back to Lookout from another app: pick up windows opened
+        // since the picker listed them.
+        page._subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && (this.recorder.is_none() || this.switching) {
+                this.picker.update(cx, |p, cx| p.relist(cx));
+            }
+        }));
         // While a source change is up, keep the picker's button honest
         // (a tray pause/resume changes it) and hand the window back to the
         // recorder when it needs the user: a stop from the tray.
@@ -345,7 +352,7 @@ impl RecordPage {
             ));
         }
         if let Some(n) = &self.naming {
-            return Some((n.clone().into(), Entrance::Naming, ModalWidth::Bare(400.0), None));
+            return Some((n.clone().into(), Entrance::Overlay, ModalWidth::Max(400.0), None));
         }
         for s in self.slots.iter().rev() {
             if let (Flow::Recorder(r), false) = (&s.flow, s.leaving) {
@@ -538,6 +545,11 @@ impl Render for RecordPage {
                     .size_full()
                     .flex()
                     .flex_col()
+                    .child(div().a11y_status("record-loading", "Loading…", Live::Polite).a11y_flags(NodeFlags {
+                        busy: true,
+                        live: Some(Live::Polite),
+                        ..Default::default()
+                    }))
                     .child(
                         div()
                             .max_w(px(480.0))
@@ -580,7 +592,8 @@ impl Render for RecordPage {
                     Some("Session Error".into()),
                     Some(SharedString::from(if msg.is_empty() { "Unknown error".to_string() } else { msg.clone() })),
                     None,
-                    vec![],
+                    // Announced: the page replaced what was loading.
+                    vec![div().a11y_status("record-error", "Session error", Live::Assertive).into_any_element()],
                     vec![],
                 )
                 .into_any_element();

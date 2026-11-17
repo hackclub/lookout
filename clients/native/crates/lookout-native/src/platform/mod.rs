@@ -1,6 +1,7 @@
 //! OS integration: camera, tray / menu-bar indicator, notifications,
 //! window chrome helpers, deep links, single instance.
 
+pub mod a11y_settings;
 pub mod app_menu;
 pub mod camera;
 pub mod decoder;

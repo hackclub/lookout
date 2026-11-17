@@ -4,6 +4,7 @@ pub mod add_session;
 pub mod editor;
 pub mod gallery;
 pub mod info;
+pub mod kbd;
 pub mod layout;
 pub mod modals;
 pub mod permission;

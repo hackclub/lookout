@@ -34,6 +34,10 @@ fn leak(s: String) -> &'static str {
 }
 
 pub fn bind_keys(cx: &mut App) {
+    // App-wide keyboard focus (Tab order) lives with the kit's key setup.
+    crate::ui::focus::install(cx);
+    // So is redrawing when the OS contrast / transparency settings change.
+    crate::platform::a11y_settings::observe_foreground(cx);
     let ctx = Some("TextInput");
     let primary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
     let word = if cfg!(target_os = "macos") { "alt" } else { "ctrl" };
@@ -103,7 +107,8 @@ impl EventEmitter<InputEvent> for TextInput {}
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            // Text fields are always in the Tab order (on macOS too).
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -704,6 +709,8 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A disabled field drops out of the Tab order.
+        self.focus_handle = self.focus_handle.clone().tab_stop(!self.disabled);
         let focused = self.focus_handle.is_focused(window);
         if focused != self.was_focused {
             self.was_focused = focused;
@@ -821,6 +828,24 @@ pub fn new_input(placeholder: &str, cx: &mut App) -> Entity<TextInput> {
         r.push(weak);
     });
     e
+}
+
+/// The platform focus ring around a text field's box while the field has
+/// focus — from the keyboard or a click, as native text fields show it.
+/// Add it as a child of the (`.relative()`) [`field_box`], with the box's
+/// corner radius.
+pub fn field_ring(input: &Entity<TextInput>, radius: f32, cx: &App) -> impl IntoElement {
+    let fh = input.read(cx).focus_handle.clone();
+    gpui_kit::gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            if fh.is_focused(window) {
+                crate::ui::focus::paint_ring(bounds, radius, window, crate::theme::theme(cx));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// A text field's box: clicking anywhere in it (padding included) focuses

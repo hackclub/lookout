@@ -5,16 +5,17 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, div, px,
 };
 use lookout_core::capture_diagnostics::CaptureEnvironment;
 use lookout_core::{SourceLoss, SourceLossReason};
 
 use crate::diagnosis::{self, Diagnosis};
-use crate::theme::{self, theme};
+use crate::theme::{is_windows, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::a11y::prelude::*;
+use crate::screens::kbd::KbdPress;
 use crate::ui::input::{InputEvent, TextInput, new_input};
 use crate::ui::text::{MONO, TextExt};
 
@@ -33,12 +34,21 @@ enum Choice {
     Edit,
 }
 
+/// The prompt that stops a recording. It is laid out like a desktop alert
+/// rather than a web card: title and text left-aligned, a regular-height
+/// field, one row of regular buttons in the platform's order (default
+/// button trailing on macOS and Linux, leading on Windows), Return for the
+/// default button and Escape to keep recording.
 pub struct NamingModal {
     input: Entity<TextInput>,
     pub loading: bool,
     pub too_short: bool,
     choice: Option<Choice>,
     focused_once: bool,
+    /// Resume was sent; Escape can arrive from both the field and the
+    /// dialog, and must only resume once.
+    resumed: bool,
+    focus: FocusHandle,
     _sub: Subscription,
 }
 
@@ -56,161 +66,155 @@ impl NamingModal {
             i.max_len = 255;
             i.a11y_label = Some("Timelapse name".into());
         });
-        let sub = cx.subscribe(&input, |this, input, ev: &InputEvent, cx| {
-            // Enter takes the primary action, "Edit & Save".
-            if let InputEvent::Submit = ev {
-                if !this.loading {
-                    this.choice = Some(Choice::Edit);
-                    let name = trimmed(input.read(cx).text());
-                    cx.emit(NamingEvent::EditAndSave(name));
-                }
-            }
+        let sub = cx.subscribe(&input, |this, _, ev: &InputEvent, cx| match ev {
+            // Return takes the default button, "Edit & Save".
+            InputEvent::Submit => this.choose(Choice::Edit, cx),
+            InputEvent::Cancel => this.resume(cx),
+            _ => {}
         });
-        Self { input, loading: false, too_short, choice: None, focused_once: false, _sub: sub }
+        Self { input, loading: false, too_short, choice: None, focused_once: false, resumed: false, focus: cx.focus_handle(), _sub: sub }
+    }
+
+    fn choose(&mut self, choice: Choice, cx: &mut Context<Self>) {
+        if self.loading || self.resumed {
+            return;
+        }
+        self.choice = Some(choice);
+        let name = if self.too_short { None } else { trimmed(self.input.read(cx).text()) };
+        cx.emit(match choice {
+            Choice::Edit => NamingEvent::EditAndSave(name),
+            Choice::Stop => NamingEvent::Confirm(name),
+        });
+    }
+
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        if self.loading || self.resumed {
+            return;
+        }
+        self.resumed = true;
+        cx.emit(NamingEvent::Resume);
     }
 }
 
 impl Render for NamingModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        // `setTimeout(() => input.focus(), 50)` on open.
-        if !self.focused_once && !self.too_short {
+        if !self.focused_once {
             self.focused_once = true;
-            let input = self.input.clone();
-            cx.spawn_in(window, async move |_, cx| {
-                cx.background_executor().timer(Duration::from_millis(50)).await;
-                cx.update(|window, cx| {
-                    let fh = input.read(cx).focus_handle(cx);
-                    window.focus(&fh, cx);
+            if self.too_short {
+                // No field: the dialog takes focus so Return and Escape work.
+                window.focus(&self.focus, cx);
+            } else {
+                // `setTimeout(() => input.focus(), 50)` on open.
+                let input = self.input.clone();
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    cx.update(|window, cx| {
+                        let fh = input.read(cx).focus_handle(cx);
+                        window.focus(&fh, cx);
+                    })
+                    .ok();
                 })
-                .ok();
-            })
-            .detach();
+                .detach();
+            }
         }
         let loading = self.loading;
         self.input.update(cx, |i, _| i.disabled = loading);
         let choice = self.choice;
+        let too_short = self.too_short;
         let e = cx.entity();
-        let title = if self.too_short { "Nothing to save yet" } else { "Name your timelapse" };
-        let body = if self.too_short {
+        let title = if too_short { "Nothing to save yet" } else { "Name your timelapse" };
+        let body = if too_short {
             "A timelapse needs a minute of recording. Stop now and this session ends without one."
         } else {
-            "Give it a name, or skip to use the default."
+            "Leave it blank to use the default name."
         };
-        crate::ui::overlay::set_dialog_title(cx.entity_id(), title, false);
-        let mut card = div()
-            .w_full()
-            .p(px(24.0))
-            .bg(t.bg_panel)
-            .border_1()
-            .border_color(t.border_default)
-            .rounded(px(10.0))
-            .text_center()
-            .shadow(vec![theme::sh(0.0, 10.0, 40.0, 0.0, theme::black(0.5))])
-            .child(div().a11y_heading("naming-title", title, 2).ts(16.0).w700().text_color(t.text_primary).mb(px(8.0)).child(title))
-            .child(div().a11y_text("naming-body", body).ts(13.0).text_color(t.text_secondary).mb(px(16.0)).child(body));
-        if !self.too_short {
-            card = card.child(
-                crate::ui::input::field_box(&self.input)
-                    .w_full()
-                    .px(px(16.0))
-                    .py(px(12.0))
-                    .ts(14.0)
-                    .w500()
-                    .text_color(t.text_primary)
-                    .bg(t.bg_sunken)
-                    .border_1()
-                    .border_color(t.border_default)
-                    .rounded(px(8.0))
-                    .mb(px(16.0))
-                    .text_left()
-                    .when(loading, |d| d.opacity(0.5))
-                    .child(self.input.clone()),
-            );
-        }
-        if self.too_short {
-            let (e1, e2) = (e.clone(), e.clone());
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        Button::new("naming-keep", "Keep recording")
-                            .variant(Variant::Success)
-                            .size(BtnSize::Lg)
-                            .full_width()
-                            .disabled(loading)
-                            .on_click(move |_, _, cx| e1.update(cx, |_, cx| cx.emit(NamingEvent::Resume))),
-                    )
-                    .child(
-                        Button::new("naming-stop-anyway", "Stop anyway")
-                            .variant(Variant::Ghost)
-                            .size(BtnSize::Md)
-                            .full_width()
-                            .loading(loading && choice == Some(Choice::Stop))
-                            .disabled(loading && choice != Some(Choice::Stop))
-                            .on_click(move |_, _, cx| {
-                                e2.update(cx, |m, cx| {
-                                    m.choice = Some(Choice::Stop);
-                                    let name = trimmed(m.input.read(cx).text());
-                                    cx.emit(NamingEvent::Confirm(name));
-                                })
-                            }),
-                    ),
-            );
+        crate::ui::overlay::set_dialog_title(cx.entity_id(), title, too_short);
+
+        let button = |id: &'static str, label: &'static str, variant: Variant, which: Option<Choice>| {
+            let e = e.clone();
+            Button::new(id, label)
+                .variant(variant)
+                .size(BtnSize::Md)
+                .loading(loading && which.is_some() && choice == which)
+                .disabled(loading && (which.is_none() || choice != which))
+                .on_click(move |_, _, cx| {
+                    e.update(cx, |m, cx| match which {
+                        Some(c) => m.choose(c, cx),
+                        None => m.resume(cx),
+                    })
+                })
+        };
+        // (default, cancel, alternative)
+        let (default, cancel, alt) = if too_short {
+            (button("naming-keep", "Keep recording", Variant::Primary, None), None, Some(button("naming-stop-anyway", "Stop anyway", Variant::Secondary, Some(Choice::Stop))))
         } else {
-            let (e1, e2, e3) = (e.clone(), e.clone(), e.clone());
-            card = card.child(
+            (
+                button("naming-edit", "Edit & Save", Variant::Primary, Some(Choice::Edit)),
+                Some(button("naming-resume", "Resume", Variant::Secondary, None)),
+                Some(button("naming-save", "Save & Stop", Variant::Secondary, Some(Choice::Stop))),
+            )
+        };
+        let row = div().flex().items_center().gap(px(8.0));
+        let row = if is_windows() {
+            // Windows: right-aligned, default first, cancel last.
+            row.justify_end().child(default).children(alt).children(cancel)
+        } else {
+            // macOS / GNOME: default trailing, cancel beside it, the
+            // alternative action on its own at the leading edge (like
+            // "Don't Save").
+            row.children(alt).child(div().flex_1()).children(cancel).child(default)
+        };
+
+        let e_key = e.clone();
+        div()
+            .id("naming-dialog")
+            .track_focus(&self.focus)
+            .on_key_down(move |ev: &gpui_kit::gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.modifiers.modified() {
+                    return;
+                }
+                match ev.keystroke.key.as_str() {
+                    "escape" => {
+                        cx.stop_propagation();
+                        e_key.update(cx, |m, cx| m.resume(cx));
+                    }
+                    // Return on the dialog itself (not on a focused button).
+                    "enter" if too_short => {
+                        cx.stop_propagation();
+                        e_key.update(cx, |m, cx| m.resume(cx));
+                    }
+                    _ => {}
+                }
+            })
+            .flex()
+            .flex_col()
+            .p(px(20.0))
+            .gap(px(16.0))
+            .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        Button::new("naming-edit", "Edit & Save")
-                            .size(BtnSize::Lg)
-                            .full_width()
-                            .loading(loading && choice == Some(Choice::Edit))
-                            .disabled(loading && choice != Some(Choice::Edit))
-                            .on_click(move |_, _, cx| {
-                                e1.update(cx, |m, cx| {
-                                    m.choice = Some(Choice::Edit);
-                                    let name = trimmed(m.input.read(cx).text());
-                                    cx.emit(NamingEvent::EditAndSave(name));
-                                })
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(12.0))
-                            .child(
-                                Button::new("naming-save", "Save & Stop")
-                                    .variant(Variant::Secondary)
-                                    .size(BtnSize::Lg)
-                                    .flex_1()
-                                    .loading(loading && choice == Some(Choice::Stop))
-                                    .disabled(loading && choice != Some(Choice::Stop))
-                                    .on_click(move |_, _, cx| {
-                                        e2.update(cx, |m, cx| {
-                                            m.choice = Some(Choice::Stop);
-                                            let name = trimmed(m.input.read(cx).text());
-                                            cx.emit(NamingEvent::Confirm(name));
-                                        })
-                                    }),
-                            )
-                            .child(
-                                Button::new("naming-resume", "Resume")
-                                    .variant(Variant::Success)
-                                    .size(BtnSize::Lg)
-                                    .flex_1()
-                                    .disabled(loading)
-                                    .on_click(move |_, _, cx| e3.update(cx, |_, cx| cx.emit(NamingEvent::Resume))),
-                            ),
-                    ),
-            );
-        }
-        card
+                    .child(div().a11y_heading("naming-title", title, 2).ts(15.0).w600().text_color(t.text_primary).child(title))
+                    .child(div().a11y_text("naming-body", body).mt(px(4.0)).ts_lh(13.0, 1.45).text_color(t.text_secondary).child(body)),
+            )
+            .when(!too_short, |d| {
+                d.child(
+                    crate::ui::input::field_box(&self.input)
+                        .w_full()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .ts(13.0)
+                        .text_color(t.text_primary)
+                        .bg(t.bg_sunken)
+                        .border_1()
+                        .border_color(t.border_default)
+                        .rounded(px(6.0))
+                        .when(loading, |d| d.opacity(0.5))
+                        .relative()
+                        .child(crate::ui::input::field_ring(&self.input, 6.0, cx))
+                        .child(self.input.clone()),
+                )
+            })
+            .child(row)
     }
 }
 
@@ -393,7 +397,7 @@ impl CaptureErrorDialog {
 }
 
 impl Render for CaptureErrorDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let d = self.diagnosis();
         let title = self.title();
@@ -465,6 +469,8 @@ impl Render for CaptureErrorDialog {
             }
         }
         let e_toggle = e.clone();
+        let e_key = e.clone();
+        let details_focus = crate::screens::kbd::keyed_focus("tech-details", window, cx);
         col = col.child(
             div()
                 .child(
@@ -473,6 +479,11 @@ impl Render for CaptureErrorDialog {
                         .role(Role::Button)
                         .aria_label("Technical details")
                         .aria_expanded(self.details_open)
+                        .relative()
+                        .kbd_press(&details_focus, 4.0, move |_, cx| e_key.update(cx, |d, cx| {
+                            d.details_open = !d.details_open;
+                            cx.notify();
+                        }))
                         .ts(13.0)
                         .text_color(t.text_tertiary)
                         .cursor_pointer()

@@ -1666,8 +1666,13 @@ impl Render for MainWindow {
             }
         }
         if self.menu.as_ref().map(|(m, _)| m.read(cx).finished()).unwrap_or(false) {
-            self.menu = None;
-            window.focus(&self.focus, cx);
+            // The menu handed focus back to its opener when it closed; only
+            // reclaim it if it's still on the (now gone) menu.
+            if let Some((m, _)) = self.menu.take()
+                && m.read(cx).focus_handle().is_focused(window)
+            {
+                window.focus(&self.focus, cx);
+            }
         }
         if let Some(token) = self.pending_editor.take() {
             cx.defer(move |cx| crate::windows::editor::open(token, cx));
@@ -1690,13 +1695,14 @@ impl Render for MainWindow {
         let want_id = want.as_ref().map(|w| w.0.entity_id());
         for m in &mut self.modals {
             if Some(m.id) != want_id {
-                m.leave();
+                // Focus goes back to whatever opened the modal.
+                m.leave_and_restore(window, cx);
             }
         }
         if let Some((view, entrance, width, dismiss)) = want {
             if !self.modals.iter().any(|m| m.id == view.entity_id() && !m.leaving) {
                 self.modals.retain(|m| m.id != view.entity_id());
-                self.modals.push(ModalSlot::new(view, entrance, width, dismiss));
+                self.modals.push(ModalSlot::new(view, entrance, width, dismiss).remember_focus(window, cx));
             }
         }
 

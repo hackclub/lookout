@@ -6,6 +6,7 @@
 //! | `/S [/UPDATE] [/R] [/D=<dir>]` (the updater; the NSIS flags) | a silent install, then start Lookout with `/R` |
 //! | `--uninstall [/S]` ("Installed apps" → Uninstall) | the uninstall window, or a silent uninstall with `/S` |
 //! | `… /ELEVATED --report=<file>` | the copy the window starts through UAC when the folder needs admin rights (Program Files); reports progress to the file |
+//! | `--trash-installer=<file>` (the finish page's "Move … to the Recycle Bin") | the installed copy waits for the installer to exit, recycles it, and exits |
 //! | from the install folder | the app |
 //!
 //! The updater still downloads the release's `…-setup.exe` and runs it with
@@ -34,6 +35,7 @@ pub enum Mode {
     /// `ops::run_elevated`).
     Silent { relaunch: bool, dir: Option<PathBuf>, report: Option<PathBuf> },
     SilentUninstall { report: Option<PathBuf> },
+    TrashInstaller { file: PathBuf },
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -52,6 +54,9 @@ fn mode_for(args: &[String]) -> Mode {
         Ok("demo-uninstall") => return Mode::Uninstall { ops: Ops::Demo },
         Ok("1") if cfg!(windows) => return Mode::Install { ops: Ops::Real },
         _ => {}
+    }
+    if let Some(file) = args.iter().find_map(|a| a.strip_prefix(ops::TRASH_ARG)) {
+        return Mode::TrashInstaller { file: PathBuf::from(file) };
     }
     if has_flag(args, "/ELEVATED") {
         ops::set_elevated();
@@ -134,6 +139,13 @@ pub fn run(mode: Mode) -> i32 {
             });
             finish_silent(result, report.as_deref())
         }
+        Mode::TrashInstaller { file } => match ops::trash_installer(&file) {
+            Ok(()) => 0,
+            Err(e) => {
+                log::warn!("[installer] didn't remove the installer: {e}");
+                1
+            }
+        },
         Mode::Install { ops } => {
             window::run(window::Flow::Install, ops);
             0
@@ -211,6 +223,16 @@ mod tests {
             Mode::Silent { relaunch: false, dir: Some(d), report: Some(r) } => {
                 assert_eq!(d, PathBuf::from("C:\\Program Files\\Lookout"));
                 assert_eq!(r, PathBuf::from("C:\\Users\\A B\\r.txt"));
+            }
+            m => panic!("{m:?}"),
+        }
+    }
+
+    #[test]
+    fn trash_installer_flag() {
+        match mode_for(&args(&["--trash-installer=C:\\Users\\A B\\Downloads\\Lookout-native_0.4.5_windows-x86_64-setup.exe"])) {
+            Mode::TrashInstaller { file } => {
+                assert_eq!(file, PathBuf::from("C:\\Users\\A B\\Downloads\\Lookout-native_0.4.5_windows-x86_64-setup.exe"))
             }
             m => panic!("{m:?}"),
         }

@@ -452,6 +452,13 @@ impl Anim {
     }
 }
 
+/// A curve for spatial movement (slides, scales) that should honour
+/// reduced motion even though it's a tween: under reduced motion it lands
+/// immediately. Fades and colour changes keep their own curve.
+pub fn spatial(curve: Curve) -> Curve {
+    if reduce_motion() { Curve::tween(0.0, Ease::Linear) } else { curve }
+}
+
 fn reduce_motion_applies(curve: Curve) -> bool {
     // Springs carry spatial motion in this app (slides, presses, pops); under
     // reduced motion they snap. Tweens are mostly opacity/colour fades and

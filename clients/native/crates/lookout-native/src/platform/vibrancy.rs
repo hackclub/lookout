@@ -11,6 +11,11 @@
 //!   request, so they keep the flat background.
 //! - Linux: none.
 //!
+//! Reduce transparency: on macOS AppKit itself draws the material opaque
+//! when the setting is on, so it stays (and follows the setting live); on
+//! Windows, with transparency effects off, [`apply`] reports no material so
+//! pages paint an opaque background.
+//!
 //! [`apply`] answers whether a material is actually in place; only then do
 //! pages leave the window background unpainted (the Tauri frontend did the
 //! same with `html`/`body`/`#root` once `enable_vibrancy` had succeeded).
@@ -101,6 +106,11 @@ mod imp {
     /// Mica needs build 22621 (`DWMWA_SYSTEMBACKDROP_TYPE`); GPUI skips the
     /// request on anything older.
     pub fn apply(_window: &Window, _onboarding: bool) -> bool {
+        // Transparency effects off (or a contrast theme): DWM draws no Mica,
+        // so pages paint their own opaque background.
+        if crate::platform::a11y_settings::reduce_transparency() {
+            return false;
+        }
         let mut info = windows::Win32::System::SystemInformation::OSVERSIONINFOW {
             dwOSVersionInfoSize: std::mem::size_of::<windows::Win32::System::SystemInformation::OSVERSIONINFOW>() as u32,
             ..Default::default()

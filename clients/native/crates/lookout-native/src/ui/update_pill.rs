@@ -118,8 +118,8 @@ impl Render for UpdatePill {
         } else if self.present && !self.exiting {
             self.exiting = true;
             self.opacity.set(0.0, EXIT);
-            self.y.set(off, EXIT);
-            self.scale.set(0.95, EXIT);
+            self.y.set(off, crate::motion::spatial(EXIT));
+            self.scale.set(0.95, crate::motion::spatial(EXIT));
         }
         let clickable = matches!(phase, UpdatePhase::Ready { .. });
         self.hover.set(if clickable && self.hovered { 1.0 } else { 0.0 }, COLORS);

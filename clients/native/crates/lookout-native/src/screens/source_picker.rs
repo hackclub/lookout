@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, App, AppContext, Bounds, Context, ElementId, Entity, EventEmitter, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, RenderImage, ScrollHandle,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render, RenderImage, ScrollHandle,
     SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 use lookout_core::sources::CaptureSourceList;
@@ -176,6 +176,13 @@ pub struct SourcePicker {
     /// Live, mirrored preview of the selected camera (getUserMedia in the web app).
     camera_preview: Option<(String, Option<(Arc<RenderImage>, f32)>)>,
     camera_task: Option<gpui_kit::gpui::Task<()>>,
+    /// Keyboard focus for each row (by `Sel::key`) and each source-type tab.
+    row_focus: HashMap<String, FocusHandle>,
+    tab_focus: HashMap<u8, FocusHandle>,
+    /// The row Tab lands on in the list (roving tab stop).
+    current_row: Option<Sel>,
+    /// A [`Self::relist`] is in flight.
+    relisting: bool,
 }
 
 impl EventEmitter<PickerEvent> for SourcePicker {}
@@ -215,6 +222,10 @@ impl SourcePicker {
             shift_down: false,
             camera_preview: None,
             camera_task: None,
+            row_focus: HashMap::new(),
+            tab_focus: HashMap::new(),
+            current_row: None,
+            relisting: false,
         };
         p.refresh(cx);
         p
@@ -274,6 +285,47 @@ impl SourcePicker {
             let cams = cams.await;
             this.update(cx, |this, cx| {
                 this.cameras = cams;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-list screens and windows without the loading state, keeping the
+    /// selection. The list is otherwise read once when the picker is made,
+    /// so an app opened after that (KiCad, say) never showed up. Runs when
+    /// Lookout's window comes back to the front.
+    pub fn relist(&mut self, cx: &mut Context<Self>) {
+        if self.is_wayland || self.sources.is_none() || self.error.is_some() || self.relisting {
+            return;
+        }
+        self.relisting = true;
+        let fut = app::tokio(cx, async {
+            tokio::task::spawn_blocking(lookout_core::sources::list_capture_sources)
+                .await
+                .map_err(|e| e.to_string())?
+        });
+        cx.spawn(async move |this, cx| {
+            let res = fut.await;
+            this.update(cx, |this, cx| {
+                this.relisting = false;
+                let Ok(list) = res else { return };
+                let still_there = |s: &Sel| match s {
+                    Sel::Monitor(id) => list.monitors.iter().any(|m| m.id == *id),
+                    Sel::Window(id) => list.windows.iter().any(|w| w.id == *id),
+                    _ => true,
+                };
+                if !this.selected.iter().all(still_there) {
+                    let kept = this.selected.iter().filter(|s| still_there(s)).cloned().collect();
+                    this.set_selected(kept);
+                }
+                if this.hovered_window.is_some_and(|id| !list.windows.iter().any(|w| w.id == id)) {
+                    this.hovered_window = None;
+                }
+                if this.sources.is_some() {
+                    this.sources = Some(list);
+                }
                 cx.notify();
             })
             .ok();
@@ -446,6 +498,143 @@ impl SourcePicker {
         .detach();
     }
 
+    /// The rows of the current tab, in order (what the list shows).
+    fn row_sels(&self) -> Vec<Sel> {
+        let Some(sources) = self.sources.as_ref() else { return vec![] };
+        let show_screens = self.tab == Tab::Screens || (!self.is_wayland && sources.windows.is_empty() && self.cameras.is_empty());
+        let mut v: Vec<Sel> = match self.tab {
+            Tab::Windows => sources.windows.iter().map(|w| Sel::Window(w.id)).collect(),
+            Tab::Cameras => self.cameras.iter().map(|c| Sel::Camera(c.id.clone())).collect(),
+            Tab::Screens | Tab::Cast => vec![],
+        };
+        if show_screens && self.tab != Tab::Cast {
+            v.extend(sources.monitors.iter().map(|m| Sel::Monitor(m.id)));
+        }
+        v
+    }
+
+    fn row_handle(&mut self, sel: &Sel, cx: &mut Context<Self>) -> FocusHandle {
+        self.row_focus.entry(sel.key()).or_insert_with(|| cx.focus_handle()).clone()
+    }
+
+    /// The row that's in the Tab order: the remembered one if it's still
+    /// listed, else the first selected, else the first.
+    fn roving_row(&self, rows: &[Sel]) -> Option<Sel> {
+        self.current_row
+            .clone()
+            .filter(|c| rows.contains(c))
+            .or_else(|| rows.iter().find(|r| self.selected.contains(r)).cloned())
+            .or_else(|| rows.first().cloned())
+    }
+
+    /// Keys in the source list (a listbox): ↑/↓/Home/End move and select
+    /// (Shift adds to the selection on Screens and Windows, ⌘/Ctrl moves
+    /// without selecting), Space selects the focused row (Shift/⌘/Ctrl+Space
+    /// toggles it in a multiple selection), Enter starts.
+    fn on_list_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.row_sels();
+        let Some(i) = rows.iter().position(|r| self.row_focus.get(&r.key()).is_some_and(|h| h.is_focused(window))) else { return };
+        let k = &ev.keystroke;
+        let m = &k.modifiers;
+        let multi_mod = m.shift || m.control || m.platform;
+        let last = rows.len().saturating_sub(1);
+        let target = match k.key.as_str() {
+            "down" => Some((i + 1).min(last)),
+            "up" => Some(i.saturating_sub(1)),
+            "home" => Some(0),
+            "end" => Some(last),
+            _ => None,
+        };
+        if let Some(j) = target {
+            if m.alt {
+                return;
+            }
+            cx.stop_propagation();
+            let sel = rows[j].clone();
+            if !(m.control || m.platform) {
+                if m.shift {
+                    if !self.selected.contains(&sel) {
+                        self.select(sel.clone(), true, cx);
+                    }
+                } else {
+                    self.select(sel.clone(), false, cx);
+                }
+            }
+            self.scroll.scroll_to_item(j);
+            self.focus_row(&sel, window, cx);
+            return;
+        }
+        match k.key.as_str() {
+            "space" if !m.alt => {
+                cx.stop_propagation();
+                self.select(rows[i].clone(), multi_mod, cx);
+            }
+            "enter" if !multi_mod && !m.alt => {
+                cx.stop_propagation();
+                if !self.selected.is_empty() {
+                    self.submit(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn focus_row(&mut self, sel: &Sel, window: &mut Window, cx: &mut Context<Self>) {
+        let h = self.row_handle(sel, cx);
+        self.current_row = Some(sel.clone());
+        if let Sel::Window(id) = sel {
+            self.hovered_window = Some(*id);
+        }
+        window.focus(&h, cx);
+        cx.notify();
+    }
+
+    /// ←/→/Home/End on the source-type tabs: switch tabs (selection
+    /// follows focus, as native tab bars do).
+    fn on_tab_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        if m.shift || m.control || m.platform || m.alt {
+            return;
+        }
+        let tabs: Vec<Tab> = self.tabs().into_iter().map(|(t, _)| t).collect();
+        let Some(i) = tabs.iter().position(|t| *t == self.tab) else { return };
+        let last = tabs.len().saturating_sub(1);
+        let j = match ev.keystroke.key.as_str() {
+            "right" => (i + 1).min(last),
+            "left" => i.saturating_sub(1),
+            "home" => 0,
+            "end" => last,
+            _ => return,
+        };
+        cx.stop_propagation();
+        let tab = tabs[j];
+        self.tab = tab;
+        self.hovered_window = None;
+        let h = self.tab_focus.entry(tab_index(tab)).or_insert_with(|| cx.focus_handle()).clone();
+        window.focus(&h, cx);
+        cx.notify();
+    }
+
+    /// A source's spoken name ("Built-in Display", "Safari", "Camera 1").
+    fn sel_name(&self, sel: &Sel) -> String {
+        let src = self.sources.as_ref();
+        match sel {
+            Sel::Monitor(id) => src.and_then(|s| s.monitors.iter().find(|m| m.id == *id)).map(|m| m.name.clone()).unwrap_or_else(|| "Screen".into()),
+            Sel::Window(id) => src
+                .and_then(|s| s.windows.iter().find(|w| w.id == *id))
+                .map(|w| if w.app_name.is_empty() { w.title.clone() } else { w.app_name.clone() })
+                .unwrap_or_else(|| "Window".into()),
+            Sel::Pipewire(_) => "Cast stream".into(),
+            Sel::Camera(id) => self
+                .cameras
+                .iter()
+                .enumerate()
+                .find(|(_, c)| &c.id == id)
+                .map(|(i, c)| if c.label.is_empty() { format!("Camera {}", i + 1) } else { c.label.clone() })
+                .unwrap_or_else(|| "Camera".into()),
+        }
+    }
+
     fn tabs(&self) -> Vec<(Tab, String)> {
         let src = self.sources.as_ref();
         let n_mon = src.map(|s| s.monitors.len()).unwrap_or(0);
@@ -590,6 +779,14 @@ impl Render for SourcePicker {
             window.request_animation_frame();
         }
 
+        // A window row with keyboard focus shows its hover card too.
+        if self.tab == Tab::Windows {
+            if let Some(id) = sources.windows.iter().map(|w| w.id).find(|id| {
+                self.row_focus.get(&Sel::Window(*id).key()).is_some_and(|h| h.is_focused(window) && window.last_input_was_keyboard())
+            }) {
+                self.hovered_window = Some(id);
+            }
+        }
         // Hover card target (windows tab, hovered row not selected).
         let hover_target = (self.tab == Tab::Windows)
             .then_some(self.hovered_window)
@@ -688,8 +885,9 @@ impl Render for SourcePicker {
                     .child(edge_faded(
                         div()
                             .id("source-list")
-                            .role(Role::RadioGroup)
+                            .role(Role::ListBox)
                             .aria_label("Sources")
+                            .on_key_down(cx.listener(Self::on_list_key))
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
@@ -903,10 +1101,18 @@ impl SourcePicker {
             })
             .collect();
 
+        let names: Vec<String> = self.selected.iter().map(|s| self.sel_name(s)).collect();
+        let preview_label: SharedString = if names.is_empty() {
+            "No source selected".into()
+        } else if camera_selected && !any_tile {
+            format!("Camera preview: {}", names.join(", ")).into()
+        } else {
+            format!("Preview: {}", names.join(", ")).into()
+        };
         let mut b = div()
             .id("picker-preview")
             .role(Role::Image)
-            .aria_label(if any_tile { "Preview" } else if camera_selected { "Starting camera preview" } else { "No source selected" })
+            .aria_label(preview_label)
             .relative()
             .rounded(px(10.0))
             .overflow_hidden()
@@ -954,15 +1160,19 @@ impl SourcePicker {
                     .bg(indicator_color),
             );
         }
+        bar = bar.on_key_down(cx.listener(Self::on_tab_key));
         for (tab, label) in tabs {
             let active = tab == self.tab;
             let i = tab_index(tab);
             let e = cx.entity();
             let probe = cx.entity();
+            let focus = self.tab_focus.entry(i).or_insert_with(|| cx.focus_handle()).clone();
             bar = bar.child(
                 div()
                     .id(("tab", i as usize))
                     .role(Role::Tab)
+                    .track_focus(&focus.clone().tab_stop(active))
+                    .child(crate::ui::focus::ring(&focus, 6.0))
                     .aria_label(SharedString::from(label.trim().to_string()))
                     .aria_selected(active)
                     .relative()
@@ -1004,8 +1214,16 @@ impl SourcePicker {
             out.push(self.cast_tab(t, cx));
             return out;
         }
+        let rows = self.row_sels();
+        let roving = self.roving_row(&rows);
+        let mut handles: HashMap<String, (FocusHandle, bool)> = HashMap::new();
+        for r in &rows {
+            handles.insert(r.key(), (self.row_handle(r, cx), Some(r) == roving.as_ref()));
+        }
+        let multi = matches!(self.tab, Tab::Screens | Tab::Windows) && rows.len() > 1;
         let sources = self.sources.as_ref().unwrap();
         let show_screens = self.tab == Tab::Screens || (!self.is_wayland && sources.windows.is_empty() && self.cameras.is_empty());
+        let focus_of = |sel: &Sel| handles.get(&sel.key()).cloned().expect("row handle");
         match self.tab {
             Tab::Cast => {}
             Tab::Windows => {
@@ -1030,7 +1248,7 @@ impl SourcePicker {
                             .into_any_element()
                     });
                     let id = w.id;
-                    let row = source_row(&sel, title, Some(sub.into()), badge, w.is_minimized.then_some("Minimized"), self.selected.contains(&sel), t, cx)
+                    let row = source_row(&sel, title, Some(sub.into()), badge, w.is_minimized.then_some("Minimized"), self.selected.contains(&sel), focus_of(&sel), multi, t, cx)
                         .on_hover(cx.listener(move |p, hovered: &bool, _, cx| {
                             if *hovered {
                                 p.hovered_window = Some(id);
@@ -1047,7 +1265,7 @@ impl SourcePicker {
                     let sel = Sel::Camera(c.id.clone());
                     let label: SharedString =
                         if c.label.is_empty() { format!("Camera {}", i + 1).into() } else { c.label.clone().into() };
-                    out.push(source_row(&sel, label, None, None, None, self.selected.contains(&sel), t, cx).into_any_element());
+                    out.push(source_row(&sel, label, None, None, None, self.selected.contains(&sel), focus_of(&sel), false, t, cx).into_any_element());
                 }
             }
             Tab::Screens => {}
@@ -1073,7 +1291,7 @@ impl SourcePicker {
                         .child("Primary")
                         .into_any_element()
                 });
-                out.push(source_row(&sel, m.name.clone().into(), Some(sub.into()), badge, m.is_primary.then_some("Primary"), self.selected.contains(&sel), t, cx).into_any_element());
+                out.push(source_row(&sel, m.name.clone().into(), Some(sub.into()), badge, m.is_primary.then_some("Primary"), self.selected.contains(&sel), focus_of(&sel), multi, t, cx).into_any_element());
             }
         }
         out
@@ -1179,6 +1397,8 @@ fn source_row(
     badge: Option<AnyElement>,
     badge_text: Option<&'static str>,
     selected: bool,
+    (focus, tab_stop): (FocusHandle, bool),
+    multi: bool,
     t: &Theme,
     cx: &mut Context<SourcePicker>,
 ) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
@@ -1199,18 +1419,21 @@ fn source_row(
     let (fill, border) = if selected { (t.bg_selected, t.border_selected) } else { (t.bg_surface, t.border_default) };
     let (s1, s2, s3) = (st.clone(), st.clone(), st);
     let sel_click = sel.clone();
-    // Spoken: "Built-in Display, radio button, checked, 2560x1600, Primary".
-    let a11y_desc = [subtitle.as_ref().map(|s| s.to_string()), badge_text.map(str::to_string)]
+    let focus_ring = focus.clone();
+    // Spoken: "Built-in Display, selected, 2560x1600, Primary".
+    let multi_hint = multi.then(|| "Shift+Space to select more than one".to_string());
+    let a11y_desc = [subtitle.as_ref().map(|s| s.to_string()), badge_text.map(str::to_string), multi_hint]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join(", ");
     div()
         .id(eid("source-row", &key))
-        .role(Role::RadioButton)
+        .role(Role::ListBoxOption)
         .aria_label(title.clone())
         .when(!a11y_desc.is_empty(), |d| d.aria_description(a11y_desc))
-        .aria_toggled(if selected { Toggled::True } else { Toggled::False })
+        .aria_selected(selected)
+        .track_focus(&focus.tab_stop(tab_stop))
         .relative()
         .flex()
         .items_center()
@@ -1223,6 +1446,7 @@ fn source_row(
                 .absolute()
                 .inset_0(),
         )
+        .child(crate::ui::focus::ring(&focus_ring, 8.0))
         .child(
             div()
                 .relative()
@@ -1274,6 +1498,7 @@ fn source_row(
         })
         .on_click(cx.listener(move |p, ev: &gpui_kit::gpui::ClickEvent, _, cx| {
             let shift = ev.modifiers().shift || p.shift_down;
+            p.current_row = Some(sel_click.clone());
             p.select(sel_click.clone(), shift, cx)
         }))
 }

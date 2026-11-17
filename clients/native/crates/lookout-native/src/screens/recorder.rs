@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyView, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, canvas, div, px,
+    AnyView, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, canvas, div, px,
 };
 use lookout_core::{ControlMode, RecorderError, RecorderPhase, RecorderState, RecordingSource, SessionConfig};
 
@@ -47,6 +47,10 @@ pub struct RecorderView {
     opened: bool,
     finished_emitted: bool,
     window_focused: bool,
+    /// The page's own focus, so its shortcuts (Space, ⌘S / Ctrl+S) work
+    /// without a control focused. Taken once, on the first render.
+    focus: FocusHandle,
+    took_focus: bool,
     /// The one pending repaint for the clock, and when it fires. Never more than one, so renders can't pile up timers.
     tick_due: Option<Instant>,
     _tick: Option<gpui_kit::gpui::Task<()>>,
@@ -97,6 +101,8 @@ impl RecorderView {
             opened: false,
             finished_emitted: false,
             window_focused: window.is_window_active(),
+            focus: cx.focus_handle(),
+            took_focus: false,
             tick_due: None,
             _tick: None,
             _subs: subs,
@@ -180,6 +186,37 @@ impl RecorderView {
             }
         })
         .detach();
+    }
+
+    /// Recorder shortcuts: Space pauses or resumes (when no button has
+    /// focus, so Space on a focused button still presses it), ⌘S / Ctrl+S
+    /// stops (which only opens the naming prompt, so nothing is lost).
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.naming.is_some() || self.lost.is_some() || self.capture_detail.is_some() {
+            return;
+        }
+        let Some(state) = self.state(cx) else { return };
+        let k = &ev.keystroke;
+        let m = &k.modifiers;
+        let primary = if is_mac() { m.platform && !m.control } else { m.control && !m.platform };
+        let idle = matches!(state.phase, RecorderPhase::Recording | RecorderPhase::Paused);
+        let recording = state.control_mode == ControlMode::Recording;
+        let lost = state.source_lost.is_some();
+        match shortcut(&k.key, primary, m.shift || m.alt, self.focus.is_focused(window)) {
+            Some(Shortcut::PauseResume) if idle => {
+                if recording {
+                    self.action("pause", cx);
+                } else if !lost {
+                    self.action("resume", cx);
+                }
+                cx.stop_propagation();
+            }
+            Some(Shortcut::Stop) if idle => {
+                self.action("stop", cx);
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
     }
 
     fn finish(&mut self, name: Option<String>, edit: bool, cx: &mut Context<Self>) {
@@ -289,7 +326,7 @@ impl RecorderView {
             ));
         }
         if let Some(n) = &self.naming {
-            return Some((n.clone().into(), Entrance::Naming, ModalWidth::Bare(400.0), None));
+            return Some((n.clone().into(), Entrance::Overlay, ModalWidth::Max(400.0), None));
         }
         if let Some(l) = &self.lost {
             return Some((l.clone().into(), Entrance::Overlay, ModalWidth::Max(420.0), None));
@@ -304,6 +341,28 @@ impl Drop for RecorderView {
         // camera; the session itself stays open, keeping its time.
         log::info!("[recorder] closing recording for {}…", &self.token[..8.min(self.token.len())]);
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Shortcut {
+    PauseResume,
+    Stop,
+}
+
+/// Which recorder shortcut a key press is. `primary` is ⌘ on macOS, Ctrl
+/// elsewhere; `other_mods` is Shift or Alt; `page_focused` is whether the
+/// page itself (not a button) has focus.
+fn shortcut(key: &str, primary: bool, other_mods: bool, page_focused: bool) -> Option<Shortcut> {
+    match key {
+        "space" if !primary && !other_mods && page_focused => Some(Shortcut::PauseResume),
+        "s" if primary && !other_mods => Some(Shortcut::Stop),
+        _ => None,
+    }
+}
+
+/// The shortcut names as shown in tooltips.
+fn stop_keys() -> &'static str {
+    if is_mac() { "⌘S" } else { "Ctrl+S" }
 }
 
 /// See [`RecorderView::change_source_offered`].
@@ -348,10 +407,31 @@ impl Render for RecorderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let state = self.state(cx).cloned();
-        let shell = || div().size_full().max_w(px(480.0)).mx_auto().p(px(16.0)).flex().flex_col();
+        if !self.took_focus {
+            self.took_focus = true;
+            if !crate::ui::input::any_input_focused(window, cx) {
+                window.focus(&self.focus, cx);
+            }
+        }
+        let focus = self.focus.clone();
+        let on_key = std::rc::Rc::new(cx.listener(Self::on_key));
+        let shell = move || {
+            let on_key = on_key.clone();
+            div()
+                .id("recorder")
+                .track_focus(&focus)
+                .on_key_down(move |ev, window, cx| on_key(ev, window, cx))
+                .size_full()
+                .max_w(px(480.0))
+                .mx_auto()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+        };
 
         let Some(state) = state.filter(|s| s.phase != RecorderPhase::Loading) else {
             return shell()
+                .child(div().a11y_status("rec-loading", "Starting the recording…", Live::Polite).a11y_flags(NodeFlags { busy: true, live: Some(Live::Polite), ..Default::default() }))
                 .child(div().flex_none().mb(px(16.0)).child(Skeleton::new().h(56.0)))
                 .child(div().flex_1().child(Skeleton::new().aspect(16.0 / 9.0).radius(10.0)))
                 .child(
@@ -389,7 +469,14 @@ impl Render for RecorderView {
                 .into_any_element();
         }
         if state.phase == RecorderPhase::Finished {
-            return div().size_full().flex().items_center().justify_center().child(Spinner::new(SpinnerSize::Md)).into_any_element();
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new(SpinnerSize::Md))
+                .child(div().a11y_status("rec-finished", "Recording saved. Opening the session…", Live::Polite))
+                .into_any_element();
         }
 
         // Clock: re-derive every frame while running and not held; repaint
@@ -511,6 +598,7 @@ impl Render for RecorderView {
                 .child(
                     Button::new("rec-pause", "Pause")
                         .aria_label("Pause recording")
+                        .tooltip("Pause (Space)")
                         .variant(Variant::Warning)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -521,6 +609,7 @@ impl Render for RecorderView {
                 .child(
                     Button::new("rec-stop", "Stop")
                         .aria_label("Stop recording")
+                        .tooltip(SharedString::from(format!("Stop ({})", stop_keys())))
                         .variant(Variant::Danger)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -536,6 +625,7 @@ impl Render for RecorderView {
                 .child(
                     Button::new("rec-resume", "Resume")
                         .aria_label("Resume recording")
+                        .tooltip("Resume (Space)")
                         .variant(Variant::Success)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -546,6 +636,7 @@ impl Render for RecorderView {
                 .child(
                     Button::new("rec-stop", "Stop")
                         .aria_label("Stop recording")
+                        .tooltip(SharedString::from(format!("Stop ({})", stop_keys())))
                         .variant(Variant::Danger)
                         .size(BtnSize::Lg)
                         .flex_1()
@@ -646,11 +737,22 @@ fn preview_frame(
 }
 
 #[allow(unused)]
-fn _keep(_: AspectBox, _: SharedString) {}
+fn _keep(_: AspectBox) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts() {
+        assert_eq!(shortcut("space", false, false, true), Some(Shortcut::PauseResume));
+        // Space on a focused button presses the button instead.
+        assert_eq!(shortcut("space", false, false, false), None);
+        assert_eq!(shortcut("space", false, true, true), None);
+        assert_eq!(shortcut("s", true, false, false), Some(Shortcut::Stop));
+        assert_eq!(shortcut("s", false, false, true), None);
+        assert_eq!(shortcut("s", true, true, true), None);
+    }
 
     #[test]
     fn change_source_is_offered_whenever_there_is_a_recording() {

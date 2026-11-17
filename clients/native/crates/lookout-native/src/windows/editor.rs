@@ -14,7 +14,7 @@ use gpui_kit::gpui::{
 };
 
 use crate::app::{self, api_base};
-use crate::screens::editor::{ApplyResult, EditorEvent, TimelapseEditor};
+use crate::screens::editor::{ApplyResult, EditorEvent, ShortcutsDialog, TimelapseEditor};
 use crate::theme::{Theme, is_linux, is_mac, is_windows, theme};
 use crate::ui::header_bar::{HeaderBar, HeaderNav};
 use crate::ui::overlay::{ConfirmDialog, Entrance, ModalSlot, ModalWidth, render_modals};
@@ -36,6 +36,8 @@ pub struct EditorWindow {
     dirty: bool,
     finished: bool,
     confirm: Option<Entity<ConfirmDialog>>,
+    /// The keyboard shortcuts sheet (`?`).
+    help: Option<Entity<ShortcutsDialog>>,
     modals: Vec<ModalSlot>,
     active: crate::motion::Anim,
     _subs: Vec<Subscription>,
@@ -109,6 +111,7 @@ impl EditorWindow {
                 this.name = Some(name.clone());
                 cx.notify();
             }
+            EditorEvent::ShowShortcuts => this.show_shortcuts(cx),
         }));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             this.active.set_css(if window.is_window_active() { 1.0 } else { 0.0 }, 160.0, crate::motion::Ease::EASE_OUT);
@@ -129,10 +132,28 @@ impl EditorWindow {
             dirty: false,
             finished: false,
             confirm: None,
+            help: None,
             modals: Vec::new(),
             active: crate::motion::Anim::new(1.0),
             _subs: subs,
         }
+    }
+
+    fn show_shortcuts(&mut self, cx: &mut Context<Self>) {
+        if self.help.is_some() || self.confirm.is_some() {
+            return;
+        }
+        let me = cx.entity();
+        self.help = Some(cx.new(|cx| ShortcutsDialog::new(cx, move |window, cx| me.update(cx, |this, cx| this.close_shortcuts(window, cx)))));
+        cx.notify();
+    }
+
+    /// Close the sheet and hand the keyboard back to the editor.
+    fn close_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.help = None;
+        let f = self.editor.read(cx).focus_handle();
+        window.focus(&f, cx);
+        cx.notify();
     }
 
     /// `onCloseRequested`: confirm, then publish with the cuts so far.
@@ -175,8 +196,10 @@ impl EditorWindow {
                 "Publish",
                 cx,
                 move |window, cx| me.update(cx, |this, cx| this.finish_and_close(window, cx)),
-                move |_, cx| me2.update(cx, |this, cx| {
+                move |window, cx| me2.update(cx, |this, cx| {
                     this.confirm = None;
+                    let f = this.editor.read(cx).focus_handle();
+                    window.focus(&f, cx);
                     cx.notify();
                 }),
             );
@@ -272,9 +295,22 @@ impl Render for EditorWindow {
         }
         // Confirm modal
         let want = self.confirm.clone().map(|c| c.entity_id());
+        let want_help = self.help.clone().map(|c| c.entity_id());
         for m in &mut self.modals {
-            if Some(m.id) != want {
+            if Some(m.id) != want && Some(m.id) != want_help {
                 m.leave();
+            }
+        }
+        if let Some(h) = &self.help {
+            if !self.modals.iter().any(|m| m.id == h.entity_id() && !m.leaving) {
+                let view: AnyView = h.clone().into();
+                let me = cx.entity();
+                self.modals.push(ModalSlot::new(
+                    view,
+                    Entrance::Overlay,
+                    ModalWidth::Max(760.0),
+                    Some(Rc::new(move |window: &mut Window, cx: &mut App| me.update(cx, |this, cx| this.close_shortcuts(window, cx)))),
+                ));
             }
         }
         if let Some(c) = &self.confirm {
@@ -285,8 +321,10 @@ impl Render for EditorWindow {
                     view,
                     Entrance::Overlay,
                     ModalWidth::Max(420.0),
-                    Some(Rc::new(move |_: &mut Window, cx: &mut App| me.update(cx, |this, cx| {
+                    Some(Rc::new(move |window: &mut Window, cx: &mut App| me.update(cx, |this, cx| {
                         this.confirm = None;
+                        let f = this.editor.read(cx).focus_handle();
+                    window.focus(&f, cx);
                         cx.notify();
                     }))),
                 ));
@@ -302,7 +340,27 @@ impl Render for EditorWindow {
         }
 
         let pad_x = 16.0;
-        let mut body = div().size_full().flex().flex_col().relative().font_family(family()).text_color(t.text_primary);
+        let me_key = cx.entity();
+        let mut body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .font_family(family())
+            .text_color(t.text_primary)
+            // Ctrl+W closes like the title bar's close button (⌘W is the
+            // app menu's Close Window on macOS).
+            .when(!is_mac(), |d| {
+                d.on_key_down(move |ev, window, cx| {
+                    let k = &ev.keystroke;
+                    if k.modifiers.control && !k.modifiers.alt && !k.modifiers.shift && k.key == "w" {
+                        cx.stop_propagation();
+                        if me_key.update(cx, |this, cx| this.request_close(window, cx)) {
+                            window.remove_window();
+                        }
+                    }
+                })
+            });
         if csd {
             let me = cx.entity();
             body = body.child(

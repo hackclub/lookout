@@ -7,7 +7,8 @@
 //! backdrop dims with `1 − dragged/height`. On release it closes when the
 //! flick was faster than 0.4 px/ms or it travelled ≥ 25% of its height,
 //! otherwise it springs back over 500ms. Escape, the X button and a click
-//! on the backdrop close it too.
+//! on the backdrop close it too. While open it is a modal dialog: Tab stays
+//! inside, and closing hands focus back to whatever opened it.
 
 use std::time::Instant;
 
@@ -58,6 +59,9 @@ pub struct Sheet {
     opened_at: Option<Instant>,
     /// The dialog's spoken name (the sheet's title).
     pub a11y_label: Option<gpui_kit::gpui::SharedString>,
+    /// What had focus when the sheet opened; handed back when it closes.
+    restore: Option<FocusHandle>,
+    close_focus: FocusHandle,
 }
 
 struct Drag {
@@ -83,6 +87,8 @@ impl Sheet {
             closed_emitted: true,
             opened_at: None,
             a11y_label: None,
+            restore: None,
+            close_focus: cx.focus_handle(),
         }
     }
 
@@ -97,8 +103,18 @@ impl Sheet {
             self.opened_at = Some(Instant::now());
             // Fold any leftover drag into the animation's start.
             self.open.set(1.0, VAUL);
+            self.restore = crate::ui::focus::remember(window, cx);
             window.focus(&self.focus, cx);
         } else {
+            // Give focus back to what opened the sheet, if the sheet still
+            // holds it.
+            if self.focus.contains_focused(window, cx) {
+                let restore = self.restore.take();
+                crate::ui::focus::restore(restore.as_ref(), window, cx);
+                if restore.is_none() {
+                    window.blur(cx);
+                }
+            }
             let from = self.progress();
             self.drag_offset = 0.0;
             self.open.jump(from);
@@ -159,11 +175,18 @@ impl Render for Sheet {
         let p = self.progress();
         // Over-drag upward is damped: 8·(ln(v+1) − 2).
         let up = if self.drag_offset < 0.0 { -(8.0 * ((-self.drag_offset) + 1.0).ln() - 16.0).max(0.0) } else { 0.0 };
-        let translate = (1.0 - p) * self.height + up;
+        // Reduced motion: the sheet fades in place instead of sliding (a
+        // drag still moves it, since the pointer is doing that).
+        let reduce = crate::motion::reduce_motion() && self.drag.is_none() && self.drag_offset == 0.0;
+        let translate = if reduce { 0.0 } else { (1.0 - p) * self.height + up };
+        let sheet_opacity = if reduce { p } else { 1.0 };
         let backdrop = t.bg_backdrop;
         let window_radius = crate::windows::main_window::window_corner_radius(window);
         let me_bg = cx.entity();
         let me_x = cx.entity();
+        let me_x2 = cx.entity();
+        let me_x3 = cx.entity();
+        let close_focus = self.close_focus.clone();
         let probe = cx.entity();
 
         let panel = self.style == SheetStyle::Panel;
@@ -215,7 +238,23 @@ impl Render for Sheet {
                             cx.emit(SheetEvent::Dismiss);
                             s.set_open(false, window, cx);
                         })
-                    }),
+                    })
+                    .map(|d| {
+                        let me = me_x2.clone();
+                        crate::ui::focus::focusable_control(d, &close_focus, true, None, move |window, cx| {
+                            me.update(cx, |s, cx| {
+                                cx.emit(SheetEvent::Dismiss);
+                                s.set_open(false, window, cx);
+                            })
+                        })
+                    })
+                    .on_a11y_click(move |window, cx| {
+                        me_x3.update(cx, |s, cx| {
+                            cx.emit(SheetEvent::Dismiss);
+                            s.set_open(false, window, cx);
+                        })
+                    })
+                    .child(crate::ui::focus::ring(&close_focus, 17.0)),
             )
             .child(div().p(px(24.0)).flex().flex_col().items_start().flex_none().child(self.body.clone())) };
 
@@ -227,6 +266,8 @@ impl Render for Sheet {
             .absolute()
             .inset_0()
             .track_focus(&self.focus)
+            // Tab stays inside the sheet while it's open.
+            .key_context(crate::ui::focus::TRAP)
             .on_key_down(cx.listener(|s, ev: &gpui_kit::gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     cx.emit(SheetEvent::Dismiss);
@@ -266,6 +307,7 @@ impl Render for Sheet {
                     .left(px(if panel { 0.0 } else { 24.0 }))
                     .right(px(if panel { 0.0 } else { 24.0 }))
                     .bottom(px(-translate))
+                    .opacity(sheet_opacity)
                     .pb(px(if panel { 0.0 } else { 24.0 }))
                     .child(
                         canvas(move |b: Bounds<Pixels>, _, cx| probe.update(cx, |s, _| s.height = f32::from(b.size.height)), |_, _, _, _| {})

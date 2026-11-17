@@ -113,6 +113,9 @@ pub struct Button {
     medium: bool,
     aria_label: Option<SharedString>,
     aria_description: Option<SharedString>,
+    focus: Option<gpui_kit::gpui::FocusHandle>,
+    tab_stop: Option<bool>,
+    tab_index: Option<isize>,
 }
 
 impl Button {
@@ -150,6 +153,9 @@ impl Button {
             medium: false,
             aria_label: None,
             aria_description: None,
+            focus: None,
+            tab_stop: None,
+            tab_index: None,
         }
     }
 
@@ -250,6 +256,24 @@ impl Button {
         self.aria_description = Some(d.into());
         self
     }
+    /// Use this focus handle (to focus the button from code, or hand focus
+    /// back to it). By default the button keeps its own, per id.
+    pub fn focus_handle(mut self, h: &gpui_kit::gpui::FocusHandle) -> Self {
+        self.focus = Some(h.clone());
+        self
+    }
+    /// Whether Tab reaches the button. Defaults to on when it's enabled
+    /// (on macOS: when Full Keyboard Access is on); `false` for roving
+    /// focus in a composite widget.
+    pub fn tab_stop(mut self, on: bool) -> Self {
+        self.tab_stop = Some(on);
+        self
+    }
+    /// Order among tab stops (lower first; default 0 = document order).
+    pub fn tab_index(mut self, i: isize) -> Self {
+        self.tab_index = Some(i);
+        self
+    }
     pub fn child(mut self, el: impl IntoElement) -> Self {
         self.children.push(el.into_any_element());
         self
@@ -264,9 +288,23 @@ impl Button {
 fn variant_colors(v: Variant, t: &Theme) -> (Hsla, Hsla, Hsla, Hsla, Hsla) {
     let clear = theme::transparent();
     match v {
-        Variant::Primary => (t.accent, clear, t.accent_hover, clear, t.on_accent),
-        Variant::Success => (theme::status::success(), clear, theme::status::success(), clear, theme::hex(0xffffff)),
-        Variant::Danger => (theme::status::danger(), clear, theme::status::danger(), clear, theme::hex(0xffffff)),
+        // Fills are darkened just enough for the label to reach WCAG AA
+        // (white on #3b82f6 is 3.7:1, on #22c55e 2.3:1).
+        Variant::Primary => (
+            theme::readable_fill(t.accent, t.on_accent),
+            clear,
+            theme::readable_fill(t.accent_hover, t.on_accent),
+            clear,
+            t.on_accent,
+        ),
+        Variant::Success => {
+            let c = theme::readable_fill(theme::status::success(), theme::hex(0xffffff));
+            (c, clear, c, clear, theme::hex(0xffffff))
+        }
+        Variant::Danger => {
+            let c = theme::readable_fill(theme::status::danger(), theme::hex(0xffffff));
+            (c, clear, c, clear, theme::hex(0xffffff))
+        }
         Variant::Warning => (theme::status::warning(), clear, theme::status::warning(), clear, theme::hex(0x000000)),
         Variant::Secondary => (clear, t.border_hover, t.bg_surface, t.border_hover, t.text_secondary),
         Variant::Ghost => (clear, clear, t.bg_selected, clear, t.text_secondary),
@@ -379,6 +417,9 @@ impl RenderOnce for Button {
         label = label.children(self.children);
 
         let on_click = self.on_click.clone();
+        let focus = self.focus.clone().unwrap_or_else(|| crate::ui::focus::keyed_handle(&self.id, window, cx));
+        let focusable = !inert && on_click.is_some();
+        let ring = crate::ui::focus::ring_visible(&focus, window) && focusable;
         let mut root = div()
             .id(self.id.clone())
             .role(Role::Button)
@@ -394,13 +435,16 @@ impl RenderOnce for Button {
             .border_color(theme::transparent())
             .when_some_opacity(inert)
             .child(
-                canvas(|_, _, _| (), move |bounds, _, window, _| {
+                canvas(|_, _, _| (), move |bounds, _, window, cx| {
                     if let Some(d) = drop {
                         let mut below = bounds;
                         below.origin.y += px(1.0);
                         paint_squircle_bg(below, radius, 0.7, scale, d, theme::transparent(), window);
                     }
                     paint_squircle_bg(bounds, radius, 0.7, scale, fill, border, window);
+                    if ring {
+                        crate::ui::focus::paint_ring(bounds, radius, window, theme(cx));
+                    }
                 })
                 .absolute()
                 .top(px(-1.0))
@@ -467,6 +511,11 @@ impl RenderOnce for Button {
                 });
             if let Some(f) = on_click {
                 let f2 = f.clone();
+                let f3 = f.clone();
+                let tab_stop = self.tab_stop.unwrap_or_else(crate::ui::focus::buttons_are_tab_stops);
+                root = crate::ui::focus::focusable_control(root, &focus, tab_stop, self.tab_index, move |window, cx| {
+                    f3(&ClickEvent::default(), window, cx)
+                });
                 root = root
                     .on_click(move |ev, window, cx| f(ev, window, cx))
                     .on_a11y_click(move |window, cx| f2(&ClickEvent::default(), window, cx));

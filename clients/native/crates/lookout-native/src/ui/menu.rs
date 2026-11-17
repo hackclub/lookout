@@ -11,8 +11,11 @@
 //! | exit | fade 170ms | fade 100ms easeOut | fade 100ms easeOut |
 //!
 //! Highlight changes are instant (no hover transition), arrows move the
-//! selection (wrapping, skipping separators), Enter activates, Escape,
-//! click-away and window blur dismiss.
+//! selection (wrapping, skipping separators), Home/End jump to the ends,
+//! typing a letter selects the next item starting with it, Enter or Space
+//! activates, and Escape, Tab, click-away and window blur dismiss. Opened
+//! from the keyboard, the first item starts highlighted; closing hands
+//! focus back to whatever had it (the button that opened the menu).
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
@@ -80,6 +83,12 @@ pub struct MenuPopup {
     look: Look,
     /// The menu's spoken name ("Start a timelapse").
     pub a11y_label: Option<SharedString>,
+    /// What had focus before the menu took it; handed back on close.
+    restore: Option<FocusHandle>,
+    restored: bool,
+    /// Type-to-select: the letters typed so far and when the last came.
+    typeahead: String,
+    typed_at: Option<std::time::Instant>,
 }
 
 impl EventEmitter<MenuEvent> for MenuPopup {}
@@ -93,6 +102,10 @@ const TAIL_INSET: f32 = 14.0;
 impl MenuPopup {
     pub fn new(items: Vec<MenuItem>, anchor: Bounds<Pixels>, at_pointer: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
+        let restore = crate::ui::focus::remember(window, cx);
+        // Opened from the keyboard, the first item starts highlighted (as
+        // native menus do), so arrows and Enter work straight away.
+        let from_keyboard = window.last_input_was_keyboard();
         window.focus(&focus, cx);
         let look = if is_mac() {
             Look::Mac
@@ -118,6 +131,56 @@ impl MenuPopup {
             measured: Bounds::default(),
             look,
             a11y_label: None,
+            restore,
+            restored: false,
+            typeahead: String::new(),
+            typed_at: None,
+        }
+        .with_first_selected(from_keyboard)
+    }
+
+    fn with_first_selected(mut self, on: bool) -> Self {
+        if on {
+            self.move_sel(true);
+        }
+        self
+    }
+
+    /// The menu's focus handle (focused while it's open).
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn select_edge(&mut self, last: bool) {
+        let mut idx = self.items.iter().enumerate().filter(|(_, i)| i.is_item()).map(|(i, _)| i);
+        self.selection = if last { idx.last() } else { idx.next() };
+    }
+
+    /// Type-to-select: letters typed within a second build a prefix; the
+    /// same letter again steps through the items starting with it.
+    fn type_char(&mut self, c: &str) {
+        let now = std::time::Instant::now();
+        if self.typed_at.is_none_or(|t| now.duration_since(t).as_millis() > 1000) {
+            self.typeahead.clear();
+        }
+        self.typed_at = Some(now);
+        self.typeahead.push_str(&c.to_lowercase());
+        let repeat = self.typeahead.chars().all(|ch| Some(ch) == self.typeahead.chars().next());
+        let prefix = if repeat { self.typeahead.chars().next().map(String::from).unwrap_or_default() } else { self.typeahead.clone() };
+        let n = self.items.len();
+        let start = match (self.selection, repeat) {
+            (Some(s), true) => s + 1,
+            (Some(s), false) => s,
+            (None, _) => 0,
+        };
+        for k in 0..n {
+            let i = (start + k) % n;
+            if let MenuItem::Item { label, disabled: false, .. } = &self.items[i]
+                && label.to_lowercase().starts_with(&prefix)
+            {
+                self.selection = Some(i);
+                return;
+            }
         }
     }
 
@@ -153,11 +216,20 @@ impl MenuPopup {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        match ev.keystroke.key.as_str() {
+        let k = &ev.keystroke;
+        if k.modifiers.control || k.modifiers.platform || k.modifiers.alt {
+            return;
+        }
+        match k.key.as_str() {
             "escape" => self.dismiss(None, cx),
             "down" => self.move_sel(true),
             "up" => self.move_sel(false),
-            "enter" => {
+            "home" | "pageup" => self.select_edge(false),
+            "end" | "pagedown" => self.select_edge(true),
+            // Tab leaves a menu by closing it (Windows/GTK menus do).
+            "tab" => self.dismiss(None, cx),
+            key if key.chars().count() == 1 && key != " " && key.chars().all(|c| !c.is_control()) => self.type_char(key),
+            "enter" | "space" => {
                 if let Some(MenuItem::Item { id, .. }) = self.selection.and_then(|s| self.items.get(s)).cloned() {
                     self.dismiss(Some(id), cx);
                 }
@@ -177,6 +249,14 @@ impl Render for MenuPopup {
         }
         if !self.closing && !window.is_window_active() {
             self.dismiss(None, cx);
+        }
+        // Hand focus back to the opener as soon as the menu closes (it
+        // only fades from here on), unless something else took it.
+        if self.closing && !self.restored {
+            self.restored = true;
+            if self.focus.is_focused(window) {
+                crate::ui::focus::restore(self.restore.as_ref(), window, cx);
+            }
         }
         let look = self.look;
         let win = window.bounds().size;
@@ -399,6 +479,9 @@ impl Render for MenuPopup {
             .absolute()
             .inset_0()
             .track_focus(&self.focus)
+            // The menu handles Tab itself (closing), so focus can't wander
+            // behind it.
+            .key_context(crate::ui::focus::OWN_TAB)
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| me_bg.update(cx, |m, cx| m.dismiss(None, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|m, _, _, cx| m.dismiss(None, cx)))

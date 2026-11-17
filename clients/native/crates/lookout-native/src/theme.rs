@@ -187,6 +187,14 @@ pub struct Theme {
     pub accent: Hsla,
     pub accent_hover: Hsla,
     pub on_accent: Hsla,
+    /// The keyboard focus ring (see `ui::focus`): the accent, or the
+    /// strongest text colour under increased contrast. ≥ 3:1 on the body.
+    pub focus_ring: Hsla,
+    /// Built for the OS "increase contrast" / high-contrast setting.
+    pub high_contrast: bool,
+    /// The desktop accent passed to [`Theme::with_accent`], kept so the
+    /// theme can be rebuilt when a setting flips at runtime.
+    pub system_accent: Option<Hsla>,
     // Linux-only (linuxChrome.ts:132-163)
     pub headerbar_control: Hsla,
     pub headerbar_control_hover: Hsla,
@@ -214,7 +222,8 @@ impl Theme {
             text_primary: hex(0xffffff),
             text_inverse: hex(0x000000),
             text_secondary: white(0.7),
-            text_tertiary: white(0.5),
+            // 0.5 in the Tauri app: 4.2:1 on the popover, under AA.
+            text_tertiary: white(0.55),
             text_quaternary: white(0.28),
             text_error: hex(0xfca5a5),
             border_default: white(0.12),
@@ -245,6 +254,9 @@ impl Theme {
             accent,
             accent_hover: oklab_mix_black(accent, 0.88),
             on_accent: hex(0xffffff),
+            focus_ring: accent,
+            high_contrast: false,
+            system_accent: None,
             headerbar_control: white(0.1),
             headerbar_control_hover: white(0.18),
             popover_bg: hex(0x383838),
@@ -273,9 +285,11 @@ impl Theme {
             text_primary: black(0.85),
             text_inverse: hex(0xffffff),
             text_secondary: black(0.65),
-            text_tertiary: black(0.45),
+            // 0.45 in the Tauri app: 3.3:1, under AA for body text.
+            text_tertiary: black(0.55),
             text_quaternary: black(0.25),
-            text_error: hex(0xef4444),
+            // #ef4444 in the Tauri app: 3.6:1 on the body.
+            text_error: hex(0xdc2626),
             border_default: black(0.12),
             border_hover: black(0.22),
             border_selected: black(0.3),
@@ -285,7 +299,8 @@ impl Theme {
             spinner_track: black(0.8),
             skeleton_bg: black(0.05),
             skeleton_shimmer: black(0.08),
-            badge_primary_bg: hex(0x22c55e),
+            // White on #22c55e was 2.3:1; the same green darkened to AA.
+            badge_primary_bg: readable_fill(hex(0x22c55e), hex(0xffffff)),
             badge_primary_text: hex(0xffffff),
             badge_overlay_bg: hex(0x000000),
             badge_overlay_text: hex(0xffffff),
@@ -304,6 +319,9 @@ impl Theme {
             accent,
             accent_hover: oklab_mix_black(accent, 0.88),
             on_accent: hex(0xffffff),
+            focus_ring: accent,
+            high_contrast: false,
+            system_accent: None,
             headerbar_control: black(0.08),
             headerbar_control_hover: black(0.16),
             popover_bg: hex(0xf7f7f7),
@@ -317,15 +335,120 @@ impl Theme {
 
     pub fn for_appearance(appearance: WindowAppearance) -> Self {
         // `LOOKOUT_THEME=dark|light` pins the theme (development / screenshots).
-        match std::env::var("LOOKOUT_THEME").as_deref() {
-            Ok("dark") => return Self::dark(),
-            Ok("light") => return Self::light(),
-            _ => {}
+        let dark = match std::env::var("LOOKOUT_THEME").as_deref() {
+            Ok("dark") => true,
+            Ok("light") => false,
+            _ => matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+        };
+        Self::base(dark)
+    }
+
+    /// The light or dark palette, in its increased-contrast form when the OS
+    /// asks for one ([`more_contrast`]). Windows contrast themes replace the
+    /// palette with the system's own colours.
+    pub fn base(dark: bool) -> Self {
+        if let Some(sys) = system_contrast_colors() {
+            return Self::from_system_colors(&sys);
         }
-        match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
+        let t = if dark { Self::dark() } else { Self::light() };
+        if more_contrast() { t.with_more_contrast() } else { t }
+    }
+
+    /// This theme rebuilt for the current contrast setting, keeping its
+    /// light/dark and desktop accent. Used when the setting flips while
+    /// Lookout is open.
+    pub fn rebuilt(&self) -> Self {
+        let accent = self.system_accent;
+        Self::base(self.dark).with_accent(accent)
+    }
+
+    /// The increased-contrast variant (macOS "Increase contrast", GNOME
+    /// "High contrast"): secondary text close to primary, borders that read
+    /// as edges (≥ 3:1), opaque surfaces, and a focus ring in the text
+    /// colour. Same layout and hues, so nothing moves.
+    pub fn with_more_contrast(mut self) -> Self {
+        let dark = self.dark;
+        let ink = |a: f32| if dark { white(a) } else { black(a) };
+        self.high_contrast = true;
+        self.text_primary = if self.dark { hex(0xffffff) } else { hex(0x000000) };
+        self.text_secondary = ink(0.86);
+        self.text_tertiary = ink(0.76);
+        self.text_quaternary = ink(0.6);
+        self.border_default = ink(0.5);
+        self.border_hover = ink(0.65);
+        self.border_selected = ink(0.85);
+        self.icon_selected = ink(0.95);
+        self.status_neutral = if self.dark { white(0.4) } else { hex(0x000000) };
+        self.well_border = ink(0.5);
+        self.archive_border = ink(0.5);
+        self.archive_hover_border = ink(0.7);
+        self.track = ink(0.35);
+        self.popover_border = ink(0.55);
+        self.popover_separator = ink(0.45);
+        self.window_border = ink(0.6);
+        if self.dark {
+            self.bg_surface = white(0.1);
+            self.text_error = hex(0xfecaca);
+        } else {
+            self.bg_surface = white(1.0);
+            self.bg_body = hex(0xffffff);
+            self.text_error = hex(0xb91c1c);
+            self.popover_bg = hex(0xffffff);
         }
+        self.bg_backdrop = black(if self.dark { 0.7 } else { 0.5 });
+        // The accent doubles as link and selection colour: keep it legible
+        // on the body as text, then derive the rest from it.
+        self.accent = ensure_contrast(self.accent, self.bg_body, 4.5);
+        self.accent_hover = oklab_mix_black(self.accent, 0.88);
+        self.on_accent = accent_foreground(self.accent);
+        self.focus_ring = self.text_primary;
+        self
+    }
+
+    /// A Windows contrast theme: the palette comes from the system colours
+    /// (`GetSysColor`), the way native Win32/WinUI controls draw.
+    pub fn from_system_colors(c: &SystemColors) -> Self {
+        let dark = relative_luminance(c.window) < 0.5;
+        let mut t = if dark { Self::dark() } else { Self::light() };
+        let fg = c.window_text;
+        t.high_contrast = true;
+        t.bg_body = c.window;
+        t.bg_panel = c.window;
+        t.popover_bg = c.window;
+        t.popover_bg_top = c.window;
+        t.bg_surface = c.window;
+        t.bg_sunken = c.window;
+        t.bg_selected = c.highlight;
+        t.text_primary = fg;
+        t.text_secondary = fg;
+        t.text_tertiary = fg;
+        t.text_quaternary = c.gray_text;
+        t.text_inverse = c.window;
+        t.text_error = fg;
+        for b in [
+            &mut t.border_default,
+            &mut t.border_hover,
+            &mut t.border_selected,
+            &mut t.well_border,
+            &mut t.archive_border,
+            &mut t.archive_hover_border,
+            &mut t.popover_border,
+            &mut t.popover_separator,
+            &mut t.window_border,
+        ] {
+            *b = fg;
+        }
+        t.icon_selected = fg;
+        t.track = c.gray_text;
+        t.status_neutral = fg;
+        t.headerbar_control = c.window;
+        t.headerbar_control_hover = c.highlight;
+        t.popover_hover = c.highlight;
+        t.accent = c.highlight;
+        t.accent_hover = c.highlight;
+        t.on_accent = c.highlight_text;
+        t.focus_ring = fg;
+        t
     }
 
     /// `setAccentColor(accent, on)` — the Linux desktop's accent (GNOME
@@ -333,9 +456,18 @@ impl Theme {
     /// with `color-mix(in oklab, accent 88%, black)`.
     pub fn with_accent(mut self, accent: Option<Hsla>) -> Self {
         if let Some(accent) = accent {
+            self.system_accent = Some(accent);
+            if system_contrast_colors().is_some() {
+                // A Windows contrast theme's highlight wins.
+                return self;
+            }
             self.accent = accent;
-            self.accent_hover = oklab_mix_black(accent, 0.88);
-            self.on_accent = accent_foreground(accent);
+            if self.high_contrast {
+                self.accent = ensure_contrast(accent, self.bg_body, 4.5);
+            }
+            self.accent_hover = oklab_mix_black(self.accent, 0.88);
+            self.on_accent = accent_foreground(self.accent);
+            self.focus_ring = if self.high_contrast { self.text_primary } else { self.accent };
         }
         self
     }
@@ -390,12 +522,115 @@ pub fn oklab_mix_black(c: Hsla, p: f32) -> Hsla {
     .into()
 }
 
-/// `accentForeground(hex)` (linuxChrome.ts:304-324): black text on light
-/// accents (relative luminance > 0.45), white otherwise.
+/// Text on an accent fill: whichever of black and white reads better.
+/// (`accentForeground` in linuxChrome.ts switched at luminance 0.45, which
+/// put white on mid-tone accents such as GNOME's orange at under 3:1.)
 pub fn accent_foreground(accent: Hsla) -> Hsla {
-    let c: Rgba = accent.into();
-    let l = 0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b);
-    if l > 0.45 { hex(0x000000) } else { hex(0xffffff) }
+    let (b, w) = (hex(0x000000), hex(0xffffff));
+    if contrast_ratio(b, accent) > contrast_ratio(w, accent) { b } else { w }
+}
+
+// ── Contrast (WCAG 2.x) ────────────────────────────────────────────────
+
+/// WCAG relative luminance of an opaque colour.
+pub fn relative_luminance(c: Hsla) -> f32 {
+    let c: Rgba = c.into();
+    0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
+}
+
+/// `fg` composited over an opaque `bg` (alpha blending in sRGB, as the
+/// renderer does).
+pub fn over(fg: Hsla, bg: Hsla) -> Hsla {
+    let f: Rgba = fg.into();
+    let b: Rgba = bg.into();
+    let a = f.a;
+    Rgba { r: f.r * a + b.r * (1.0 - a), g: f.g * a + b.g * (1.0 - a), b: f.b * a + b.b * (1.0 - a), a: 1.0 }.into()
+}
+
+/// WCAG contrast ratio of `fg` drawn on an opaque `bg` (1–21). A
+/// translucent `fg` is composited first.
+pub fn contrast_ratio(fg: Hsla, bg: Hsla) -> f32 {
+    let (a, b) = (relative_luminance(over(fg, bg)), relative_luminance(bg));
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// `c` darkened (OKLab, toward black, hue kept) just enough to reach
+/// `ratio` against `against`. Returns `c` unchanged when it already does.
+/// Only darkens, so `against` should be the lighter of the pair.
+pub fn ensure_contrast(c: Hsla, against: Hsla, ratio: f32) -> Hsla {
+    if contrast_ratio(c, against) >= ratio {
+        return c;
+    }
+    let mut p = 1.0;
+    let mut out = c;
+    while p > 0.2 {
+        p -= 0.01;
+        out = oklab_mix_black(c, p);
+        if contrast_ratio(out, against) >= ratio {
+            break;
+        }
+    }
+    out
+}
+
+/// A fill that keeps white text at AA (4.5:1): the colour darkened just
+/// enough (a filled button or badge in the status colours).
+pub fn readable_fill(fill: Hsla, text: Hsla) -> Hsla {
+    // Darkening only helps light text on a darker fill.
+    if fill.a < 0.999 || relative_luminance(text) < relative_luminance(fill) {
+        return fill;
+    }
+    ensure_contrast(fill, text, 4.5)
+}
+
+/// A status pill's `(fill, text)`: white on the colour darkened to AA,
+/// unless that would turn it muddy (amber), where black text reads better.
+pub fn readable_pill(fill: Hsla) -> (Hsla, Hsla) {
+    let (w, b) = (hex(0xffffff), hex(0x000000));
+    if fill.a < 0.999 || contrast_ratio(w, fill) >= 4.5 {
+        return (fill, w);
+    }
+    let darker = ensure_contrast(fill, w, 4.5);
+    let (o, d): (Rgba, Rgba) = (fill.into(), darker.into());
+    // How far the darkening moved the colour (max channel drop).
+    let shift = (o.r - d.r).max(o.g - d.g).max(o.b - d.b);
+    if shift > 0.3 && contrast_ratio(b, fill) >= 4.5 { (fill, b) } else { (darker, w) }
+}
+
+// ── OS contrast settings ────────────────────────────────────────────────
+
+static MORE_CONTRAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+static SYSTEM_COLORS: std::sync::Mutex<Option<SystemColors>> = std::sync::Mutex::new(None);
+
+/// Whether the OS asks for more contrast (macOS Increase contrast, GNOME
+/// High contrast, `LOOKOUT_CONTRAST=more`). Set by
+/// `platform::a11y_settings`; [`Theme::base`] reads it.
+pub fn more_contrast() -> bool {
+    MORE_CONTRAST.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_more_contrast(on: bool) {
+    MORE_CONTRAST.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A Windows contrast theme's colours, while one is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SystemColors {
+    pub window: Hsla,
+    pub window_text: Hsla,
+    pub highlight: Hsla,
+    pub highlight_text: Hsla,
+    pub gray_text: Hsla,
+}
+
+/// The active Windows contrast theme's colours (set by
+/// `platform::a11y_settings`).
+pub fn system_contrast_colors() -> Option<SystemColors> {
+    *SYSTEM_COLORS.lock().unwrap_or_else(|e| e.into_inner())
+}
+pub fn set_system_contrast_colors(c: Option<SystemColors>) {
+    *SYSTEM_COLORS.lock().unwrap_or_else(|e| e.into_inner()) = c;
 }
 
 /// `color-mix(in srgb, <c> <p>, transparent)` — the colour at `p` of its
@@ -449,5 +684,126 @@ mod tests {
         let c: Rgba = oklab_mix_black(hex(0x3b82f6), 0.88).into();
         let (r, g, b) = ((c.r * 255.0).round(), (c.g * 255.0).round(), (c.b * 255.0).round());
         assert!((r - 47.0).abs() <= 2.0 && (g - 111.0).abs() <= 3.0 && (b - 208.0).abs() <= 2.0, "{r} {g} {b}");
+    }
+
+    /// Every text/background pair a screen draws text on, for one theme.
+    fn text_backgrounds(t: &Theme) -> Vec<(&'static str, Hsla)> {
+        vec![
+            ("body", t.bg_body),
+            ("panel", t.bg_panel),
+            ("popover", t.popover_bg),
+            ("card", over(t.bg_surface, t.bg_body)),
+            ("card on panel", over(t.bg_surface, t.bg_panel)),
+        ]
+    }
+
+    fn all_themes() -> Vec<(&'static str, Theme)> {
+        vec![
+            ("dark", Theme::dark()),
+            ("light", Theme::light()),
+            ("dark+contrast", Theme::dark().with_more_contrast()),
+            ("light+contrast", Theme::light().with_more_contrast()),
+        ]
+    }
+
+    #[test]
+    fn body_text_meets_wcag_aa() {
+        for (name, t) in all_themes() {
+            for (bg_name, bg) in text_backgrounds(&t) {
+                for (fg_name, fg, min) in [
+                    ("primary", t.text_primary, 4.5),
+                    ("secondary", t.text_secondary, 4.5),
+                    ("tertiary", t.text_tertiary, 4.5),
+                    ("error", t.text_error, 4.5),
+                ] {
+                    let r = contrast_ratio(fg, bg);
+                    assert!(r >= min, "{name}: {fg_name} on {bg_name} is {r:.2}:1, needs {min}:1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn more_contrast_raises_secondary_text_to_aaa() {
+        for (name, t) in all_themes().into_iter().filter(|(_, t)| t.high_contrast) {
+            for (bg_name, bg) in text_backgrounds(&t) {
+                for (fg_name, fg) in [("secondary", t.text_secondary), ("tertiary", t.text_tertiary)] {
+                    let r = contrast_ratio(fg, bg);
+                    assert!(r >= 7.0, "{name}: {fg_name} on {bg_name} is {r:.2}:1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focus_ring_and_controls_meet_3_to_1() {
+        for (name, t) in all_themes() {
+            for bg in [t.bg_body, t.bg_panel, t.popover_bg] {
+                let r = contrast_ratio(t.focus_ring, bg);
+                assert!(r >= 3.0, "{name}: focus ring {r:.2}:1");
+            }
+            if t.high_contrast {
+                for (b, label) in [(t.border_default, "border"), (t.popover_border, "popover border"), (t.well_border, "well border")] {
+                    let r = contrast_ratio(b, t.bg_body);
+                    assert!(r >= 3.0, "{name}: {label} {r:.2}:1");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filled_buttons_and_badges_keep_labels_legible() {
+        for (name, t) in all_themes() {
+            let fill = readable_fill(t.accent, t.on_accent);
+            assert!(contrast_ratio(t.on_accent, fill) >= 4.5, "{name}: primary button");
+            let hover = readable_fill(t.accent_hover, t.on_accent);
+            assert!(contrast_ratio(t.on_accent, hover) >= 4.5, "{name}: primary hover");
+            let badge_bg = over(t.badge_primary_bg, t.bg_body);
+            assert!(contrast_ratio(t.badge_primary_text, badge_bg) >= 4.5, "{name}: primary badge");
+        }
+        for c in [status::success(), status::info(), status::warning(), status::danger(), hex(0x000000)] {
+            let (fill, text) = readable_pill(c);
+            assert!(contrast_ratio(text, fill) >= 4.5, "pill {c:?}");
+            assert!(contrast_ratio(hex(0xffffff), readable_fill(c, hex(0xffffff))) >= 4.5 || c == status::warning());
+        }
+        // GNOME's accent colours (libadwaita 1.6) as Linux hands them over.
+        for accent in [0x3584e4, 0x2190a4, 0x3a944a, 0xc88800, 0xed5b00, 0xe62d42, 0xd56199, 0x9141ac, 0x6f8396] {
+            let t = Theme::light().with_accent(Some(hex(accent)));
+            let fill = readable_fill(t.accent, t.on_accent);
+            assert!(contrast_ratio(t.on_accent, fill) >= 4.5, "accent {accent:06x}");
+        }
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag_examples() {
+        assert!((contrast_ratio(hex(0x000000), hex(0xffffff)) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(hex(0x777777), hex(0xffffff)) - 4.48).abs() < 0.02);
+        // Translucent text is composited first.
+        assert!((contrast_ratio(black(0.0), hex(0xffffff)) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn windows_contrast_themes_use_system_colours() {
+        // "Night sky" and "Desert".
+        let night = SystemColors {
+            window: hex(0x000000),
+            window_text: hex(0xffffff),
+            highlight: hex(0xd6b4fd),
+            highlight_text: hex(0x2b2b2b),
+            gray_text: hex(0xa6a6a6),
+        };
+        let t = Theme::from_system_colors(&night);
+        assert!(t.dark && t.high_contrast);
+        assert_eq!(t.text_secondary, night.window_text);
+        assert_eq!(t.accent, night.highlight);
+        assert_eq!(t.on_accent, night.highlight_text);
+        let desert = SystemColors {
+            window: hex(0xfffaef),
+            window_text: hex(0x3d3d3d),
+            highlight: hex(0x903909),
+            highlight_text: hex(0xfff5e3),
+            gray_text: hex(0x676767),
+        };
+        assert!(!Theme::from_system_colors(&desert).dark);
     }
 }

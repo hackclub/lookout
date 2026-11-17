@@ -17,6 +17,7 @@ use crate::theme::{self, theme};
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::feedback::{ErrorBanner, ProgressRing};
 use crate::ui::a11y::prelude::*;
+use crate::screens::kbd::KbdPress;
 use crate::ui::header_bar::HeaderBtn;
 use crate::ui::icon::Icon;
 use crate::ui::input::{InputEvent, TextInput, new_input};
@@ -75,6 +76,9 @@ pub struct SessionPage {
     // Rename
     renaming: bool,
     renaming_anim: bool,
+    /// Put keyboard focus back on the Rename button once it shows again
+    /// (a rename started from the keyboard ended).
+    refocus_pencil: bool,
     rename_input: Entity<TextInput>,
     pad_l: Anim,
     pad_r: Anim,
@@ -123,6 +127,7 @@ impl SessionPage {
             complete_fired: false,
             renaming: false,
             renaming_anim: false,
+            refocus_pencil: false,
             rename_input,
             pad_l: Anim::new(0.0),
             pad_r: Anim::new(8.0),
@@ -269,6 +274,7 @@ impl SessionPage {
             i.set_text(name, cx);
             i.select_all_text(cx);
         });
+        self.refocus_pencil = window.last_input_was_keyboard();
         let fh = gpui_kit::gpui::Focusable::focus_handle(self.rename_input.read(cx), cx);
         window.focus(&fh, cx);
         let sp = Curve::Spring(Spring::new(500.0, 30.0));
@@ -466,7 +472,7 @@ impl SessionPage {
                             .items_center()
                             .justify_center()
                             .gap(px(12.0))
-                            .child(div().ts(14.0).w700().text_color(theme::status::danger()).a11y_status("failed-title", "Compilation failed", Live::Polite).child("Compilation failed"))
+                            .child(div().ts(14.0).w700().text_color(theme::status::danger()).a11y_text("failed-title", "Compilation failed").child("Compilation failed"))
                             .child(div().ts(13.0).text_color(t.text_secondary).a11y_text("failed-body", "It will be retried automatically.").child("It will be retried automatically.")),
                     ),
                 )
@@ -492,7 +498,7 @@ impl SessionPage {
                                 .ts(14.0)
                                 .w600()
                                 .text_color(t.text_primary)
-                                .a11y_status("processing-title", if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }, Live::Polite)
+                                .a11y_text("processing-title", if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." })
                                 .child(if s.status == "complete" { "Loading video..." } else { "Compiling your timelapse..." }),
                         )
                         .child(
@@ -580,6 +586,9 @@ impl Render for SessionPage {
             }
             return div().id("session-scroll").size_full().overflow_y_scroll().child(col).into_any_element();
         };
+        // The session's state, announced when it changes (compiling →
+        // complete, failed); the badge below shows it in colour and words.
+        col = col.child(div().a11y_status("session-status", format!("Status: {}", crate::ui::a11y::status_words(&status.status)), Live::Polite));
         let in_hold = status.edit_hold_until.is_some() && status.status != "failed";
         if in_hold {
             col = col.child(self.hold_panel(&status, window, cx));
@@ -644,6 +653,12 @@ impl Render for SessionPage {
                     })
                     .into_any_element()
             };
+            let pencil_focus = crate::screens::kbd::keyed_focus("rename-pencil", window, cx);
+            let e_pencil_key = cx.entity();
+            if self.refocus_pencil && !self.renaming && pencil_o > 0.001 {
+                self.refocus_pencil = false;
+                window.focus(&pencil_focus, cx);
+            }
             let pencil = (pencil_o > 0.001 && !self.renaming).then(|| {
                 let scale = 0.8 + 0.2 * pencil_o;
                 let press = 1.0 - 0.1 * self.pencil_press.get();
@@ -651,6 +666,8 @@ impl Render for SessionPage {
                     .id("rename-pencil")
                     .role(Role::Button)
                     .aria_label("Rename session")
+                    .relative()
+                    .kbd_press(&pencil_focus, 6.0, move |window, cx| e_pencil_key.update(cx, |p, cx| p.start_rename(window, cx)))
                     .size(px(24.0))
                     .flex()
                     .items_center()

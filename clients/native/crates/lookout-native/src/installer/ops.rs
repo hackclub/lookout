@@ -152,6 +152,98 @@ impl Ops {
             Ops::Demo => log::info!("[installer] (demo) would start {}", exe.display()),
         }
     }
+
+    /// The setup file this window runs from (in Downloads, usually): what
+    /// the finish page offers to put in the Recycle Bin.
+    pub fn installer_file(self) -> Option<PathBuf> {
+        match self {
+            Ops::Real => std::env::current_exe().ok(),
+            Ops::Demo => Some(PathBuf::from(r"C:\Users\orpheus\Downloads\Lookout-native_0.4.5_windows-x86_64-setup.exe")),
+        }
+    }
+
+    /// Puts `file` (this running installer) in the Recycle Bin once this
+    /// process has exited. A running exe can't be removed, so the installed
+    /// copy does it: `<exe> --trash-installer=<file>` (see [`trash_installer`]).
+    pub fn trash_after_exit(self, exe: &Path, file: &Path) {
+        match self {
+            Ops::Real => {
+                let mut arg = std::ffi::OsString::from(TRASH_ARG);
+                arg.push(file.as_os_str());
+                if let Err(e) = std::process::Command::new(exe).arg(arg).current_dir(exe.parent().unwrap_or(exe)).spawn() {
+                    log::warn!("[installer] couldn't start {} to remove the installer: {e}", exe.display());
+                }
+            }
+            Ops::Demo => log::info!("[installer] (demo) would move {} to the Recycle Bin", file.display()),
+        }
+    }
+}
+
+/// `lookout.exe --trash-installer=<file>`: see [`trash_installer`].
+pub const TRASH_ARG: &str = "--trash-installer=";
+
+/// The installed copy, started by the finish page: waits for the installer
+/// at `file` to exit, then moves it to the Recycle Bin. Only ever a byte-for-
+/// byte copy of this exe (which the installer copied from itself), so the
+/// flag can't be pointed at anything else.
+pub fn trash_installer(file: &Path) -> Result<(), String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    if same_file(&me, file) || !same_contents(&me, file) {
+        return Err(format!("{} isn't a copy of this installer", file.display()));
+    }
+    // The installer quits right after starting us; give it a few seconds.
+    for _ in 0..60 {
+        if std::fs::OpenOptions::new().write(true).open(file).is_ok() {
+            return recycle(file);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!("{} is still in use", file.display()))
+}
+
+fn same_contents(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
+    let mut left = match (fa.metadata(), fb.metadata()) {
+        (Ok(ma), Ok(mb)) if ma.is_file() && mb.is_file() && ma.len() == mb.len() => ma.len(),
+        _ => return false,
+    };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    while left > 0 {
+        let n = left.min(ba.len() as u64) as usize;
+        if fa.read_exact(&mut ba[..n]).is_err() || fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+        left -= n as u64;
+    }
+    true
+}
+
+/// Moves `file` to the Recycle Bin, silently (where the drive has none,
+/// Windows deletes it outright).
+#[cfg(windows)]
+fn recycle(file: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NO_UI, SHFILEOPSTRUCTW, SHFileOperationW};
+    use windows::core::PCWSTR;
+
+    // pFrom is a list: each path NUL-terminated, the list ends with another.
+    let from: Vec<u16> = file.as_os_str().encode_wide().chain([0, 0]).collect();
+    let mut op = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO | FOF_NO_UI).0 as u16,
+        ..Default::default()
+    };
+    match unsafe { SHFileOperationW(&mut op) } {
+        0 if !op.fAnyOperationsAborted.as_bool() => Ok(()),
+        code => Err(format!("SHFileOperation failed ({code:#x})")),
+    }
+}
+
+#[cfg(not(windows))]
+fn recycle(_: &Path) -> Result<(), String> {
+    Err("The Recycle Bin is only on Windows.".into())
 }
 
 fn demo_steps(progress: &dyn Fn(Progress), steps: &[&'static str]) -> Result<(), String> {
@@ -401,7 +493,6 @@ fn make_room(target: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(aside))
 }
 
-#[cfg(windows)]
 fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase(),

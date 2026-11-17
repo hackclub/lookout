@@ -1,4 +1,4 @@
-//! Modals — `Overlay.tsx`, `NamingModal`'s backdrop, and the native
+//! Modals — `Overlay.tsx` (which also hosts the naming prompt) and the native
 //! `confirm()` dialogs, drawn in-window.
 //!
 //! The Tauri overlay: backdrop `colors.bg.backdrop` over the whole window
@@ -23,13 +23,13 @@ use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, Variant};
 use crate::ui::text::TextExt;
 
-/// How a modal entered (the two Tauri variants differ by 2px of travel).
+/// How a modal enters. The Tauri NamingModal had its own variant (12px of
+/// travel, a gradient backdrop on Windows, a free-floating card); it now
+/// uses the standard dialog like every other modal.
 #[derive(Clone, Copy)]
 pub enum Entrance {
     /// `Overlay`: y 10 → 0.
     Overlay,
-    /// `NamingModal`: y 12 → 0, backdrop uses the Windows gradient fill.
-    Naming,
 }
 
 pub struct ModalSlot {
@@ -46,21 +46,21 @@ pub struct ModalSlot {
     pub entrance: Entrance,
     pub on_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     pub width: ModalWidth,
+    /// What had focus when the modal appeared ([`Self::remember_focus`]);
+    /// [`Self::leave_and_restore`] hands it back.
+    pub restore: Option<FocusHandle>,
 }
 
 #[derive(Clone, Copy)]
 pub enum ModalWidth {
     /// `min(<px>, 92vw)` panel width.
     Max(f32),
-    /// NamingModal's card: `width 100%, maxWidth 400` (the card draws itself).
-    Bare(f32),
 }
 
 impl ModalSlot {
     pub fn new(view: AnyView, entrance: Entrance, width: ModalWidth, on_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>) -> Self {
         let travel = match entrance {
             Entrance::Overlay => 10.0,
-            Entrance::Naming => 12.0,
         };
         Self {
             id: view.entity_id(),
@@ -68,14 +68,38 @@ impl ModalSlot {
             y: Anim::from_to(travel, 0.0, Curve::Spring(Spring::OVERLAY)),
             opacity: Anim::from_to(0.0, 1.0, Curve::tween(160.0, Ease::EASE_OUT)),
             scale: match entrance {
-                Entrance::Overlay => Anim::from_to(0.99, 1.0, Curve::tween(300.0, Ease::EASE_OUT)),
-                Entrance::Naming => Anim::new(1.0),
+                Entrance::Overlay => Anim::from_to(0.99, 1.0, crate::motion::spatial(Curve::tween(300.0, Ease::EASE_OUT))),
             },
             leaving: false,
             entrance,
             on_dismiss,
             width,
+            restore: None,
         }
+    }
+
+    /// Note what has focus now (the control that opened the modal), before
+    /// the modal's view takes it. Call when pushing the slot.
+    pub fn remember_focus(mut self, window: &Window, cx: &App) -> Self {
+        self.restore = crate::ui::focus::remember(window, cx);
+        self
+    }
+
+    /// [`Self::leave`], handing focus back to what had it before the modal
+    /// opened when focus is still inside the modal (or nowhere).
+    /// Returns whether it moved focus.
+    pub fn leave_and_restore(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        let was_leaving = self.leaving;
+        self.leave();
+        if was_leaving {
+            return false;
+        }
+        let Some(r) = self.restore.take() else { return false };
+        let in_modal = window.focused(cx).is_none() || crate::ui::focus::focus_in_trap(window);
+        if in_modal {
+            window.focus(&r, cx);
+        }
+        in_modal
     }
 
     pub fn leave(&mut self) {
@@ -104,7 +128,6 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radiu
             let backdrop_alpha = if slot.leaving { o } else { 1.0 };
             let dismiss = slot.on_dismiss.clone();
             let fill = t.bg_backdrop;
-            let gradient = matches!(slot.entrance, Entrance::Naming) && is_windows();
             let mut backdrop = div()
                 .id(("modal-backdrop", slot.id))
                 .rounded(px(window_radius))
@@ -116,26 +139,29 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radiu
                 .p(px(20.0))
                 .opacity(backdrop_alpha)
                 .occlude();
-            backdrop = if gradient {
-                backdrop.bg(gpui_kit::gpui::linear_gradient(
-                    180.0,
-                    gpui_kit::gpui::linear_color_stop(theme::fade(fill, 0.0), 0.0),
-                    gpui_kit::gpui::linear_color_stop(fill, 1.0),
-                ))
-            } else {
-                backdrop.bg(fill)
-            };
+            backdrop = backdrop.bg(fill);
             if let Some(d) = dismiss {
                 backdrop = backdrop.on_mouse_down(MouseButton::Left, move |_, window, cx| d(window, cx));
             }
             let width = match slot.width {
                 ModalWidth::Max(w) => w.min(window_w * 0.92),
-                ModalWidth::Bare(w) => w.min(window_w - 40.0),
             };
             let view_id = slot.id;
+            let esc = slot.on_dismiss.clone();
             let panel = div()
                 .id(("modal-panel", slot.id))
                 .role(Role::Dialog)
+                // Tab stays inside the dialog; Escape dismisses it (when the
+                // modal's own view doesn't handle Escape first).
+                .key_context(crate::ui::focus::TRAP)
+                .when_some(esc.filter(|_| !slot.leaving), |d, esc| {
+                    d.on_key_down(move |ev: &gpui_kit::gpui::KeyDownEvent, window, cx| {
+                        if ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified() {
+                            cx.stop_propagation();
+                            esc(window, cx);
+                        }
+                    })
+                })
                 // Named by the modal view itself (`set_dialog_title`), which
                 // has rendered by the time this node is built.
                 .a11y_synthetic_children(move |b| {
@@ -192,7 +218,6 @@ pub fn render_modals(slots: &[ModalSlot], t: &Theme, window_w: f32, window_radiu
                                     .child(slot.view.clone()),
                             )
                     }
-                    ModalWidth::Bare(_) => d.child(slot.view.clone()),
                 });
             backdrop.child(panel).into_any_element()
         })
@@ -256,7 +281,9 @@ impl ConfirmDialog {
 impl Render for ConfirmDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        if !self.focus.is_focused(window) {
+        // Take focus when nothing in the dialog has it (Tab may move it to
+        // the buttons, which must keep it).
+        if !self.focus.contains_focused(window, cx) {
             window.focus(&self.focus, cx);
         }
         let ok = self.on_ok.clone();
@@ -287,8 +314,14 @@ impl Render for ConfirmDialog {
             .aria_label(self.message.replace("\n\n", " "))
             .track_focus(&self.focus)
             .on_key_down(move |ev, window, cx| match ev.keystroke.key.as_str() {
-                "escape" => cancel2(window, cx),
-                "enter" => ok2(window, cx),
+                "escape" => {
+                    cx.stop_propagation();
+                    cancel2(window, cx)
+                }
+                "enter" => {
+                    cx.stop_propagation();
+                    ok2(window, cx)
+                }
                 _ => {}
             })
             .flex()

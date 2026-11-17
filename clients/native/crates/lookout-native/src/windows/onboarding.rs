@@ -49,6 +49,8 @@ const PAGES: usize = 4;
 /// The opening: a small, faint Hack Club flag with a quick shimmer, held
 /// while the window settles and the stickers cut out, then the welcome.
 const INTRO_MS: f64 = 2500.0;
+/// The intro with Reduce Motion on: no shimmer to watch, just the fade.
+const INTRO_REDUCED_MS: f64 = 700.0;
 const FLAG_W: f32 = 84.0;
 const FLAG_H: f32 = FLAG_W * 184.0 / 526.0;
 /// The welcome icon's centre in the hero.
@@ -279,6 +281,8 @@ pub struct Onboarding {
     /// When the window opened, and when the flag intro hands over.
     opened_at: f64,
     intro_end: f64,
+    /// The welcome page's two links, as tab stops.
+    link_focus: [FocusHandle; 2],
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -373,7 +377,8 @@ impl Onboarding {
         .detach();
 
         let mut arrive: [Anim; PAGES] = std::array::from_fn(|_| Anim::new(0.0));
-        let intro = INTRO_MS as f32;
+        let intro_ms = if motion::reduce_motion() { INTRO_REDUCED_MS } else { INTRO_MS };
+        let intro = intro_ms as f32;
         arrive[0].set_delayed(1.0, Curve::tween(620.0, RISE), intro + 120.0);
         let now = motion::now();
         let mut icon_in = Anim::new(0.0);
@@ -423,7 +428,8 @@ impl Onboarding {
             hero: Rc::new(Cell::new(None)),
             started: false,
             opened_at: now,
-            intro_end: now + INTRO_MS,
+            intro_end: now + intro_ms,
+            link_focus: [cx.focus_handle(), cx.focus_handle()],
         };
         // Development: `LOOKOUT_ONBOARDING_PAGE=<n>` opens on page n (0-based).
         if let Some(p) = std::env::var("LOOKOUT_ONBOARDING_PAGE").ok().and_then(|v| v.parse::<usize>().ok()).filter(|p| *p < PAGES) {
@@ -501,9 +507,25 @@ impl Onboarding {
         cx.notify();
     }
 
+    /// Cut the flag intro short (any key that moves on does): the welcome
+    /// comes up now, as it would have after the intro.
+    fn skip_intro(&mut self, cx: &mut Context<Self>) {
+        let now = motion::now();
+        if now >= self.intro_end {
+            return;
+        }
+        self.intro_end = now;
+        self.arrive[0].set_delayed(1.0, Curve::tween(620.0, RISE), 120.0);
+        self.icon_in.set_delayed(1.0, Curve::Spring(Spring::new(300.0, 19.0)), 60.0);
+        for (i, p) in self.placed.iter_mut().enumerate() {
+            p.t.set_delayed(1.0, Curve::Spring(POP), 140.0 + i as f32 * 60.0);
+        }
+        cx.notify();
+    }
+
     fn next(&mut self, cx: &mut Context<Self>) {
         if motion::now() < self.intro_end {
-            return;
+            return self.skip_intro(cx);
         }
         if self.page + 1 < PAGES {
             self.go(self.page + 1, cx);
@@ -533,12 +555,35 @@ impl Onboarding {
         });
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        match ev.keystroke.key.as_str() {
-            "enter" | "right" | "space" => self.next(cx),
-            "left" => self.back(cx),
-            _ => {}
+    /// Keys: Enter / Space / Right / Page Down continue, Left / Page Up go
+    /// back, Home / End jump, Escape skips the rest, Tab reaches the links.
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        if m.control || m.alt || m.platform {
+            return;
         }
+        match ev.keystroke.key.as_str() {
+            "tab" => {
+                if m.shift { window.focus_prev(cx) } else { window.focus_next(cx) }
+            }
+            _ if m.shift => return,
+            // A focused link opens on key-up (GPUI's keyboard click).
+            "enter" | "space" if self.link_focus.iter().any(|f| f.is_focused(window)) => return,
+            "enter" | "right" | "space" | "pagedown" => self.next(cx),
+            "left" | "pageup" => self.back(cx),
+            "home" => {
+                self.skip_intro(cx);
+                self.go(0, cx);
+            }
+            "end" => {
+                self.skip_intro(cx);
+                self.go(PAGES - 1, cx);
+            }
+            // Skip: straight to the app (from Settings, just close).
+            "escape" => self.finish(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     // ── welcome page: sticker hit testing and poofs ──
@@ -738,10 +783,23 @@ impl Onboarding {
                 }
             }
         }
-        for p in &self.poofs {
-            hero = hero.child(poof_el(p, now));
+        if !motion::reduce_motion() {
+            for p in &self.poofs {
+                hero = hero.child(poof_el(p, now));
+            }
         }
         hero.into_any_element()
+    }
+
+    /// What page `i`'s art shows, for the screen reader (the films are
+    /// pictures only).
+    fn art_description(&self, i: usize) -> &'static str {
+        match i {
+            0 => "The Lookout app icon surrounded by Hack Club stickers.",
+            1 => "Animation: in Lookout's empty gallery the pointer clicks +, picks Lapse from the menu, and the recorder starts. A red dot lights up, the clock runs, and a new screenshot of the screen lands every few seconds.",
+            2 => "Animation: the timelapse editor. Add cut removes a minute at the playhead and its handle is dragged out to cover eight, so the length after cuts drops. Then Add mask draws a box over part of the screen, which turns pixelated.",
+            _ => "Animation: the finished session turns Complete, and its 1 hour 12 minutes fly into Hackatime, whose total goes up.",
+        }
     }
 
     fn page_el(&self, i: usize, t: &Theme, now: f64) -> AnyElement {
@@ -795,22 +853,24 @@ impl Onboarding {
         let a2 = ((a - 0.12) / 0.88).clamp(0.0, 1.0);
         let rise = if motion::reduce_motion() { 0.0 } else { 1.0 };
         let probe = (i == 0).then(|| self.hero.clone());
+        let current = i == self.page;
+        let art = div()
+            .id("art")
+            .role(Role::Image)
+            .aria_label(self.art_description(i))
+            .absolute()
+            .top(px(HERO_TOP))
+            .left_0()
+            .child(hero)
+            .when_some(probe, |d, probe| d.child(canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().inset_0()));
+        // The words come first in the tree (heading, then what it says, then
+        // the picture), though the art is drawn above them.
         div()
             .absolute()
             .top_0()
             .left_0()
             .w(px(W))
             .h(px(H))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(HERO_TOP))
-                    .left_0()
-                    .child(hero)
-                    .when_some(probe, |d, probe| {
-                        d.child(canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
-                    }),
-            )
             .child(
                 div()
                     .absolute()
@@ -838,15 +898,24 @@ impl Onboarding {
                     // The welcome page carries Hack Club's terms and code of
                     // conduct, quietly: plain links, no underline.
                     .when(i == 0, |d| {
-                        let link = |id: &'static str, label: &'static str, url: &'static str| {
+                        let link = |id: &'static str, label: &'static str, url: &'static str, focus: &FocusHandle| {
                             div()
                                 .id(id)
                                 .role(Role::Link)
                                 .aria_label(label)
+                                // Tab reaches them only while their page shows (the
+                                // handle carries tab-stop-ness, not the element).
+                                .track_focus(&focus.clone().tab_stop(current))
+                                .rounded(px(4.0))
+                                .px(px(2.0))
+                                .border_1()
+                                .border_color(gpui_kit::gpui::transparent_black())
+                                .focus_visible(|s| s.border_color(t.accent).text_color(t.text_secondary))
                                 .cursor_pointer()
                                 .text_color(t.text_tertiary)
                                 .hover(|s| s.text_color(t.text_secondary))
                                 .child(label)
+                                .on_a11y_click(move |_, cx| cx.open_url(url))
                                 .on_click(move |_, _, cx| cx.open_url(url))
                         };
                         d.child(
@@ -857,12 +926,13 @@ impl Onboarding {
                                 .items_center()
                                 .gap(px(6.0))
                                 .ts(12.0)
-                                .child(link("terms", "Privacy & Terms", "https://hackclub.com/privacy-and-terms"))
+                                .child(link("terms", "Privacy & Terms", "https://hackclub.com/privacy-and-terms", &self.link_focus[0]))
                                 .child(div().text_color(t.text_quaternary).child("·"))
-                                .child(link("conduct", "Code of Conduct", "https://hackclub.com/conduct")),
+                                .child(link("conduct", "Code of Conduct", "https://hackclub.com/conduct", &self.link_focus[1])),
                         )
                     }),
             )
+            .child(art)
             .into_any_element()
     }
 
@@ -890,14 +960,26 @@ impl Onboarding {
             ),
             self.arrive[i].get(),
         );
+        // The page has no visible title; a screen reader still gets one, the
+        // two captions, and what the film shows, over the parts they describe.
+        let over = |d: gpui_kit::gpui::Stateful<gpui_kit::gpui::Div>, top: f32, h: f32| d.absolute().top(px(top)).left_0().w(px(W)).h(px(h));
         div()
-            .a11y_text("how", "Click + and pick a program to start a timelapse. Lookout takes a screenshot every so often while you work. Pause any time.")
             .absolute()
             .top_0()
             .left_0()
             .w(px(W))
             .h(px(H))
             .child(el)
+            .child(over(div().a11y_heading("title", "Start a timelapse", 1), HERO_TOP, 24.0))
+            .child(over(
+                div().a11y_text(
+                    "how",
+                    "Click + and pick a program to start a timelapse. Lookout takes a screenshot every so often while you work. Pause any time.",
+                ),
+                HERO_TOP + 24.0,
+                HERO_H - 24.0,
+            ))
+            .child(over(div().id("art").role(Role::Image).aria_label(self.art_description(i)), HERO_TOP, HERO_H))
             .into_any_element()
     }
 
@@ -1097,6 +1179,10 @@ impl Render for Onboarding {
                     .size(px(6.0))
                     .rounded_full()
                     .bg(if t.dark { white(0.22 + 0.63 * k) } else { black(0.14 + 0.62 * k) })
+                    .on_a11y_click({
+                        let me = me.clone();
+                        move |_, cx| me.update(cx, |o, cx| o.go(i, cx))
+                    })
                     .on_click(move |_, _, cx| me.update(cx, |o, cx| o.go(i, cx))),
             );
         }
@@ -1141,6 +1227,9 @@ impl Render for Onboarding {
         });
         let content = div()
             .id("onboarding")
+            .role(Role::Group)
+            .aria_label(if self.at_launch { "Welcome to Lookout" } else { "Lookout introduction" })
+            .aria_description("Left and Right arrow keys change pages. Escape skips the introduction.")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_move(cx.listener(Self::on_move))

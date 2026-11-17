@@ -4,6 +4,7 @@
 pub mod a11y;
 pub mod button;
 pub mod feedback;
+pub mod focus;
 pub mod header_bar;
 pub mod input;
 pub mod menu;

@@ -355,7 +355,11 @@ mod imp {
     impl Imp {
         pub fn new(tx: flume::Sender<TrayAction>, _state: Arc<Mutex<TrayState>>, _rt: tokio::runtime::Handle, _cx: &mut App) -> Self {
             TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
-                if let TrayIconEvent::Click { button: TMouse::Left, button_state: MouseButtonState::Up, rect, .. } = ev {
+                // Right too: the shell reports a keyboard Enter/Space or
+                // context-menu key on the icon (Win+B, arrows) as a right
+                // click to icons that don't opt into NIN_KEYSELECT, and the
+                // popup is this icon's menu anyway.
+                if let TrayIconEvent::Click { button: TMouse::Left | TMouse::Right, button_state: MouseButtonState::Up, rect, .. } = ev {
                     let b = Bounds {
                         origin: gpui_kit::gpui::point(gpui_kit::gpui::px(rect.position.x as f32), gpui_kit::gpui::px(rect.position.y as f32)),
                         size: gpui_kit::gpui::size(gpui_kit::gpui::px(rect.size.width as f32), gpui_kit::gpui::px(rect.size.height as f32)),

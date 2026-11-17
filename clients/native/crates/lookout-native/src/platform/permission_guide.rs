@@ -334,6 +334,9 @@ mod imp {
 
             let icon_view = NSImageView::imageViewWithImage(icon, mtm);
             icon_view.setFrame(NSRect::new(NSPoint::new(10.0, 8.0), NSSize::new(32.0, 32.0)));
+            // The tile is one VoiceOver element (labelled in `populate`); its
+            // icon and grip would otherwise read as two unnamed images.
+            hide_from_voiceover(&icon_view);
             this.addSubview(&icon_view);
 
             let label = NSTextField::labelWithString(name, mtm);
@@ -347,10 +350,16 @@ mod imp {
                 let grip_view = NSImageView::imageViewWithImage(&grip, mtm);
                 grip_view.setContentTintColor(Some(&NSColor::tertiaryLabelColor()));
                 grip_view.setFrame(NSRect::new(NSPoint::new(frame.size.width - 34.0, 16.0), NSSize::new(18.0, 16.0)));
+                hide_from_voiceover(&grip_view);
                 this.addSubview(&grip_view);
             }
             this
         }
+    }
+
+    fn hide_from_voiceover(view: &NSView) {
+        // SAFETY: NSView adopts NSAccessibility; this setter takes a BOOL.
+        let _: () = unsafe { msg_send![view, setAccessibilityElement: false] };
     }
 
     /// The view rendered to an image (the drag image and the flying tile).
@@ -645,6 +654,17 @@ mod imp {
             icon.setSize(NSSize::new(32.0, 32.0));
             let tile_frame = NSRect::new(NSPoint::new(PAD, PAD), NSSize::new(PANEL_W - 2.0 * PAD, TILE_H));
             let tile = Tile::new(tile_frame, bundle.retain(), &icon, name, mtm);
+            // Dragging is hard by keyboard or VoiceOver, so the tile's name
+            // also gives the list's own way in: its + button.
+            let spoken = NSString::from_str(&format!(
+                "{name} app. Drag it into the {list} list above, or use the + button under that list and choose {name}."
+            ));
+            // SAFETY: NSAccessibility setters on an NSView subclass.
+            unsafe {
+                let _: () = msg_send![&*tile, setAccessibilityElement: true];
+                let _: () = msg_send![&*tile, setAccessibilityRole: ns_string!("AXImage")];
+                let _: () = msg_send![&*tile, setAccessibilityLabel: &*spoken];
+            }
             into.addSubview(&tile);
         }
         arrow

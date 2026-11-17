@@ -272,11 +272,129 @@ helpers live in [`src/ui/a11y.rs`](crates/lookout-native/src/ui/a11y.rs)
 - AccessKit's adapters don't map `ShowContextMenu` or custom actions, so a
   context-menu-only action needs another way in: `PressScale::a11y_action`
   adds it as a synthetic child button (the gallery card's "Open in Editor").
+- **Keyboard.** Tab / Shift-Tab move through tab stops in every window
+  (`ui::focus::install`; nothing else binds Tab — a widget that wants it
+  sets `.key_context(focus::OWN_TAB)`). `Button`, `HeaderBtn` and
+  `PressScale` are tab stops whenever they're clickable and enabled, activate
+  on Enter/Space and draw the platform's focus ring for keyboard focus only;
+  `.focus_handle(&h)`, `.tab_stop(false)` (roving focus in a grid) and
+  `.tab_index(n)` adjust that. On macOS buttons join the Tab order only with
+  System Settings → Keyboard → Keyboard navigation on, as in AppKit
+  (`LOOKOUT_FULL_KEYBOARD=1` forces it). Custom focusable things use
+  `focus::ring(&handle, radius)` and `focus::activate_on_keys`. Text fields
+  are always tab stops; `input::field_ring(&input, radius, cx)` draws the
+  ring around a field box whenever it has focus. Tabbing onto a `PressScale`
+  with `on_scroll_into_view` scrolls it into view.
+- **Modal layers** (sheets, `render_modals` dialogs, menus) put
+  `focus::TRAP` on their focus-holding element so Tab cycles inside them;
+  Escape closes them, and they hand focus back to what opened them
+  (`ModalSlot::remember_focus` / `leave_and_restore`; `focus::push_trap` /
+  `pop_trap` for custom ones). Menus also take Home/End, type-to-select and
+  Space, and open with the first item highlighted when opened from the
+  keyboard.
+- **Contrast.** Text tokens meet WCAG AA (4.5:1) on every surface in light
+  and dark, checked by `theme::tests`; filled buttons and status badges
+  darken their fill (`theme::readable_fill` / `readable_pill`) so the label
+  reaches 4.5:1. `text_quaternary` is for disabled text and decoration only.
+  The OS "increase contrast" setting (macOS Increase contrast, GNOME High
+  contrast) switches to `Theme::with_more_contrast` (secondary text ≥ 7:1,
+  borders ≥ 3:1, the focus ring in the text colour); a Windows contrast
+  theme draws in the system colours (`Theme::from_system_colors`). Reduce
+  transparency drops Mica on Windows (macOS turns its own material opaque).
+  `platform::a11y_settings` polls these; test with `LOOKOUT_CONTRAST=more`
+  and `LOOKOUT_TRANSPARENCY=reduced`.
+- **Reduced motion.** Springs snap; tweens that move things go through
+  `motion::spatial(..)` so they land at once (sheets fade in place, skeletons
+  stop shimmering). Fades and the loading spinner keep running. A
+  `Spinner::labelled(id, label)` is a busy progress indicator for screen
+  readers.
+- Composite widgets (the timelapse editor, the video player's controls)
+  keep keyboard focus on one container and move an internal *stop* with
+  Tab and the arrows. The stop is reported with `.aria_active_descendant()`
+  and gets a 2px accent ring only once a key moved it (`:focus-visible`;
+  the pointer hides it). Their Tab / Shift+Tab are actions bound in the
+  widget's key context, so they win over any global Tab binding; past the
+  last stop they call `window.focus_next` and wrap if nothing else takes it.
 - Labels we wrote that aren't on screen: "Pause recording", "Resume
   recording", "Stop recording", "Recorded time", "Start a timelapse",
   "Playhead", "Cuts", "Masks", "Seek", "Copy command", "Session link",
   "Timelapse name", gallery cards as "Name, Status, 1 hour 12 minutes", editor
-  cuts as "Cut, minutes 3 to 5" and the playhead as "Minute 6 of 47, cut".
+  cuts as "Cut, minutes 3 to 5" and the playhead as "Minute 6 of 47, cut", the picker preview as "Preview: Built-in Display",
+  source rows' "Shift+Space to select more than one", the session page's live "Status: Complete".
+  Also "Timelapse editor", "Start of cut" / "End of cut" (sliders, "minute
+  3"), "Start of mask 2" / "End of mask 2", mask boxes as "Mask 2" with a
+  value "35% from the left, …", "Timeline view" (the overview bar, "Minutes
+  10 to 33 of 47"), "Zoom" ("Fit", "2.5 times"), "Keyboard shortcuts",
+  "Timelapse player", and the player's "Time" / "Time remaining" (the clock
+  is in its description, not its name, so it isn't re-announced each
+  second).
+  Outside the main window: the tray popup "Lookout recording"; the macOS
+  menu-bar item "Lookout, recording, 1h 2m recorded" (its SwiftUI content is
+  hidden from VoiceOver); onboarding's films as images described in words
+  (`Onboarding::art_description`) and page 2's unseen heading "Start a
+  timelapse"; the installer's progress bar (named after the page) and
+  "Destination folder: …"; the program panel's "Open in Browser".
+- Pictures that only decorate (onboarding stickers, the installer badge) get
+  no node. Animations that say something get a description instead.
+- Windows outside the main window handle their own keys: onboarding (Enter,
+  Space, arrows, Page Up/Down, Home/End; Escape skips; Enter during the flag
+  intro cuts it short), the installer (Enter = default button, Escape =
+  cancel, Space on the checkbox), the tray popup (Escape closes), and all
+  three move focus with Tab/Shift-Tab. The program panel's page takes
+  keyboard focus as it appears; F6 moves between the page and the panel's
+  header, and an Escape the page doesn't use closes the panel. The Windows
+  tray icon opens its popup from the keyboard (Win+B, then Enter).
+- The editor speaks edits through one polite live region: "Cut added,
+  minutes 3 to 5. 44 minutes after cuts, 3 minutes removed", "Cut
+  removed. …", "Mask deleted", "Zoom 2.3 times. Minutes 10 to 31 of 47". Only
+  on discrete events (a key, the end of a drag), never during a drag or
+  playback.
+
+**Keyboard (main window screens).** Composite widgets keep one Tab stop
+and move with the arrow keys (roving focus); `screens/kbd.rs` makes the
+screens' own pressable surfaces Tab stops pressed by Enter/Space.
+
+- Gallery: ↑/↓ (and ←/→), Home/End, Page Up/Down move between cards;
+  Enter/Space opens; Shift+F10 or the Menu key opens the card's context menu
+  (Open in Editor, Archive); Delete (⌘⌫ on macOS) archives. The focused card
+  is always built, even when scrolled far from the cards on screen.
+- Source picker: the source-type tabs switch with ←/→/Home/End. The list is a
+  listbox: ↑/↓/Home/End move and select, Shift+arrow adds to the selection
+  (Screens, Windows), ⌘/Ctrl+arrow moves without selecting, Space selects
+  (Shift/⌘/Ctrl+Space toggles), Enter starts. A focused window row shows its
+  hover preview card.
+- Recorder: Space pauses/resumes when no button has focus, ⌘S / Ctrl+S
+  stops (opens the naming prompt, so nothing is lost). Shown in the buttons'
+  tooltips.
+- Settings: every row is a Tab stop (Enter/Space); Filtered Apps is one Tab
+  stop moved with ↑/↓/Home/End/Page Up/Page Down, Space toggles. Opening a
+  subpage from the keyboard moves focus into it; Escape or Back returns it
+  to the row that opened it (Escape on the menu leaves Settings).
+- Session: the Rename button (pencil) is a Tab stop; ending a rename puts
+  focus back on it.
+
+Async results are announced through polite live regions (gallery loaded
+"12 timelapses"/couldn't load, session status changes, recorder starting
+and saved, programs loading, System Settings hand-offs on the permission
+page); errors are assertive.
+
+**Editor keyboard** (also the `?` sheet, from `screens/editor.rs`
+`shortcuts()`; tooltips carry the single-key ones). Tab / Shift+Tab walk the
+playhead, each cut (body, start edge, end edge), each mask (its box, then
+its span: body, start, end) and the overview bar; ↑/↓ hop between cuts and
+masks. Space/K play, ←/→ a minute (Shift: 10), `,`/`.` a frame, Home/End.
+On a cut or edge ←/→ move it (Shift: 10 minutes; running into a neighbour
+merges, as dragging does); on a mask box arrows move it and Alt/⌥+arrows
+resize it (Shift: 10×); on the overview ←/→ scroll (Shift: a page). X cut,
+M mask, Delete/Backspace removes the cut or mask under the keyboard and
+moves to its neighbour, Esc back to the playhead, =/−/0 zoom, ⌘/Ctrl+Enter
+publish, ⌘W/Ctrl+W close (asks first). Mask boxes and lanes carry their
+number, so they pair up without colour; cuts read by their hatching.
+
+**Video player keyboard.** The player is a tab stop; Tab walks play, time,
+seek, settings and full screen, Enter/Space presses. The settings menu
+opens with Enter and takes ↑/↓, Home/End, Enter, Esc. Controls don't
+auto-hide while the keyboard is on them.
 
 **Checking the tree on Linux** (the same tree reaches macOS and Windows).
 Run the app on the virtual desktop and read it over AT-SPI with
@@ -296,12 +414,35 @@ logs, once per focus change, when the focused element has no node.
 maps "disabled" for read-only-capable roles, so on Linux text fields can't be
 written through AT-SPI (typing works) and disabled buttons still read as
 enabled; both work on macOS and Windows. The gallery builds only the cards near
-the viewport, so a screen reader sees those (with "n of N" positions), not the
-whole list. The program panel's embedded web page is drawn into a texture and
-its own tree isn't bridged. Only the default "click" action is exposed over
+the viewport (plus the focused one), so a screen reader sees those (with "n
+of N" positions), not the whole list; arrow keys reach every card. The program panel's page is a native view on macOS, Windows and
+X11, so its own accessibility comes with it once it has focus (handed over
+automatically; F6), but it isn't a node in our tree: a screen reader can't
+walk from the panel's header into the page, only follow focus. On X11 the
+handover doesn't take: WebKitGTK's embedded window ignores keys until it is
+clicked once (setting X input focus and a synthetic GTK focus-in didn't
+change that), and agent-desktop couldn't read into its web content. Escape
+from inside the page closes the panel once it has focus; F6 out of the page
+reaches Lookout, but X11 keeps the keys in the page until Lookout is
+clicked. The macOS (first
+responder; VoiceOver under AccessKit's subclassed view) and Windows (WebView2
+MoveFocus; Narrator) handovers are untested. On native Wayland the
+page is software-rendered into a texture and has no tree at all; "Open in
+Browser" in the panel's header is the way round it everywhere. Onboarding's
+start page keeps its recorder clock and captures running while it's open;
+Reduce Motion freezes it on its last frame (there's no separate pause). The
+macOS permission card's app tile can only be dragged; VoiceOver hears the
+list's + button as the alternative. Only the default "click" action is exposed over
 AT-SPI, so slider Increment/Decrement is macOS/Windows only (SetValue works
 everywhere). VoiceOver's focus fix is a vendored GPUI patch
-(`vendor/PATCHES.md`, zed#66691) that has only been type-checked here.
+(`vendor/PATCHES.md`, zed#66691) that has only been type-checked here. The OS
+text size (Windows "Text size", GNOME text-scaling-factor) isn't applied:
+every size in the app is in fixed pixels inside a fixed-size window, so
+scaling GPUI's rem changes nothing and scaling `.ts()` would clip fixed-height
+rows and buttons; it needs a resizable layout first. Windows contrast themes
+and macOS Full Keyboard Access have only been type-checked here. The
+editor has no undo, and "Clear all" has no shortcut (it's a button screen
+readers reach; keyboard users can delete cuts one by one).
 
 ## How the animations were ported
 
@@ -357,6 +498,13 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   instead of staying blank until restart.
 - Modals (Overlay, NamingModal, confirms) **fade out over 120ms** instead of
   vanishing. The Tauri app animated them in but unmounted them instantly.
+- The **stop prompt** ("Name your timelapse") is laid out like a desktop alert
+  instead of the web card: the standard dialog panel, left-aligned title and
+  text, a regular-height field, and one row of regular buttons in the
+  platform's order (macOS/Linux: Save & Stop at the leading edge, then Resume
+  and the default Edit & Save trailing; Windows: default first). Return picks
+  Edit & Save and Escape resumes; the "Nothing to save yet" variant has
+  Keep recording as its default.
 - Skeletons **always shimmer**. In the Tauri app the `shimmer` keyframes only
   existed after the recorder had mounted once, so most skeletons were static.
 - Secondary buttons keep their **1px border around the squircle corners**. The

@@ -12,6 +12,7 @@ use gpui_kit::gpui::{
 
 use crate::theme::{Theme, theme};
 use crate::ui::a11y::prelude::*;
+use crate::screens::kbd::KbdPress;
 use crate::ui::icon::Icon;
 use crate::ui::text::TextExt;
 
@@ -45,12 +46,16 @@ fn os_name() -> &'static str {
 }
 
 /// A plain text link: secondary text, brightens on hover.
-fn link(id: &'static str, label: &'static str, url: &'static str, t: &Theme) -> impl IntoElement {
+fn link(id: &'static str, label: &'static str, url: &'static str, t: &Theme, window: &mut Window, cx: &mut App) -> impl IntoElement {
     let hover = t.text_primary;
+    let focus = crate::screens::kbd::keyed_focus(id, window, cx);
     div()
         .id(id)
         .role(Role::Link)
         .aria_label(label)
+        .aria_description(url)
+        .relative()
+        .kbd_press(&focus, 4.0, move |_, cx| cx.open_url(url))
         .ts(12.0)
         .text_color(t.text_secondary)
         .hover(move |s| s.text_color(hover))
@@ -59,7 +64,7 @@ fn link(id: &'static str, label: &'static str, url: &'static str, t: &Theme) -> 
 }
 
 impl Render for InfoPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let icon = ICON.with(|i| i.clone());
 
@@ -90,24 +95,26 @@ impl Render for InfoPage {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(link("about-website", "Website", WEBSITE, &t))
+                        .child(link("about-website", "Website", WEBSITE, &t, window, cx))
                         .child(dot())
-                        .child(link("about-docs", "Docs", DOCS, &t))
+                        .child(link("about-docs", "Docs", DOCS, &t, window, cx))
                         .child(dot())
-                        .child(link("about-github", "GitHub", GITHUB, &t)),
+                        .child(link("about-github", "GitHub", GITHUB, &t, window, cx)),
                 ),
         )
-        .child(hack_club_footer("about-hackclub", &t))
+        .child(hack_club_footer("about-hackclub", &t, window, cx))
     }
 }
 
 /// The Hack Club flag (clicks through to hackclub.com) over "Made with ♥
 /// by teens at Hack Club" and the nonprofit line. Shared by the About page
 /// and the bottom of the gallery.
-pub fn hack_club_footer(id: &'static str, t: &Theme) -> impl IntoElement {
+pub fn hack_club_footer(id: &'static str, t: &Theme, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let focus = crate::screens::kbd::keyed_focus(id, window, cx);
     // A sign-off, not content: kept quiet so it doesn't compete with the page.
+    // The flag is dimmed; the lines stay at tertiary text colour so they
+    // keep AA contrast.
     div()
-        .opacity(0.5)
         .flex_none()
         .flex()
         .flex_col()
@@ -119,7 +126,9 @@ pub fn hack_club_footer(id: &'static str, t: &Theme) -> impl IntoElement {
                 .role(Role::Link)
                 .aria_label("Hack Club")
                 .aria_description("Made with love by teens at Hack Club, a 501(c)(3) nonprofit")
-                .child(gpui_kit::gpui::svg().path(Icon::HackClubFlag.path()).w(px(80.0)).h(px(28.0)).text_color(t.text_primary))
+                .relative()
+                .kbd_press(&focus, 4.0, |_, cx| cx.open_url("https://hackclub.com"))
+                .child(gpui_kit::gpui::svg().path(Icon::HackClubFlag.path()).w(px(80.0)).h(px(28.0)).text_color(t.text_primary).opacity(0.5))
                 .on_click(|_, _, cx| cx.open_url("https://hackclub.com")),
         )
         .child(
@@ -129,7 +138,7 @@ pub fn hack_club_footer(id: &'static str, t: &Theme) -> impl IntoElement {
                 .items_center()
                 .gap(px(3.0))
                 .ts(11.0)
-                .text_color(t.text_secondary)
+                .text_color(t.text_tertiary)
                 .child("Made with")
                 .child(Icon::HeartFill.el(11.0, crate::theme::hex(HACK_CLUB_RED)))
                 .child("by teens at Hack Club"),

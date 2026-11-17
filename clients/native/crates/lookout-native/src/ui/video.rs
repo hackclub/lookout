@@ -13,6 +13,9 @@
 //! in the settings menu.
 //! - keyboard: Space/K play-pause, ←/→ ±5s, J/L ±10s, ,/. frame step,
 //!   0–9 jump, Home/End, F full screen, Esc exit, Shift+,/. speed.
+//!   Tab walks the controls (play, time, seek, settings, full screen) with
+//!   a focus ring; Enter or Space presses the one under it. The settings
+//!   menu opens with Enter and takes ↑/↓, Enter, Esc.
 //!
 //! The editor reuses the player with `controls = false` and draws its own
 //! stage UI, driving it through [`VideoPlayer::play`], [`VideoPlayer::seek`]
@@ -23,7 +26,7 @@ use std::sync::Arc;
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
     AnyElement, Bounds, ClickEvent, Context, Corners, DispatchPhase, ElementId, EventEmitter, FocusHandle,
-    FontFeatures, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    FontFeatures, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement,
     Styled, Task, Window, anchored, canvas, deferred, div, point, px, relative,
 };
@@ -43,6 +46,38 @@ pub enum VideoEvent {
     Playing(bool),
     Loaded { duration: f64 },
     Error(String),
+}
+
+gpui_kit::gpui::actions!(video_player, [NextControl, PrevControl]);
+
+const KEY_CONTEXT: &str = "VideoPlayer";
+
+fn bind_keys(cx: &mut gpui_kit::gpui::App) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        cx.bind_keys([
+            KeyBinding::new("tab", NextControl, Some(KEY_CONTEXT)),
+            KeyBinding::new("shift-tab", PrevControl, Some(KEY_CONTEXT)),
+        ])
+    });
+}
+
+/// A control the keyboard can stand on, in Tab order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ctl {
+    Play,
+    Time,
+    Seek,
+    Settings,
+    Fullscreen,
+}
+
+const CTLS: [Ctl; 5] = [Ctl::Play, Ctl::Time, Ctl::Seek, Ctl::Settings, Ctl::Fullscreen];
+
+/// The settings menu's rows, top to bottom: each speed (fastest first),
+/// then Loop.
+fn menu_len() -> usize {
+    player::RATES.len() + 1
 }
 
 /// Controls hide after this long without pointer movement while playing.
@@ -141,6 +176,16 @@ pub struct VideoPlayer {
     speed_open: bool,
     speed_o: Anim,
 
+    /// The control under the keyboard, and whether to draw its ring (the
+    /// last input was a key).
+    kfocus: Option<Ctl>,
+    kb: bool,
+    /// The settings menu row under the keyboard, and the menu's own focus
+    /// (it's drawn in a window-level layer, outside the player's subtree,
+    /// so it holds the keyboard itself while open from the keyboard).
+    menu_i: usize,
+    menu_focus: FocusHandle,
+
     fullscreen: bool,
     owns_window_fullscreen: bool,
     saw_window_fullscreen: bool,
@@ -171,6 +216,7 @@ impl VideoPlayer {
                 None
             }
         };
+        bind_keys(cx);
         let pump = backend.as_ref().map(|_| {
             cx.spawn(async move |this, cx| {
                 while rx.recv_async().await.is_ok() {
@@ -191,7 +237,11 @@ impl VideoPlayer {
             backend,
             status: Status::default(),
             frame: None,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
+            kfocus: None,
+            kb: false,
+            menu_i: 0,
+            menu_focus: cx.focus_handle(),
             hovered: false,
             reveal_until: 0.0,
             controls_o: Anim::new(0.0),
@@ -361,12 +411,122 @@ impl VideoPlayer {
 
     // ── Keyboard ───────────────────────────────────────────────────────
 
+    /// Tab / Shift+Tab through the controls, then on out of the player.
+    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.kb = true;
+        self.speed_open = false;
+        let i = self.kfocus.and_then(|c| CTLS.iter().position(|x| *x == c));
+        let next = match (i, forward) {
+            (None, true) => Some(0),
+            (None, false) => None,
+            (Some(i), true) => (i + 1 < CTLS.len()).then_some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+        };
+        match next {
+            Some(j) => self.kfocus = Some(CTLS[j]),
+            None => {
+                self.kfocus = None;
+                if forward { window.focus_next(cx) } else { window.focus_prev(cx) }
+                if self.focus.is_focused(window) {
+                    // Nothing else takes focus: wrap round.
+                    self.kfocus = Some(if forward { CTLS[0] } else { CTLS[CTLS.len() - 1] });
+                }
+            }
+        }
+        self.poke();
+        self.controls_o.jump(1.0);
+        cx.notify();
+    }
+
+    /// The row of the current speed in the settings menu.
+    fn rate_row(&self) -> usize {
+        player::RATES.iter().rev().position(|&r| (r - self.rate).abs() < 1e-6).unwrap_or(0)
+    }
+
+    fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.speed_open = true;
+        self.menu_i = self.rate_row();
+        self.kfocus = Some(Ctl::Settings);
+        window.focus(&self.menu_focus, cx);
+        cx.notify();
+    }
+
+    /// Close the settings menu; if it held the keyboard, hand it back to
+    /// the gear.
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.speed_open = false;
+        if self.menu_focus.is_focused(window) {
+            self.kfocus = Some(Ctl::Settings);
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Enter / Space (or a screen reader's press) on the menu's row `i`.
+    fn menu_pick(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let rates: Vec<f64> = player::RATES.iter().rev().copied().collect();
+        if let Some(&r) = rates.get(i) {
+            self.set_rate(r, cx);
+            self.close_menu(window, cx);
+        } else {
+            self.toggle_loop(cx);
+        }
+        self.poke();
+        cx.notify();
+    }
+
+    /// Keys while the settings menu holds the keyboard.
+    fn on_menu_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let last = menu_len() - 1;
+        match ev.keystroke.key.as_str() {
+            "up" => self.menu_i = self.menu_i.saturating_sub(1),
+            "down" => self.menu_i = (self.menu_i + 1).min(last),
+            "home" => self.menu_i = 0,
+            "end" => self.menu_i = last,
+            "enter" | "space" => self.menu_pick(self.menu_i, window, cx),
+            "escape" | "tab" => self.close_menu(window, cx),
+            _ => return,
+        }
+        self.kb = true;
+        self.poke();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Enter / Space on the control under the keyboard.
+    fn press(&mut self, c: Ctl, window: &mut Window, cx: &mut Context<Self>) {
+        match c {
+            Ctl::Play | Ctl::Seek => {
+                self.toggle(cx);
+                self.pp.jump(if self.playing { 1.0 } else { 0.0 });
+            }
+            Ctl::Time => self.show_remaining = !self.show_remaining,
+            Ctl::Settings => {
+                if self.speed_open {
+                    self.close_menu(window, cx);
+                } else {
+                    self.open_menu(window, cx);
+                }
+            }
+            Ctl::Fullscreen => self.toggle_fullscreen(window, cx),
+        }
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         if k.modifiers.platform || k.modifiers.control || k.modifiers.alt {
             return;
         }
         let d = self.duration;
+        if let (Some(c), "enter" | "space") = (self.kfocus, k.key.as_str()) {
+            self.kb = true;
+            self.press(c, window, cx);
+            self.poke();
+            self.controls_o.jump(1.0);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         match k.key.as_str() {
             "space" | "k" => {
                 self.toggle(cx);
@@ -386,7 +546,12 @@ impl VideoPlayer {
             "home" => self.seek(0.0, cx),
             "end" => self.seek(d, cx),
             "f" => self.toggle_fullscreen(window, cx),
-            "escape" if self.speed_open => self.speed_open = false,
+            "escape" if self.speed_open => {
+                self.speed_open = false;
+                if self.kfocus.is_some() {
+                    self.kfocus = Some(Ctl::Settings);
+                }
+            }
             "escape" if self.fullscreen => self.toggle_fullscreen(window, cx),
             key if key.len() == 1 && key.as_bytes()[0].is_ascii_digit() && d > 0.0 => {
                 let n = (key.as_bytes()[0] - b'0') as f64;
@@ -394,6 +559,7 @@ impl VideoPlayer {
             }
             _ => return,
         }
+        self.kb = true;
         self.poke();
         // Keyboard reveals are instant.
         self.controls_o.jump(1.0);
@@ -464,10 +630,13 @@ impl VideoPlayer {
         set(&mut self.dim_o, if s.ended { 1.0 } else { 0.0 }, Curve::tween(240.0, OUT));
         set(&mut self.pp, if self.playing { 1.0 } else { 0.0 }, Curve::tween(160.0, OUT));
 
+        // No timeout while the keyboard is on a control: it shouldn't vanish
+        // under a user who is still reading or deciding.
+        let kb_on = self.kb && self.kfocus.is_some() && (self.focus.is_focused(window) || self.menu_focus.is_focused(window));
         let shown = self.controls
             && has_frame
             && !error
-            && (!self.playing || self.scrub.is_some() || self.speed_open || self.bar_hover || now < self.reveal_until);
+            && (!self.playing || self.scrub.is_some() || self.speed_open || self.bar_hover || kb_on || now < self.reveal_until);
         if shown != self.controls_shown {
             self.controls_shown = shown;
             if !shown && self.fullscreen {
@@ -495,7 +664,6 @@ impl VideoPlayer {
         }
         // Keep the auto-hide deadline and the spinner delay ticking.
         let timers = (self.playing && shown) || (buffering && !spin);
-        let _ = window;
         moving || timers || self.status.active
     }
 }
@@ -538,6 +706,13 @@ fn ctl_button(id: impl Into<ElementId>, label: &'static str, active: bool, tip: 
         Some(tip) => d.tooltip(move |window, cx| Tooltip::new(tip).build(window, cx)),
         None => d,
     }
+}
+
+/// The keyboard's focus ring on a control, and its report to assistive
+/// technology as the focused node.
+fn with_focus(d: gpui_kit::gpui::Stateful<gpui_kit::gpui::Div>, focused: bool, ring: Option<Hsla>) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+    d.when(focused, |d| d.aria_active_descendant())
+        .when_some(ring.filter(|_| focused), |d, c| d.border_2().border_color(c))
 }
 
 impl Render for VideoPlayer {
@@ -673,8 +848,15 @@ impl VideoPlayer {
         }
 
         root = root
+            .role(Role::Group)
+            .aria_label("Timelapse player")
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(|v, _: &NextControl, window, cx| v.tab(true, window, cx)))
+            .on_action(cx.listener(|v, _: &PrevControl, window, cx| v.tab(false, window, cx)))
+            // The pointer hides the keyboard's focus ring.
+            .capture_any_mouse_down(cx.listener(|v, _: &MouseDownEvent, _, _| v.kb = false))
             .on_hover(cx.listener(|v, h: &bool, _, cx| {
                 v.hovered = *h;
                 if *h {
@@ -705,7 +887,15 @@ impl VideoPlayer {
                     ))
                     .on_a11y_click({
                         let e = entity.clone();
-                        move |_, cx| e.update(cx, |v, cx| if v.status.has_frame { v.toggle(cx) })
+                        // Also take the keyboard, so the player's keys work next.
+                        move |window, cx| {
+                            e.update(cx, |v, cx| {
+                                window.focus(&v.focus, cx);
+                                if v.status.has_frame {
+                                    v.toggle(cx)
+                                }
+                            })
+                        }
                     })
                     .absolute()
                     .inset_0()
@@ -774,8 +964,10 @@ impl VideoPlayer {
             .into_any_element()
     }
 
-    fn render_controls(&mut self, co: f32, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_controls(&mut self, co: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let fs = self.fullscreen;
+        let ring = (self.kb && self.focus.is_focused(window)).then(|| crate::theme::theme(cx).focus_ring);
+        let kf = self.kfocus;
         let d = self.duration;
         let progress = if d > 0.0 { (self.position / d) as f32 } else { 0.0 }.clamp(0.0, 1.0);
         let buffered = if d > 0.0 { (self.status.buffered / d) as f32 } else { 0.0 }.clamp(0.0, 1.0);
@@ -807,6 +999,8 @@ impl VideoPlayer {
             .aria_numeric_value(self.position.floor())
             .aria_numeric_value_step(5.0)
             .aria_value(crate::ui::a11y::playhead_value_text(self.position.floor(), d.floor()))
+            .when(kf == Some(Ctl::Seek), |d| d.aria_active_descendant())
+            .when_some(ring.filter(|_| kf == Some(Ctl::Seek)), |d, c| d.rounded(px(8.0)).border_2().border_color(c))
             .on_a11y_action(AccessibleAction::Increment, seek_by(5.0))
             .on_a11y_action(AccessibleAction::Decrement, seek_by(-5.0))
             .on_a11y_action(AccessibleAction::SetValue, {
@@ -908,7 +1102,7 @@ impl VideoPlayer {
                         .items_center()
                         .justify_center()
                         .opacity(1.0 - pp)
-                        .child(play_icon.scaled(20.0, theme::white(1.0), 0.6 + 0.4 * (1.0 - pp))),
+                        .child(play_icon.scaled(20.0, theme::white(1.0), if motion::reduce_motion() { 1.0 } else { 0.6 + 0.4 * (1.0 - pp) })),
                 )
                 .child(
                     div()
@@ -918,13 +1112,14 @@ impl VideoPlayer {
                         .items_center()
                         .justify_center()
                         .opacity(pp)
-                        .child(Icon::VpPause.scaled(20.0, theme::white(1.0), 0.6 + 0.4 * pp)),
+                        .child(Icon::VpPause.scaled(20.0, theme::white(1.0), if motion::reduce_motion() { 1.0 } else { 0.6 + 0.4 * pp })),
                 )
         })
         .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
             window.focus(&v.focus, cx);
             v.toggle(cx);
         }));
+        let play_pause = with_focus(play_pause, kf == Some(Ctl::Play), ring);
 
         let time = {
             let left = if self.show_remaining {
@@ -932,15 +1127,24 @@ impl VideoPlayer {
             } else {
                 fmt_clock(self.position, long)
             };
-            div()
+            // A stable name; the ticking time goes in the description
+            // (read when the button is reached, not announced as it
+            // changes). AT-SPI drops a button's value, so not there.
+            let spoken = if self.show_remaining {
+                format!("{} remaining", crate::ui::a11y::spoken_clock((d - self.position).max(0.0).floor()))
+            } else {
+                crate::ui::a11y::playhead_value_text(self.position.floor(), d.floor())
+            };
+            let el = div()
                 .id("video-time")
                 .role(Role::Button)
-                .aria_label(if self.show_remaining {
-                    format!("{} remaining", crate::ui::a11y::spoken_clock((d - self.position).max(0.0).floor()))
-                } else {
-                    crate::ui::a11y::playhead_value_text(self.position.floor(), d.floor())
-                })
-                .aria_description(if self.show_remaining { "Show elapsed time" } else { "Show remaining time" })
+                .aria_label(if self.show_remaining { "Time remaining" } else { "Time" })
+                .aria_description(format!(
+                    "{spoken}. Press to show {} time",
+                    if self.show_remaining { "elapsed" } else { "remaining" }
+                ))
+                .rounded(px(6.0))
+                .px(px(4.0))
                 .ml(px(8.0))
                 .flex()
                 .gap(px(4.0))
@@ -953,7 +1157,8 @@ impl VideoPlayer {
                 .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
                     v.show_remaining = !v.show_remaining;
                     cx.notify();
-                }))
+                }));
+            with_focus(el, kf == Some(Ctl::Time), ring)
         };
 
         let settings_probe = entity.clone();
@@ -967,16 +1172,22 @@ impl VideoPlayer {
                 .absolute()
                 .inset_0(),
         )
-        .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+        .on_click(cx.listener(|v, _: &ClickEvent, window, cx| {
             cx.stop_propagation();
-            v.speed_open = !v.speed_open;
-            cx.notify();
+            if v.speed_open {
+                v.close_menu(window, cx);
+            } else {
+                v.speed_open = true;
+                cx.notify();
+            }
         }));
+        let settings = with_focus(settings, kf == Some(Ctl::Settings), ring);
 
         let fs_btn = ctl_button("video-fullscreen", if fs { "Exit full screen" } else { "Full screen" }, false, Some(if fs { "Exit full screen (F)" } else { "Full screen (F)" }), {
             (if fs { Icon::VpShrink } else { Icon::VpExpand }).el(20.0, theme::white(1.0))
         })
         .on_click(cx.listener(|v, _: &ClickEvent, window, cx| v.toggle_fullscreen(window, cx)));
+        let fs_btn = with_focus(fs_btn, kf == Some(Ctl::Fullscreen), ring);
 
         let (pad_x, pad_b) = if fs { (24.0, 16.0) } else { (12.0, 8.0) };
         // GPUI clips children to rectangles, so the scrim rounds itself to
@@ -1068,11 +1279,17 @@ impl VideoPlayer {
         // --media-popover-side-offset (12px), rising 8px into place; kept
         // inside the window when there isn't room above the gear.
         let max_bottom = (f32::from(vp.height) - SPEED_MENU_H - 8.0).max(8.0);
-        let bottom = (f32::from(vp.height - sb.origin.y) + 12.0).min(max_bottom) - 8.0 * (1.0 - o);
+        let rise = if motion::reduce_motion() { 0.0 } else { 8.0 * (1.0 - o) };
+        let bottom = (f32::from(vp.height - sb.origin.y) + 12.0).min(max_bottom) - rise;
         let current = self.rate;
-        let row = |id: SharedString, label: String, checked: bool| {
+        let ring = (self.kb && self.menu_focus.is_focused(window)).then(|| crate::theme::theme(cx).focus_ring);
+        let menu_i = self.menu_i;
+        let row = |id: SharedString, i: usize, label: String, checked: bool| {
+            let focused = ring.is_some() && i == menu_i;
             div()
                 .id(id)
+                .when(focused, |d| d.aria_active_descendant().bg(theme::white(0.1)))
+                .when_some(ring.filter(|_| focused), |d, c| d.border_2().border_color(c))
                 .role(Role::MenuItemRadio)
                 .aria_label(SharedString::from(label.clone()))
                 .aria_toggled(if checked { Toggled::True } else { Toggled::False })
@@ -1098,6 +1315,8 @@ impl VideoPlayer {
             .id("video-settings-menu")
             .role(Role::Menu)
             .aria_label("Playback settings")
+            .track_focus(&self.menu_focus)
+            .on_key_down(cx.listener(Self::on_menu_key))
             .absolute()
             .right(px(right.max(8.0)))
             .bottom(px(bottom))
@@ -1113,30 +1332,39 @@ impl VideoPlayer {
             .flex_col()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(heading("Speed"));
-        for &r in player::RATES.iter().rev() {
+        for (i, &r) in player::RATES.iter().rev().enumerate() {
             let selected = (r - current).abs() < 1e-6;
-            menu = menu.child(row(SharedString::from(format!("video-rate-{r}")), fmt_rate(r), selected).on_click(
-                cx.listener(move |v, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    v.set_rate(r, cx);
-                    v.speed_open = false;
-                    v.poke();
-                }),
-            ));
+            let e = cx.entity();
+            menu = menu.child(
+                row(SharedString::from(format!("video-rate-{r}")), i, fmt_rate(r), selected)
+                    .on_a11y_click(move |window, cx| e.update(cx, |v, cx| v.menu_pick(i, window, cx)))
+                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        v.set_rate(r, cx);
+                        v.speed_open = false;
+                        v.poke();
+                    })),
+            );
         }
+        let e = cx.entity();
+        let loop_i = menu_len() - 1;
         menu = menu
             .child(div().my(px(4.0)).mx(px(6.0)).h(px(1.0)).bg(theme::white(0.08)))
-            .child(row("video-loop".into(), "Loop".into(), self.looping).role(Role::MenuItemCheckBox).on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                v.toggle_loop(cx);
-            })));
+            .child(
+                row("video-loop".into(), loop_i, "Loop".into(), self.looping)
+                    .role(Role::MenuItemCheckBox)
+                    .on_a11y_click(move |window, cx| e.update(cx, |v, cx| v.menu_pick(loop_i, window, cx)))
+                    .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        v.toggle_loop(cx);
+                    })),
+            );
         // Click-away catcher behind the menu, covering the whole window.
         let catcher = div().id("video-settings-catcher").absolute().inset_0().on_mouse_down(
             MouseButton::Left,
-            cx.listener(|v, _: &MouseDownEvent, _, cx| {
+            cx.listener(|v, _: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                v.speed_open = false;
-                cx.notify();
+                v.close_menu(window, cx);
             }),
         );
         let layer = div()

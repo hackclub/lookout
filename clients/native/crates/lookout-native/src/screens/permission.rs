@@ -182,13 +182,27 @@ impl Render for PermissionScreen {
                                     .on_click(move |_, _, cx| {
                                         me1.update(cx, |s, cx| {
                                             s.continue_clicks = s.continue_clicks.saturating_add(1);
-                                            if required_ok || s.continue_clicks > 2 {
+                                            if required_ok || s.continue_clicks > 1 {
                                                 permission_guide::close();
                                                 cx.emit(PermissionEvent::Done { cache: required_ok });
+                                            } else {
+                                                // Say why nothing happened (it used to be silent).
+                                                cx.notify();
                                             }
                                         })
                                     }),
-                            ),
+                            )
+                            .when(!required_ok && self.continue_clicks > 0, |d| {
+                                let note = "Allow Screen Recording and Accessibility first, or press Continue again to skip for now.";
+                                d.child(
+                                    div()
+                                        .ts_lh(12.0, 1.5)
+                                        .text_center()
+                                        .text_color(t.text_secondary)
+                                        .a11y_status("setup-continue-note", note, Live::Polite)
+                                        .child(note),
+                                )
+                            }),
                     ),
             )
     }
@@ -232,7 +246,13 @@ impl PermissionScreen {
                 .child(div().ts(13.0).w600().text_color(t.accent).child("Allowed"))
                 .into_any_element()
         } else if state.phase == Phase::Opening {
-            div().w(px(72.0)).flex().justify_center().child(Spinner::new(SpinnerSize::Sm)).into_any_element()
+            div()
+                .w(px(72.0))
+                .flex()
+                .justify_center()
+                .child(Spinner::new(SpinnerSize::Sm))
+                .child(div().a11y_status("opening", format!("Opening System Settings for {title}…"), Live::Polite))
+                .into_any_element()
         } else {
             let me = cx.entity();
             Button::new(("setup-allow", i), "Allow")
@@ -312,6 +332,7 @@ impl PermissionScreen {
                         .justify_center()
                         .ts(12.0)
                         .text_color(t.text_tertiary)
+                        .a11y_status("away", format!("Finish allowing {title} in System Settings"), Live::Polite)
                         .child("Finish in System Settings"),
                 )
             })

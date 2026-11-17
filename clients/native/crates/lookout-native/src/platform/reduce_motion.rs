@@ -15,6 +15,8 @@ use std::time::Duration;
 const POLL: Duration = Duration::from_secs(2);
 
 pub fn observe() {
+    // Contrast, transparency and Full Keyboard Access are polled alongside.
+    super::a11y_settings::observe();
     apply(read());
     let _ = std::thread::Builder::new().name("reduce-motion".into()).spawn(|| loop {
         std::thread::sleep(POLL);

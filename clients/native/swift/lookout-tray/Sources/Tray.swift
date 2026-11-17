@@ -50,6 +50,9 @@ struct TrayContentView: View {
         }
         .padding(.horizontal, 3)
         .fixedSize()
+        // VoiceOver reads the status-bar button's own label instead (see
+        // `TrayController.describe`): the glyphs alone say "pause, 1h 2m".
+        .accessibility(hidden: true)
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: TrayWidthKey.self, value: geo.size.width)
@@ -126,6 +129,15 @@ final class TrayController: NSObject {
         )
     }
 
+    /// The menu-bar item's tooltip and VoiceOver label: what it is, whether
+    /// it's recording, and the time so far.
+    func describe(_ text: String, paused: Bool) {
+        guard let button = item?.button else { return }
+        button.toolTip = paused ? "Lookout — paused at \(text)" : "Lookout — \(text) recorded"
+        button.setAccessibilityLabel(paused ? "Lookout, paused, \(text) recorded" : "Lookout, recording, \(text) recorded")
+        button.setAccessibilityHelp("Shows the recording controls")
+    }
+
     func hide() {
         if let item = item {
             NSStatusBar.system.removeStatusItem(item)
@@ -155,7 +167,7 @@ public func lookoutTrayShow(_ text: UnsafePointer<CChar>, _ iconBytes: UnsafePoi
         TrayModel.shared.text = s
         TrayModel.shared.paused = false
         TrayController.shared.show()
-        TrayController.shared.item?.button?.toolTip = "Lookout — \(s) recorded"
+        TrayController.shared.describe(s, paused: false)
     }
 }
 
@@ -166,7 +178,7 @@ public func lookoutTrayUpdate(_ text: UnsafePointer<CChar>, _ paused: Int32) {
     DispatchQueue.main.async {
         guard #available(macOS 10.15, *) else { return }
         let p = paused < 0 ? TrayModel.shared.paused : (paused != 0)
-        if #available(macOS 13.0, *) {
+        if #available(macOS 13.0, *), !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
                 TrayModel.shared.text = s
                 TrayModel.shared.paused = p
@@ -175,8 +187,7 @@ public func lookoutTrayUpdate(_ text: UnsafePointer<CChar>, _ paused: Int32) {
             TrayModel.shared.text = s
             TrayModel.shared.paused = p
         }
-        TrayController.shared.item?.button?.toolTip =
-            p ? "Lookout — paused at \(s)" : "Lookout — \(s) recorded"
+        TrayController.shared.describe(s, paused: p)
     }
 }
 

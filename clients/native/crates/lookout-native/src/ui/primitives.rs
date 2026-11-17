@@ -29,6 +29,9 @@ pub enum BadgeSize {
 /// the overlay variant adds a 1px black/10% ring.
 pub fn badge(status: &str, size: BadgeSize, overlay: bool, t: &Theme) -> impl IntoElement {
     let (label, color) = theme::status_config(status, t);
+    // White on the raw status colours was 2.2–3.8:1; darken to AA (or
+    // black text on amber).
+    let (color, text) = theme::readable_pill(color);
     let label: SharedString = if label.is_empty() { status.to_string().into() } else { label.into() };
     let (fs, py, pxl) = match size {
         BadgeSize::Sm => (10.0, 2.0, 8.0),
@@ -41,7 +44,7 @@ pub fn badge(status: &str, size: BadgeSize, overlay: bool, t: &Theme) -> impl In
         .py(px(py))
         .rounded(px(999.0))
         .bg(color)
-        .text_color(theme::hex(0xffffff))
+        .text_color(text)
         .ts(fs)
         .w600()
         .child(label);
@@ -106,8 +109,14 @@ impl RenderOnce for Skeleton {
         let bg = t.skeleton_bg;
         let hi = t.skeleton_shimmer;
         let radius = self.radius;
-        window.request_animation_frame();
-        let phase = motion::shimmer_phase();
+        // Reduced motion: a still placeholder, no sweeping highlight.
+        let phase = if motion::reduce_motion() {
+            0.0
+        } else {
+            window.request_animation_frame();
+            motion::shimmer_phase()
+        };
+        let hi = if motion::reduce_motion() { bg } else { hi };
         let aspect = self.aspect;
         let mut el = div().relative().flex_none();
         el = match (self.w, self.w_frac) {
@@ -223,6 +232,10 @@ pub struct PressScale {
     set_pos: Option<(usize, usize)>,
     extra_actions: Vec<crate::ui::a11y::ExtraAction>,
     on_scroll_into_view: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    focus: Option<gpui_kit::gpui::FocusHandle>,
+    tab_stop: Option<bool>,
+    tab_index: Option<isize>,
+    ring_radius: f32,
 }
 
 impl PressScale {
@@ -240,7 +253,35 @@ impl PressScale {
             set_pos: None,
             extra_actions: Vec::new(),
             on_scroll_into_view: None,
+            focus: None,
+            tab_stop: None,
+            tab_index: None,
+            ring_radius: 10.0,
         }
+    }
+    /// Use this focus handle (focus the surface from code, restore focus to
+    /// it). By default it keeps its own, per id.
+    pub fn focus_handle(mut self, h: &gpui_kit::gpui::FocusHandle) -> Self {
+        self.focus = Some(h.clone());
+        self
+    }
+    /// Whether Tab reaches the surface. Defaults to on when it has a click
+    /// handler (on macOS: when Full Keyboard Access is on); `false` for
+    /// roving focus in a grid or list.
+    pub fn tab_stop(mut self, on: bool) -> Self {
+        self.tab_stop = Some(on);
+        self
+    }
+    /// Order among tab stops (lower first; default 0 = document order).
+    pub fn tab_index(mut self, i: isize) -> Self {
+        self.tab_index = Some(i);
+        self
+    }
+    /// Corner radius of the content, for the focus ring (default 10, the
+    /// card's).
+    pub fn ring_radius(mut self, r: f32) -> Self {
+        self.ring_radius = r;
+        self
     }
     /// A screen reader moving to this surface asks to scroll it into view
     /// (GPUI doesn't do that on its own).
@@ -381,6 +422,31 @@ impl RenderOnce for PressScale {
         }
         if let Some(f) = self.on_click.clone() {
             root = root.on_a11y_click(move |window, cx| f(&ClickEvent::default(), window, cx));
+        }
+        let focusable = self.on_click.is_some() || self.focus.is_some();
+        if focusable {
+            let focus = self.focus.clone().unwrap_or_else(|| crate::ui::focus::keyed_handle(&self.id, window, cx));
+            let tab_stop = self.tab_stop.unwrap_or_else(|| self.on_click.is_some() && crate::ui::focus::buttons_are_tab_stops());
+            let f = self.on_click.clone();
+            root = crate::ui::focus::focusable_control(root, &focus, tab_stop, self.tab_index, move |window, cx| {
+                if let Some(f) = &f {
+                    f(&ClickEvent::default(), window, cx)
+                }
+            });
+            // Tabbing onto a surface scrolled out of view brings it in, the
+            // way a screen reader's ScrollIntoView does (GPUI doesn't).
+            if let Some(f) = self.on_scroll_into_view.clone() {
+                let was = window.use_keyed_state((self.id.clone(), "was-focused"), cx, |_, _| false);
+                let now = focus.is_focused(window);
+                if now != *was.read(cx) {
+                    was.update(cx, |w, _| *w = now);
+                    if now && window.last_input_was_keyboard() {
+                        window.defer(cx, move |window, cx| f(window, cx));
+                    }
+                }
+            }
+            // The ring hugs the content, inside the press inset.
+            root = root.child(div().absolute().top(px(iy)).left(px(ix)).right(px(ix)).bottom(px(iy)).child(crate::ui::focus::ring(&focus, self.ring_radius)));
         }
         if let Some(f) = self.on_click {
             root = root.on_click(move |ev, window, cx| {

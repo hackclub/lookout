@@ -129,6 +129,10 @@ struct InstallerView {
     phase: Phase,
     /// The finish page's "Open Lookout" box.
     open_after: bool,
+    /// The setup file this runs from, and the finish page's box to move it
+    /// to the Recycle Bin (like macOS Installer's "Move … to Trash").
+    installer_file: Option<PathBuf>,
+    trash_installer: bool,
     focus: FocusHandle,
     /// The progress bar's fill, eased toward each reported fraction.
     bar: Anim,
@@ -165,6 +169,8 @@ impl InstallerView {
             admin,
             phase: Phase::Ready,
             open_after: true,
+            installer_file: if flow == Flow::Install { ops.installer_file() } else { None },
+            trash_installer: true,
             focus,
             bar: Anim::new(0.0),
             content,
@@ -305,6 +311,9 @@ impl InstallerView {
 
     fn finish(&mut self, cx: &mut Context<Self>) {
         if let Phase::Done { exe: Some(exe) } = &self.phase {
+            if let Some(file) = self.installer_file.as_ref().filter(|_| self.trash_installer) {
+                self.ops.trash_after_exit(exe, file);
+            }
             if self.open_after {
                 self.ops.launch(exe);
             }
@@ -442,6 +451,18 @@ fn checkbox(on: bool) -> impl IntoElement {
         })
         .shadow(vec![crate::theme::sh(0.0, 1.0, 2.0, 0.0, ink_a(0.12))])
         .when(on, |d| d.child(Icon::CheckBold.el(10.0, hex(0xffffff))))
+}
+
+/// A finish-page option: the checkbox and its label, both clickable.
+fn check_row(id: &'static str, on: bool, label: SharedString) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .child(checkbox(on))
+        .child(div().ts_lh(13.0, 20.0 / 13.0).text_color(ink12()).child(label))
 }
 
 /// Paragraph text: 13/20, ink-11.
@@ -586,20 +607,27 @@ impl Render for InstallerView {
                 })
                 .child(para("Click Finish to close Setup.").mt(px(18.0)))
                 .child(
-                div()
-                    .id("open-after")
-                    .mt(px(16.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .child(checkbox(self.open_after))
-                    .child(div().ts_lh(13.0, 20.0 / 13.0).text_color(ink12()).child("Open Lookout"))
-                    .on_click(cx.listener(|v, _, _, cx| {
-                        v.open_after = !v.open_after;
-                        cx.notify();
-                    })),
-            ),
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(10.0))
+                        .child(check_row("open-after", self.open_after, "Open Lookout".into()).on_click(cx.listener(|v, _, _, cx| {
+                            v.open_after = !v.open_after;
+                            cx.notify();
+                        })))
+                        .children(self.installer_file.as_ref().map(|f| {
+                            // Split by hand: the demo's Windows path on Linux too.
+                            let path = f.to_string_lossy();
+                            let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
+                            let label = format!("Move \u{201c}{name}\u{201d} to the Recycle Bin");
+                            check_row("trash-installer", self.trash_installer, label.into()).on_click(cx.listener(|v, _, _, cx| {
+                                v.trash_installer = !v.trash_installer;
+                                cx.notify();
+                            }))
+                        })),
+                ),
             (Phase::Done { .. }, Flow::Uninstall) => page,
             (Phase::Failed(e), _) => page.child(
                 div().mt(px(18.0)).max_w(px(600.0)).ts_lh(13.0, 20.0 / 13.0).text_color(red11()).child(e.clone()),

@@ -126,9 +126,17 @@ impl Render for AddSessionPage {
         let me = cx.entity();
         let mut body = div().w_full().mt(px(16.0)).flex().flex_col().gap(px(12.0));
         match self.programs.clone() {
-            None => body = body.child(div().flex().justify_center().child(Spinner::new(SpinnerSize::Md))),
+            None => {
+                body = body.child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .child(Spinner::new(SpinnerSize::Md))
+                        .child(div().a11y_status("add-loading", "Loading programs…", Live::Polite)),
+                )
+            }
             Some(list) if !list.is_empty() => {
-                let mut col = div().flex().flex_col().gap(px(8.0));
+                let mut col = div().id("programs").role(Role::Group).aria_label("Programs").flex().flex_col().gap(px(8.0));
                 for p in list {
                     let label = p.label();
                     let loading_this = self.launched.as_deref() == Some(label.as_str());
@@ -196,6 +204,8 @@ impl Render for AddSessionPage {
                     .border_color(if self.error.is_some() { theme::status::danger() } else { t.border_default })
                     .rounded(px(10.0))
                     .when(self.loading, |d| d.opacity(0.5))
+                    .relative()
+                    .child(crate::ui::input::field_ring(&self.link, 10.0, cx))
                     .child(self.link.clone())
                     .into_any_element(),
             ),

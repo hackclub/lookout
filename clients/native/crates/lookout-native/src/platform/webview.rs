@@ -70,6 +70,14 @@ const INIT_SCRIPT: &str = r#"(function () {
   } catch (e) {
     try { window.parent = parent; } catch (_) {}
   }
+  // Keyboard way out of the page (a native view keeps the keys while it has
+  // focus): Escape the page didn't use closes the panel, F6 hands focus back
+  // to Lookout. Bubble phase, so the page's own handlers come first.
+  window.addEventListener("keydown", function (e) {
+    if (e.defaultPrevented || e.isComposing) return;
+    if (e.key === "Escape") send({ type: "lookout:escape" });
+    else if (e.key === "F6") { e.preventDefault(); send({ type: "lookout:focus-out" }); }
+  });
 })();"#;
 
 fn origin_of(url: &str) -> Option<String> {
@@ -348,6 +356,34 @@ impl PanelWebView {
         }
     }
 
+    /// Give the page keyboard focus, so typing and the screen reader go into
+    /// it. Native views take real focus (first responder on macOS, WebView2's
+    /// MoveFocus on Windows; their own accessibility comes with them); the
+    /// composited Wayland view is told it has focus. On X11 this only picks
+    /// the widget inside WebKitGTK's embedded window, which still ignores keys
+    /// until it is clicked once (README, known gaps).
+    pub fn focus_page(&self) {
+        #[cfg(all(feature = "webview", target_os = "linux"))]
+        if let Some(host) = &self.offscreen {
+            host.set_focused(&self.view, true);
+            return;
+        }
+        #[cfg(feature = "webview")]
+        if self.shown.get() {
+            if let Err(e) = self.view.focus() {
+                log::warn!("[panel] couldn't focus the page: {e}");
+            }
+        }
+    }
+
+    /// Take keyboard focus back from a native page (to the window).
+    pub fn release_focus(&self) {
+        #[cfg(feature = "webview")]
+        if !self.composited() {
+            let _ = self.view.focus_parent();
+        }
+    }
+
     #[allow(unused_variables)]
     pub fn scroll(&self, event: &gpui_kit::gpui::ScrollEvent) {
         #[cfg(all(feature = "webview", target_os = "linux"))]
@@ -450,6 +486,7 @@ mod linux {
     use wry::raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle};
 
     static PUMPING: AtomicBool = AtomicBool::new(false);
+
 
     /// Load WebKitGTK before anything calls into it.
     ///

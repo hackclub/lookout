@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    AnyElement, App, Context, ElementId, Entity, EventEmitter, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Hsla, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Window, canvas, div, img, px,
 };
 use lookout_core::apps::AppEntry;
@@ -73,7 +73,49 @@ pub struct SettingsPage {
     server_error: Option<String>,
     saving: bool,
     unlinking: Option<String>,
+    /// The app rows in list order, with their focus (rebuilt each render),
+    /// and the one Tab lands on.
+    app_focus: Vec<(String, FocusHandle)>,
+    current_app: Option<String>,
+    apps_scroll: ScrollHandle,
+    /// Keyboard focus to move after a page change, once the new page has
+    /// been drawn: into the new page, or back to the menu row that opened it.
+    pending_focus: Option<PendingFocus>,
+    /// Each page's container, focused to step into its first control.
+    layer_focus: HashMap<&'static str, FocusHandle>,
     _subs: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PendingFocus {
+    /// Wait a frame for the page to be painted, then step into it.
+    Into(Sub, bool),
+    Row(&'static str),
+}
+
+fn sub_key(sub: Sub) -> &'static str {
+    match sub {
+        Sub::Menu => "menu",
+        Sub::FilteredApps => "filtered",
+        Sub::LinkedPrograms => "linked",
+        Sub::Advanced => "advanced",
+    }
+}
+
+/// The menu row that opens `sub`.
+fn menu_row_id(sub: Sub) -> Option<&'static str> {
+    match sub {
+        Sub::Menu => None,
+        Sub::FilteredApps => Some("menu-filtered"),
+        Sub::LinkedPrograms => Some("menu-linked"),
+        Sub::Advanced => Some("menu-advanced"),
+    }
+}
+
+thread_local! {
+    /// Menu rows' focus handles by id, for putting focus back on the row
+    /// a subpage was opened from.
+    static MENU_FOCUS: std::cell::RefCell<HashMap<&'static str, FocusHandle>> = Default::default();
 }
 
 impl EventEmitter<SettingsEvent> for SettingsPage {}
@@ -141,6 +183,11 @@ impl SettingsPage {
             server_error: None,
             saving: false,
             unlinking: None,
+            app_focus: Vec::new(),
+            current_app: None,
+            apps_scroll: ScrollHandle::new(),
+            pending_focus: None,
+            layer_focus: HashMap::new(),
             _subs: subs,
         }
     }
@@ -149,6 +196,11 @@ impl SettingsPage {
         if sub == self.sub {
             return;
         }
+        let from = self.sub;
+        self.pending_focus = match (from, sub) {
+            (_, Sub::Menu) => menu_row_id(from).map(PendingFocus::Row),
+            _ => Some(PendingFocus::Into(sub, false)),
+        };
         let dir = if sub == Sub::Menu { -1.0 } else { 1.0 };
         for l in self.layers.iter_mut().filter(|l| !l.leaving) {
             l.leaving = true;
@@ -333,6 +385,32 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// ↑/↓/Home/End/Page Up/Page Down move between app rows (one Tab stop
+    /// for the whole list; Space toggles the focused app).
+    fn on_apps_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        if m.shift || m.control || m.platform || m.alt {
+            return;
+        }
+        let Some(i) = self.app_focus.iter().position(|(_, h)| h.is_focused(window)) else { return };
+        let last = self.app_focus.len().saturating_sub(1);
+        let j = match ev.keystroke.key.as_str() {
+            "down" => (i + 1).min(last),
+            "up" => i.saturating_sub(1),
+            "home" => 0,
+            "end" => last,
+            "pagedown" => (i + 10).min(last),
+            "pageup" => i.saturating_sub(10),
+            _ => return,
+        };
+        cx.stop_propagation();
+        let (name, h) = self.app_focus[j].clone();
+        self.current_app = Some(name);
+        self.apps_scroll.scroll_to_item(j);
+        window.focus(&h, cx);
+        cx.notify();
+    }
+
     // ── Pieces ──────────────────────────────────────────────────────────
 
     /// `PageChrome`: back button (not on Linux), title (not on Linux) and
@@ -475,10 +553,15 @@ impl SettingsPage {
                     .border_1()
                     .border_color(if self.search_focused { t.border_hover } else { t.border_default })
                     .rounded(px(8.0))
+                    .relative()
+                    .child(crate::ui::input::field_ring(&self.search, 8.0, cx))
                     .child(self.search.clone()),
             );
         let mut list = div()
             .id("apps-list")
+            .role(Role::Group)
+            .aria_label("Apps")
+            .on_key_down(cx.listener(Self::on_apps_key))
             .flex_1()
             .min_h(px(0.0))
             .overflow_y_scroll()
@@ -488,8 +571,16 @@ impl SettingsPage {
             .bg(t.bg_surface);
         match self.apps.clone() {
             None => {
-                window.request_animation_frame();
-                let mut rows = div().p(px(4.0));
+                if !motion::reduce_motion() {
+                    window.request_animation_frame();
+                }
+                let mut rows = div()
+                    .p(px(4.0))
+                    .child(div().a11y_status("apps-loading", "Loading apps…", Live::Polite).a11y_flags(NodeFlags {
+                        busy: true,
+                        live: Some(Live::Polite),
+                        ..Default::default()
+                    }));
                 // The rows' clock starts when they mount (motion's `delay`
                 // only holds the first keyframe before the first cycle).
                 let start = *window.use_keyed_state("apps-skeleton-start", cx, |_, _| motion::now()).read(cx);
@@ -497,7 +588,10 @@ impl SettingsPage {
                     // opacity [0.45, 0.9, 0.45] over 1.2s easeInOut, delay i × 50ms, repeat ∞.
                     let since = motion::now() - start - i as f64 * 50.0;
                     let tt = if since <= 0.0 { 0.0 } else { (since.rem_euclid(1200.0) / 1200.0) as f32 };
-                    let o = if tt < 0.5 {
+                    let o = if motion::reduce_motion() {
+                        // Reduced motion: no pulsing, a steady placeholder.
+                        0.6
+                    } else if tt < 0.5 {
                         0.45 + 0.45 * Ease::EASE_IN_OUT.apply(tt * 2.0)
                     } else {
                         0.9 - 0.45 * Ease::EASE_IN_OUT.apply((tt - 0.5) * 2.0)
@@ -547,8 +641,18 @@ impl SettingsPage {
                             .child(if q.is_empty() { "No apps detected" } else { "No matching apps" }),
                     );
                 } else {
-                    let mut rows = div().p(px(4.0));
-                    for a in filtered.iter().take(400) {
+                    // Rows are the scroll list's direct children, so a row
+                    // reached by arrow key can be scrolled to by index.
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    list = list.p(px(4.0)).track_scroll(&self.apps_scroll);
+                    let shown: Vec<&AppEntry> = filtered.iter().take(400).collect();
+                    self.app_focus = shown.iter().map(|a| (a.name.clone(), row_focus(&eid("app-row", &a.name), window, cx))).collect();
+                    let current = self
+                        .current_app
+                        .clone()
+                        .filter(|c| shown.iter().any(|a| &a.name == c))
+                        .or_else(|| shown.first().map(|a| a.name.clone()));
+                    for (i, a) in shown.into_iter().enumerate() {
                         self.request_icon(&a.name, a.path.clone(), cx);
                         let checked = blacklisted.contains(&a.name);
                         let icon = self.icons.get(&a.name).cloned().flatten();
@@ -561,11 +665,12 @@ impl SettingsPage {
                         }
                         let me = cx.entity();
                         let name = a.name.clone();
-                        rows = rows.child(app_row(&a.name, checked, icon, fade.unwrap_or(1.0), t, window, cx, move |_, cx| {
+                        let focus = (self.app_focus[i].1.clone(), current.as_ref() == Some(&a.name));
+                        rows.push(app_row(&a.name, checked, icon, fade.unwrap_or(1.0), t, focus, window, cx, move |_, cx| {
                             me.update(cx, |s, cx| s.toggle_app(&name, cx))
-                        }));
+                        }).into_any_element());
                     }
-                    list = list.child(rows);
+                    list = list.children(rows);
                 }
             }
         }
@@ -707,6 +812,8 @@ impl SettingsPage {
                             .border_1()
                             .border_color(border)
                             .rounded(px(8.0))
+                            .relative()
+                            .child(crate::ui::input::field_ring(&self.server, 8.0, cx))
                             .child(self.server.clone()),
                     )
                     .child(div().ts_lh(12.0, 1.5).text_color(t.text_tertiary).mt(px(4.0)).a11y_text("server-hint", "Please enter a VALID lookout service URL.").child("Please enter a VALID lookout service URL."))
@@ -782,7 +889,25 @@ fn row_states(id: &ElementId, window: &mut Window, cx: &mut App) -> (Entity<RowA
 }
 
 
-fn pressable_row(id: ElementId, selected_fill: Hsla, window: &mut Window, cx: &mut App) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+/// A row's keyboard focus, kept across renders.
+fn row_focus(id: &ElementId, window: &mut Window, cx: &mut App) -> FocusHandle {
+    crate::ui::focus::keyed_handle(id, window, cx)
+}
+
+
+/// A focusable row: a Tab stop (unless `tab_stop` is false) with a
+/// keyboard focus ring, pressed by Enter or Space. Menu and toggle rows
+/// pass `focus::buttons_are_tab_stops()` (macOS: only with Full Keyboard
+/// Access); app rows are a list, always reachable.
+fn pressable_row(
+    id: ElementId,
+    selected_fill: Hsla,
+    focus: FocusHandle,
+    tab_stop: bool,
+    activate: Rc<dyn Fn(&mut Window, &mut App)>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
     let (st, h, p) = row_states(&id, window, cx);
     let fill = theme::mix(theme::transparent(), selected_fill, h.max(p));
     let scale = 1.0 - 0.04 * p;
@@ -799,6 +924,8 @@ fn pressable_row(id: ElementId, selected_fill: Hsla, window: &mut Window, cx: &m
                 .absolute()
                 .inset_0(),
         )
+        .child(crate::ui::focus::ring(&focus, 8.0))
+        .map(|d| crate::ui::focus::focusable_control(d, &focus, tab_stop, None, move |window, cx| activate(window, cx)))
         .on_hover(move |hov, _, cx| s1.update(cx, |s, cx| {
             s.hover.set_css(if *hov { 1.0 } else { 0.0 }, 120.0, Ease::EASE_OUT);
             cx.notify();
@@ -842,7 +969,11 @@ impl gpui_kit::gpui::RenderOnce for MenuRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = self.t;
         let f = self.on_click;
-        pressable_row(self.id.into(), t.bg_selected, window, cx)
+        let id: ElementId = self.id.into();
+        // Kept outside the element (the menu page unmounts while a subpage
+        // shows), so Back can return focus to this same row.
+        let focus = MENU_FOCUS.with(|m| m.borrow_mut().entry(self.id).or_insert_with(|| cx.focus_handle()).clone());
+        pressable_row(id, t.bg_selected, focus, crate::ui::focus::buttons_are_tab_stops(), f.clone(), window, cx)
             .role(Role::Button)
             .aria_label(self.title)
             .when(!self.description.is_empty(), |d| d.aria_description(self.description.clone()))
@@ -910,7 +1041,13 @@ impl gpui_kit::gpui::RenderOnce for ToggleRow {
         }
         let c = chk.read(cx).get();
         let (on, f) = (self.on, self.on_toggle);
-        pressable_row(self.id.into(), t.bg_selected, window, cx)
+        let id: ElementId = self.id.into();
+        let focus = row_focus(&id, window, cx);
+        let toggle = {
+            let f = f.clone();
+            Rc::new(move |_: &mut Window, cx: &mut App| f(!on, cx)) as Rc<dyn Fn(&mut Window, &mut App)>
+        };
+        pressable_row(id, t.bg_selected, focus, crate::ui::focus::buttons_are_tab_stops(), toggle, window, cx)
             .role(Role::CheckBox)
             .aria_label(self.title)
             .aria_description(self.description.clone())
@@ -967,6 +1104,7 @@ fn app_row(
     icon: Option<String>,
     icon_opacity: f32,
     t: &Theme,
+    (focus, tab_stop): (FocusHandle, bool),
     window: &mut Window,
     cx: &mut App,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
@@ -990,9 +1128,9 @@ fn app_row(
         Some(Remote::Ready(i, _)) => img(i).size(px(20.0)).opacity(icon_opacity).into_any_element(),
         _ => div().size(px(20.0)).rounded(px(6.0)).bg(t.bg_selected).into_any_element(),
     };
-    let on_click = Rc::new(on_click);
+    let on_click: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_click);
     let on_click_a11y = on_click.clone();
-    pressable_row(id, t.bg_selected, window, cx)
+    pressable_row(id, t.bg_selected, focus, tab_stop, on_click.clone(), window, cx)
         .on_a11y_click(move |window, cx| on_click_a11y(window, cx))
         .role(Role::CheckBox)
         .aria_label(name.to_string())
@@ -1044,6 +1182,33 @@ impl Render for SettingsPage {
         if moving {
             window.request_animation_frame();
         }
+        // Keyboard focus follows page changes (only when they came from the
+        // keyboard: a click leaves focus where the pointer put it).
+        if let Some(p) = self.pending_focus.take() {
+            let keyboard = window.last_input_was_keyboard();
+            match p {
+                PendingFocus::Row(id) => {
+                    if keyboard {
+                        if let Some(h) = MENU_FOCUS.with(|m| m.borrow().get(id).cloned()) {
+                            window.focus(&h, cx);
+                        }
+                    }
+                }
+                PendingFocus::Into(sub, false) => {
+                    // Not painted yet: try next frame.
+                    self.pending_focus = Some(PendingFocus::Into(sub, true));
+                    window.request_animation_frame();
+                }
+                PendingFocus::Into(sub, true) => {
+                    if keyboard {
+                        if let Some(h) = self.layer_focus.get(sub_key(sub)).cloned() {
+                            window.focus(&h, cx);
+                            window.focus_next(cx);
+                        }
+                    }
+                }
+            }
+        }
         let subs: Vec<(Sub, f32, f32, ScrollHandle)> = self.layers.iter().map(|l| (l.sub, l.x.get(), l.opacity.get(), l.scroll.clone())).collect();
         let mut layers: Vec<AnyElement> = Vec::new();
         for (sub, x, o, scroll) in subs {
@@ -1054,8 +1219,14 @@ impl Render for SettingsPage {
                 Sub::Advanced => self.advanced(&t, cx),
             };
             let scrollable = !matches!(sub, Sub::FilteredApps);
+            let leaving = self.layers.iter().any(|l| l.sub == sub && l.leaving);
+            let lf = self.layer_focus.entry(sub_key(sub)).or_insert_with(|| cx.focus_handle()).clone();
             let mut layer = div()
                 .id(ElementId::Name(format!("settings-layer-{sub:?}").into()))
+                // A container focus (not itself a Tab stop) to step into the page from.
+                .when(!leaving, |d| d.track_focus(&lf.tab_stop(false)))
+                // The page sliding out is gone for assistive technology.
+                .when(leaving, |d| d.role(Role::Group).a11y_flags(NodeFlags { hidden: true, ..Default::default() }))
                 .absolute()
                 .top_0()
                 .bottom_0()
@@ -1067,6 +1238,25 @@ impl Render for SettingsPage {
             }
             layers.push(layer.child(content).into_any_element());
         }
-        div().relative().size_full().overflow_hidden().children(layers)
+        div()
+            .id("settings")
+            // Escape (like Back) steps out of a subpage to the menu first;
+            // only on the menu does it bubble up and leave Settings.
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let m = &ev.keystroke.modifiers;
+                if ev.keystroke.key == "escape"
+                    && !m.modified()
+                    && !this.at_menu()
+                    && !window.default_prevented()
+                    && !crate::ui::input::any_input_focused(window, cx)
+                {
+                    cx.stop_propagation();
+                    this.go(Sub::Menu, cx);
+                }
+            }))
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .children(layers)
     }
 }

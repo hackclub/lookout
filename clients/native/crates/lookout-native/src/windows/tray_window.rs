@@ -5,7 +5,7 @@
 
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
-    App, AppContext, Bounds, Context, Global, IntoElement, ParentElement, Pixels, Render, Styled, Subscription,
+    App, AppContext, Bounds, Context, FocusHandle, Global, IntoElement, KeyDownEvent, ParentElement, Pixels, Render, Styled, Subscription,
     Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
 };
 use lookout_core::ControlMode;
@@ -24,6 +24,7 @@ impl Global for TrayHandle {}
 
 pub struct TrayApp {
     model: gpui_kit::gpui::Entity<RecorderModel>,
+    focus: FocusHandle,
     tick_due: Option<std::time::Instant>,
     _tick: Option<gpui_kit::gpui::Task<()>>,
     _subs: Vec<Subscription>,
@@ -101,6 +102,10 @@ pub fn sync(cx: &mut App) {
 impl TrayApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let model = app::state(cx).recorder.clone();
+        // Untitled popups read as "window" to a screen reader.
+        window.set_window_title("Lookout recording");
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         let subs = vec![
             cx.observe(&model, |_, _, cx| cx.notify()),
             // Hide on blur, like the Tauri popup.
@@ -126,11 +131,30 @@ impl TrayApp {
         };
         Self {
             model,
+            focus,
             tick_due: None,
             _tick: None,
             _subs: subs,
             #[cfg(target_os = "macos")]
             _outside,
+        }
+    }
+}
+
+impl TrayApp {
+    /// A flyout's keys: Escape closes it, Tab moves between its buttons.
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        match ev.keystroke.key.as_str() {
+            "escape" => {
+                cx.stop_propagation();
+                cx.defer(hide);
+            }
+            "tab" if !m.control && !m.alt && !m.platform => {
+                cx.stop_propagation();
+                if m.shift { window.focus_prev(cx) } else { window.focus_next(cx) }
+            }
+            _ => {}
         }
     }
 }
@@ -222,6 +246,11 @@ impl Render for TrayApp {
         }
         let windows_look = !is_mac();
         div()
+            .id("tray")
+            .role(Role::Group)
+            .aria_label("Lookout recording")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
             .size_full()
             .flex()
             .items_center()

@@ -421,6 +421,117 @@ pub mod build_progress {
     }
 }
 
+// ── Keyboard editing ────────────────────────────────────────────────────
+
+/// Which part of a cut (or a mask's span) the keyboard is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// The whole thing: arrows move it.
+    Body,
+    /// Its first edge: arrows move the start.
+    Start,
+    /// Its last edge: arrows move the end.
+    End,
+}
+
+/// One keyboard stop in the editor. Tab walks them in this order: the
+/// playhead, each cut (body, start, end), each mask (its box on the video,
+/// then its span: body, start, end), the overview bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stop {
+    Playhead,
+    Cut(usize, Part),
+    MaskBox(String),
+    MaskSpan(String, Part),
+    Overview,
+}
+
+const PARTS: [Part; 3] = [Part::Body, Part::Start, Part::End];
+
+/// Every stop, in Tab order. `cuts` = the number of (normalized) cuts.
+pub fn stops(cuts: usize, mask_ids: &[String]) -> Vec<Stop> {
+    let mut out = vec![Stop::Playhead];
+    for i in 0..cuts {
+        out.extend(PARTS.iter().map(|p| Stop::Cut(i, *p)));
+    }
+    for id in mask_ids {
+        out.push(Stop::MaskBox(id.clone()));
+        out.extend(PARTS.iter().map(|p| Stop::MaskSpan(id.clone(), *p)));
+    }
+    out.push(Stop::Overview);
+    out
+}
+
+/// The stop after (or before) `cur`, or `None` when Tab should leave the
+/// editor. A stop that no longer exists starts over from the playhead.
+pub fn step_stop(cur: &Stop, all: &[Stop], forward: bool) -> Option<Stop> {
+    let Some(i) = all.iter().position(|s| s == cur) else { return all.first().cloned() };
+    if forward { all.get(i + 1).cloned() } else { i.checked_sub(1).and_then(|j| all.get(j).cloned()) }
+}
+
+/// The next (or previous) cut or mask from `cur`, on its body: Up/Down
+/// hop between items without stopping on every grip.
+pub fn step_item(cur: &Stop, cuts: usize, mask_ids: &[String], forward: bool) -> Option<Stop> {
+    let items: Vec<Stop> = (0..cuts)
+        .map(|i| Stop::Cut(i, Part::Body))
+        .chain(mask_ids.iter().map(|id| Stop::MaskBox(id.clone())))
+        .collect();
+    let at = match cur {
+        Stop::Cut(i, _) => items.iter().position(|s| *s == Stop::Cut(*i, Part::Body)),
+        Stop::MaskBox(id) | Stop::MaskSpan(id, _) => items.iter().position(|s| *s == Stop::MaskBox(id.clone())),
+        Stop::Playhead => return if forward { items.first().cloned() } else { None },
+        Stop::Overview => return if forward { None } else { items.last().cloned() },
+    }?;
+    if forward { items.get(at + 1).cloned() } else { at.checked_sub(1).and_then(|j| items.get(j).cloned()) }
+}
+
+/// A cut nudged by `delta` units: the body moves whole, a grip moves its
+/// edge. Stays inside `[0, n)` and at least one unit long.
+pub fn nudge_region(r: Region, part: Part, delta: i64, n: i64) -> Region {
+    let n = n.max(1);
+    match part {
+        Part::Body => {
+            let w = (r.end - r.start).clamp(1, n);
+            let start = (r.start + delta).clamp(0, n - w);
+            Region { start, end: start + w }
+        }
+        Part::Start => Region { start: (r.start + delta).clamp(0, r.end - 1), end: r.end },
+        Part::End => Region { start: r.start, end: (r.end + delta).clamp(r.start + 1, n) },
+    }
+}
+
+/// Shortest mask span, in units (as when dragging).
+pub const MIN_MASK_SPAN: f64 = 0.1;
+
+/// A mask's span nudged by `delta` units: `(start, end)`.
+pub fn nudge_mask_span(start: f64, end: f64, part: Part, delta: f64, n: f64) -> (f64, f64) {
+    match part {
+        Part::Body => {
+            let len = (end - start).min(n);
+            let s = (start + delta).clamp(0.0, (n - len).max(0.0));
+            (s, s + len)
+        }
+        Part::Start => ((start + delta).clamp(0.0, end - MIN_MASK_SPAN), end),
+        Part::End => (start, (end + delta).clamp(start + MIN_MASK_SPAN, n)),
+    }
+}
+
+/// Smallest mask box side (normalized), as when dragging.
+pub const MIN_MASK_SIDE: f32 = 0.02;
+
+/// A mask box nudged on the frame: moved by `(dx, dy)`, or with `resize`
+/// grown/shrunk from its right and bottom edges. Returns `(x, y, w, h)`.
+pub fn nudge_mask_box(b: (f32, f32, f32, f32), dx: f32, dy: f32, resize: bool) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = b;
+    if resize {
+        let w = (w + dx).clamp(MIN_MASK_SIDE, 1.0 - x);
+        let h = (h + dy).clamp(MIN_MASK_SIDE, 1.0 - y);
+        (x, y, w, h)
+    } else {
+        ((x + dx).clamp(0.0, 1.0 - w), (y + dy).clamp(0.0, 1.0 - h), w, h)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +700,52 @@ mod tests {
         assert_eq!(ruler_step(60, 600.0), 10);
         assert_eq!(elapsed_label(12.0, 47), "12m");
         assert_eq!(elapsed_label(75.0, 120), "1:15");
+    }
+
+    // ── Keyboard editing ──
+
+    #[test]
+    fn tab_walks_playhead_cuts_masks_overview() {
+        let ids = vec!["a".to_string()];
+        let all = stops(1, &ids);
+        assert_eq!(all.len(), 1 + 3 + 4 + 1);
+        assert_eq!(step_stop(&Stop::Playhead, &all, true), Some(Stop::Cut(0, Part::Body)));
+        assert_eq!(step_stop(&Stop::Cut(0, Part::End), &all, true), Some(Stop::MaskBox("a".into())));
+        assert_eq!(step_stop(&Stop::Overview, &all, true), None);
+        assert_eq!(step_stop(&Stop::Playhead, &all, false), None);
+        // A stop that went away (its cut was deleted) restarts.
+        assert_eq!(step_stop(&Stop::Cut(5, Part::Body), &all, true), Some(Stop::Playhead));
+    }
+
+    #[test]
+    fn up_down_hop_between_items() {
+        let ids = vec!["a".to_string()];
+        assert_eq!(step_item(&Stop::Cut(0, Part::End), 2, &ids, true), Some(Stop::Cut(1, Part::Body)));
+        assert_eq!(step_item(&Stop::Cut(1, Part::Body), 2, &ids, true), Some(Stop::MaskBox("a".into())));
+        assert_eq!(step_item(&Stop::MaskSpan("a".into(), Part::Start), 2, &ids, false), Some(Stop::Cut(1, Part::Body)));
+        assert_eq!(step_item(&Stop::Playhead, 0, &[], true), None);
+        assert_eq!(step_item(&Stop::Overview, 2, &[], false), Some(Stop::Cut(1, Part::Body)));
+    }
+
+    #[test]
+    fn nudging_a_cut_stays_on_the_timeline() {
+        let r = Region { start: 2, end: 5 };
+        assert_eq!(nudge_region(r, Part::Body, 1, 10), Region { start: 3, end: 6 });
+        assert_eq!(nudge_region(r, Part::Body, 100, 10), Region { start: 7, end: 10 });
+        assert_eq!(nudge_region(r, Part::Body, -100, 10), Region { start: 0, end: 3 });
+        assert_eq!(nudge_region(r, Part::Start, 10, 10), Region { start: 4, end: 5 });
+        assert_eq!(nudge_region(r, Part::End, -10, 10), Region { start: 2, end: 3 });
+        assert_eq!(nudge_region(r, Part::End, 10, 10), Region { start: 2, end: 10 });
+    }
+
+    #[test]
+    fn nudging_a_mask() {
+        assert_eq!(nudge_mask_span(1.0, 2.0, Part::Body, 10.0, 5.0), (4.0, 5.0));
+        assert_eq!(nudge_mask_span(1.0, 2.0, Part::Start, 5.0, 5.0), (2.0 - MIN_MASK_SPAN, 2.0));
+        assert_eq!(nudge_mask_span(1.0, 2.0, Part::End, -5.0, 5.0), (1.0, 1.0 + MIN_MASK_SPAN));
+        let b = (0.5, 0.5, 0.3, 0.3);
+        assert_eq!(nudge_mask_box(b, 0.5, 0.0, false), (0.7, 0.5, 0.3, 0.3));
+        let (_, _, w, h) = nudge_mask_box(b, 0.5, -1.0, true);
+        assert!((w - 0.5).abs() < 1e-6 && (h - MIN_MASK_SIDE).abs() < 1e-6);
     }
 }

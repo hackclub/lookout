@@ -24,7 +24,7 @@ use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     GlobalElementId, Hitbox, HitboxBehavior, InteractiveElement, IntoElement, LayoutId, MouseButton, ParentElement, Pixels, Point, Render,
-    RenderImage, Rgba, StatefulInteractiveElement, Style, Styled, UTF16Selection, WeakEntity, Window, div, img, px, relative,
+    RenderImage, Rgba, SharedString, StatefulInteractiveElement, Style, Styled, UTF16Selection, WeakEntity, Window, div, img, px, relative,
 };
 
 use crate::images::{self, Remote};
@@ -101,6 +101,13 @@ pub struct ProgramPanel {
     web: Option<Rc<PanelWebView>>,
     frame: Option<Arc<RenderImage>>,
     focus: FocusHandle,
+    /// The header's own controls, reachable by keyboard.
+    close_focus: FocusHandle,
+    browser_focus: FocusHandle,
+    /// Keyboard focus went into the page once it showed.
+    handed_focus: bool,
+    /// The page asked (F6) to give focus back: taken on the next render.
+    focus_back: bool,
     input: Option<WebInput>,
     marked: Option<Range<usize>>,
     tried_web: bool,
@@ -159,6 +166,10 @@ impl ProgramPanel {
             web: None,
             frame: None,
             focus: cx.focus_handle(),
+            close_focus: cx.focus_handle().tab_stop(true),
+            browser_focus: cx.focus_handle().tab_stop(true),
+            handed_focus: false,
+            focus_back: false,
             input: None,
             marked: None,
             tried_web: false,
@@ -232,6 +243,16 @@ impl ProgramPanel {
                     self.marked = None;
                 }
             }
+            // From the init script: the keyboard's way out of a native page.
+            WebEvent::Message(v) if v.get("type").and_then(|v| v.as_str()) == Some("lookout:escape") => {
+                self.close(PanelEvent::Dismiss, cx)
+            }
+            WebEvent::Message(v) if v.get("type").and_then(|v| v.as_str()) == Some("lookout:focus-out") => {
+                if let Some(web) = &self.web {
+                    web.release_focus();
+                }
+                self.focus_back = true;
+            }
             WebEvent::Message(v) => match parse_message(&v) {
                 Some(PanelMessage::Ready) => {
                     self.ready = true;
@@ -291,6 +312,57 @@ impl ProgramPanel {
         .detach();
     }
 
+    /// Move keyboard (and screen-reader) focus into the page. Our own focus
+    /// goes to the page's slot first, so GPUI's keys route there on Wayland
+    /// and the window's focus is somewhere sensible when the page hands it
+    /// back. The native call runs from a task with no App borrow held:
+    /// moving focus between native windows sends focus messages
+    /// synchronously (see `PendingWebView` for why that matters on Windows).
+    fn focus_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(web) = self.web.clone() else { return };
+        self.handed_focus = true;
+        window.focus(&self.focus, cx);
+        cx.spawn(async move |_, _| web.focus_page()).detach();
+    }
+
+    /// A round icon button in the header: a tab stop with a focus ring
+    /// (GPUI clicks a focused element on Enter / Space), named for the
+    /// screen reader.
+    #[allow(clippy::too_many_arguments)]
+    fn header_btn(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        icon: Icon,
+        focus: &FocusHandle,
+        on_press: impl Fn(&mut Window, &mut App) + Clone + 'static,
+        t: &crate::theme::Theme,
+    ) -> impl IntoElement {
+        let (press_click, press_a11y) = (on_press.clone(), on_press);
+        let accent = t.accent;
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .track_focus(focus)
+            .on_a11y_click(move |window, cx| press_a11y(window, cx))
+            .size(px(22.0))
+            .rounded_full()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .bg(t.bg_selected)
+            .cursor_pointer()
+            .focus_visible(|s| s.border_2().border_color(accent))
+            .tooltip({
+                let label = SharedString::from(label);
+                move |window, cx| crate::ui::tooltip::Tooltip::new(label.clone()).build(window, cx)
+            })
+            .child(icon.el(12.0, t.text_secondary))
+            .on_click(move |_, window, cx| press_click(window, cx))
+    }
+
     fn web_unavailable(&mut self, e: anyhow::Error) {
         log::warn!("[panel] can't embed {}: {e:#}", self.label);
         self.broken = true;
@@ -322,6 +394,14 @@ impl Render for ProgramPanel {
         if crate::keep_animating!(window, self.height, self.cover) {}
         let sheet_open = self.sheet.as_ref().and_then(|s| s.upgrade()).map(|s| s.read(cx).is_open).unwrap_or(true);
         let show_web = !self.broken && !self.closing && sheet_open && self.revealed();
+        // Once the page shows, keyboard and screen reader go into it, as they
+        // would into a dialog's content.
+        if show_web && !self.handed_focus && self.cover.target() == 0.0 && self.web.is_some() {
+            self.focus_page(window, cx);
+        }
+        if std::mem::take(&mut self.focus_back) {
+            window.focus(&self.browser_focus, cx);
+        }
         if let Some(web) = &self.web {
             web.set_focused(show_web && window.is_window_active() && self.focus.is_focused(window));
         }
@@ -370,8 +450,9 @@ impl Render for ProgramPanel {
                 .size_full()
                 .relative()
                 .id("panel-web-content")
-                // The embedded page draws offscreen into a texture; its own
-                // accessibility tree isn't bridged into ours (yet).
+                // Native views (macOS, Windows, X11) bring their own
+                // accessibility once they have focus; the composited Wayland
+                // page is a texture whose tree isn't bridged (README).
                 .role(Role::Group)
                 .aria_label(self.label.clone())
                 .track_focus(&self.focus)
@@ -481,9 +562,20 @@ impl Render for ProgramPanel {
                 })
         };
 
+        let page_keys = show_web && self.web.is_some();
         div()
             .flex()
             .flex_col()
+            // F6, the usual "next pane" key, moves focus into the page; the
+            // page's own F6 (init script) hands it back to the header.
+            .when(page_keys, |d| {
+                d.on_key_down(cx.listener(|p, ev: &gpui_kit::gpui::KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "f6" && !ev.keystroke.modifiers.modified() {
+                        cx.stop_propagation();
+                        p.focus_page(window, cx);
+                    }
+                }))
+            })
             .child(
                 div()
                     .px(px(12.0))
@@ -510,21 +602,25 @@ impl Render for ProgramPanel {
                                     .text_right()
                                     .child(origin),
                             )
-                            .child(
-                                div()
-                                    .id("panel-close")
-                                    .role(Role::Button)
-                                    .aria_label("Close")
-                                    .size(px(22.0))
-                                    .rounded_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(t.bg_selected)
-                                    .cursor_pointer()
-                                    .child(Icon::XBold.el(12.0, t.text_secondary))
-                                    .on_click(move |_, _, cx| me.update(cx, |p, cx| p.close(PanelEvent::Dismiss, cx))),
-                            ),
+                            .child(self.header_btn(
+                                "panel-open-browser-header",
+                                "Open in Browser",
+                                Icon::ArrowSquareOutBold,
+                                &self.browser_focus,
+                                {
+                                    let url = self.url.clone();
+                                    move |_, cx: &mut App| cx.open_url(&url)
+                                },
+                                &t,
+                            ))
+                            .child(self.header_btn(
+                                "panel-close",
+                                "Close",
+                                Icon::XBold,
+                                &self.close_focus,
+                                move |_, cx: &mut App| me.update(cx, |p, cx| p.close(PanelEvent::Dismiss, cx)),
+                                &t,
+                            )),
                     ),
             )
             .child(div().h(px(body_h)).flex_none().overflow_hidden().child(body))

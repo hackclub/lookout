@@ -153,6 +153,9 @@ pub struct HeaderBtn {
     disabled: bool,
     /// Spoken name; defaults to the text label, then the tooltip.
     aria_label: Option<SharedString>,
+    focus: Option<gpui_kit::gpui::FocusHandle>,
+    tab_stop: Option<bool>,
+    tab_index: Option<isize>,
 }
 
 impl HeaderBtn {
@@ -175,7 +178,28 @@ impl HeaderBtn {
             destructive: false,
             disabled: false,
             aria_label: None,
+            focus: None,
+            tab_stop: None,
+            tab_index: None,
         }
+    }
+    /// Use this focus handle (focus from code, restore focus to it). By
+    /// default the button keeps its own, per id.
+    pub fn focus_handle(mut self, h: &gpui_kit::gpui::FocusHandle) -> Self {
+        self.focus = Some(h.clone());
+        self
+    }
+    /// Whether Tab reaches the button (default: when enabled; on macOS
+    /// when Full Keyboard Access is on). Window caption buttons never are,
+    /// as on Windows itself.
+    pub fn tab_stop(mut self, on: bool) -> Self {
+        self.tab_stop = Some(on);
+        self
+    }
+    /// Order among tab stops (lower first; default 0 = document order).
+    pub fn tab_index(mut self, i: isize) -> Self {
+        self.tab_index = Some(i);
+        self
     }
     /// A button whose content is `icon` at `size`, tinted with the button's
     /// animated foreground colour.
@@ -301,9 +325,13 @@ impl RenderOnce for HeaderBtn {
         let disabled = self.disabled;
         let label = self.label.clone();
         let a11y_name = self.aria_label.clone().or_else(|| label.clone()).or_else(|| self.tooltip.clone());
+        // A tooltip that isn't already the name is read as the description.
+        let a11y_desc = self.tooltip.clone().filter(|t| Some(t) != a11y_name.as_ref());
+        let id_for_focus = self.id.clone();
         let mut el = div()
             .id(self.id)
             .role(Role::Button)
+            .when_some(a11y_desc, |d, l| d.aria_description(l))
             .when_some(a11y_name, |d, l| d.aria_label(l))
             .aria_disabled(disabled)
             .map(|d| {
@@ -368,6 +396,16 @@ impl RenderOnce for HeaderBtn {
                 move |window, cx| f(&ClickEvent::default(), window, cx)
             })
             .on_click(move |ev, window, cx| f(ev, window, cx)));
+        if !disabled {
+            let focus = self.focus.clone().unwrap_or_else(|| crate::ui::focus::keyed_handle(&id_for_focus, window, cx));
+            let tab_stop = self.tab_stop.unwrap_or_else(|| !caption && crate::ui::focus::buttons_are_tab_stops());
+            let f = self.on_click.clone();
+            el = crate::ui::focus::focusable_control(el, &focus, tab_stop, self.tab_index, move |window, cx| {
+                f(&ClickEvent::default(), window, cx)
+            });
+            let ring_r = if caption { 0.0 } else { size / 2.0 };
+            el = el.relative().child(crate::ui::focus::ring(&focus, ring_r));
+        }
         let tip_dismissed = st.read(cx).tip_dismissed;
         if let Some(tip) = self.tooltip.filter(|_| !tip_dismissed) {
             el = el.tooltip(move |window, cx| crate::ui::tooltip::Tooltip::new(tip.clone()).build(window, cx));
