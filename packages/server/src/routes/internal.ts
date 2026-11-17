@@ -24,6 +24,140 @@ const sessionIdParamSchema = {
   required: ["sessionId"] as const,
 };
 
+/**
+ * Whether the calling key owns `session`.
+ *
+ * Ownership, not "is scoped": the caller must be the session's owner, and
+ * for a key with no program that owner is the unowned pool. `programId` is
+ * NULL for legacy/global keys by design, so demanding a program here locked
+ * every pre-programs key out of its own sessions.
+ *
+ * What this still refuses is the case worth refusing: one program writing
+ * another's session, or either direction across the legacy boundary.
+ */
+function callerOwns(
+  request: FastifyRequest,
+  session: { programId: string | null },
+): boolean {
+  return (session.programId ?? null) === (request.programId ?? null);
+}
+
+type SessionRow = typeof schema.sessions.$inferSelect;
+
+/**
+ * The internal API's view of each session, in the order given: the row minus
+ * its storage plumbing, plus what has to be worked out from its screenshots.
+ *
+ * The screenshot aggregates run side by side, each once for every session
+ * asked about, so this costs the same few queries for one session or a
+ * hundred.
+ */
+async function sessionDetails(sessions: SessionRow[]) {
+  if (sessions.length === 0) return [];
+
+  const ids = sessions.map((session) => session.id);
+
+  const [counts, firstClients, firstJa4s] = await Promise.all([
+    db
+      .select({
+        sessionId: schema.screenshots.sessionId,
+        buckets: sql<number>`count(distinct ${schema.screenshots.minuteBucket})::int`,
+        confirmed: sql<number>`count(*)::int`,
+      })
+      .from(schema.screenshots)
+      .where(
+        and(
+          inArray(schema.screenshots.sessionId, ids),
+          eq(schema.screenshots.confirmed, true),
+        ),
+      )
+      .groupBy(schema.screenshots.sessionId),
+    // First recorded client telemetry: the clientInfo on the earliest
+    // screenshot row that carries one. NULL for sessions with none captured.
+    db
+      .selectDistinctOn([schema.screenshots.sessionId], {
+        sessionId: schema.screenshots.sessionId,
+        clientInfo: schema.screenshots.clientInfo,
+      })
+      .from(schema.screenshots)
+      .where(
+        and(
+          inArray(schema.screenshots.sessionId, ids),
+          isNotNull(schema.screenshots.clientInfo),
+        ),
+      )
+      .orderBy(schema.screenshots.sessionId, schema.screenshots.requestedAt),
+    // First recorded JA4 TLS fingerprint (edge-observed, resolved
+    // independently of clientInfo). NULL when the edge never set it.
+    db
+      .selectDistinctOn([schema.screenshots.sessionId], {
+        sessionId: schema.screenshots.sessionId,
+        ja4: schema.screenshots.ja4,
+      })
+      .from(schema.screenshots)
+      .where(
+        and(
+          inArray(schema.screenshots.sessionId, ids),
+          isNotNull(schema.screenshots.ja4),
+        ),
+      )
+      .orderBy(schema.screenshots.sessionId, schema.screenshots.requestedAt),
+  ]);
+
+  const countsById = new Map(counts.map((row) => [row.sessionId, row]));
+  const clientInfoById = new Map(
+    firstClients.map((row) => [row.sessionId, row.clientInfo]),
+  );
+  const ja4ById = new Map(firstJa4s.map((row) => [row.sessionId, row.ja4]));
+
+  const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+
+  return sessions.map((session) => {
+    const count = countsById.get(session.id);
+
+    // Exclude internal R2 storage keys (and the editor's unit map, which
+    // is bulky plumbing) and build proper media URLs
+    const {
+      videoR2Key,
+      thumbnailR2Key,
+      originalVideoR2Key: _originalVideoR2Key,
+      videoUnits: _videoUnits,
+      ...sessionData
+    } = session;
+    // Bucket-mode: tracked = (distinct buckets - 1) * 60.
+    // Credit-mode: read session.trackedSeconds directly (maintained per-credit).
+    const liveBucketTracked = Math.max(0, ((count?.buckets ?? 0) - 1) * 60);
+    const uncutTrackedSeconds =
+      session.trackingMode === "credit"
+        ? session.trackedSeconds ?? 0
+        : session.trackedSeconds ?? liveBucketTracked;
+    // Reported tracked time honors the session's cut list (user edits can
+    // only shrink it); the raw value is surfaced alongside.
+    const trackedSeconds = Math.max(
+      0,
+      uncutTrackedSeconds - (session.cutSeconds ?? 0),
+    );
+
+    return {
+      session: {
+        ...sessionData,
+        thumbnailUrl:
+          session.status === "complete" && thumbnailR2Key
+            ? `${baseUrl}/api/media/${session.id}/thumbnail.jpg`
+            : null,
+        videoUrl: videoR2Key
+          ? `${baseUrl}/api/media/${session.id}/video.mp4`
+          : null,
+      },
+      trackedSeconds,
+      uncutTrackedSeconds,
+      screenshotCount: count?.confirmed ?? 0,
+      clientInfo: clientInfoById.get(session.id) ?? null,
+      ja4: ja4ById.get(session.id) ?? null,
+    };
+  });
+}
+
 export async function internalRoutes(app: FastifyInstance) {
   /**
    * Treat an empty JSON body as `{}` on the internal API.
@@ -311,108 +445,69 @@ export async function internalRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { sessionId } = request.params;
 
-      // Owner-scoped like the writes below: this response carries the
-      // session token, and session ids are public (every shared media URL
-      // has one), so an unscoped read handed any key-holding program the
-      // capability to record into and edit another program's session.
-      if (!(await writableSession(request, sessionId))) {
-        return reply.code(404).send({ error: "Session not found" });
-      }
-
       const session = await db.query.sessions.findFirst({
         where: eq(schema.sessions.id, sessionId),
       });
 
-      if (!session) {
+      // Owner-scoped like the writes below: this response carries the
+      // session token, and session ids are public (every shared media URL
+      // has one), so an unscoped read handed any key-holding program the
+      // capability to record into and edit another program's session.
+      if (!session || !callerOwns(request, session)) {
         return reply.code(404).send({ error: "Session not found" });
       }
 
-      const [{ count }] = await db
-        .select({
-          count: sql<number>`count(distinct ${schema.screenshots.minuteBucket})`,
-        })
-        .from(schema.screenshots)
-        .where(
-          and(
-            eq(schema.screenshots.sessionId, sessionId),
-            eq(schema.screenshots.confirmed, true),
-          ),
-        );
+      const [details] = await sessionDetails([session]);
+      return details;
+    },
+  );
 
-      // Exclude internal R2 storage keys (and the editor's unit map, which
-      // is bulky plumbing) and build proper media URLs
-      const baseUrl = process.env.BASE_URL || "http://localhost:3000";
-      const {
-        videoR2Key,
-        thumbnailR2Key,
-        originalVideoR2Key: _originalVideoR2Key,
-        videoUnits: _videoUnits,
-        ...sessionData
-      } = session;
-      // Bucket-mode: tracked = (distinct buckets - 1) * 60.
-      // Credit-mode: read session.trackedSeconds directly (maintained per-credit).
-      const liveBucketTracked = Math.max(0, (Number(count) - 1) * 60);
-      const uncutTrackedSeconds =
-        session.trackingMode === "credit"
-          ? session.trackedSeconds ?? 0
-          : session.trackedSeconds ?? liveBucketTracked;
-      // Reported tracked time honors the session's cut list (user edits can
-      // only shrink it); the raw value is surfaced alongside.
-      const trackedSeconds = Math.max(
-        0,
-        uncutTrackedSeconds - (session.cutSeconds ?? 0),
-      );
-      const [{ confirmedCount }] = await db
-        .select({ confirmedCount: sql<number>`count(*)::int` })
-        .from(schema.screenshots)
-        .where(
-          and(
-            eq(schema.screenshots.sessionId, sessionId),
-            eq(schema.screenshots.confirmed, true),
-          ),
-        );
-      // First recorded client telemetry: the clientInfo on the earliest
-      // screenshot row that carries one. NULL for sessions with none captured.
-      const [firstClient] = await db
-        .select({ clientInfo: schema.screenshots.clientInfo })
-        .from(schema.screenshots)
-        .where(
-          and(
-            eq(schema.screenshots.sessionId, sessionId),
-            isNotNull(schema.screenshots.clientInfo),
-          ),
-        )
-        .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
-        .limit(1);
-      // First recorded JA4 TLS fingerprint (edge-observed, resolved
-      // independently of clientInfo). NULL when the edge never set it.
-      const [firstJa4] = await db
-        .select({ ja4: schema.screenshots.ja4 })
-        .from(schema.screenshots)
-        .where(
-          and(
-            eq(schema.screenshots.sessionId, sessionId),
-            isNotNull(schema.screenshots.ja4),
-          ),
-        )
-        .orderBy(sql`${schema.screenshots.requestedAt} ASC`)
-        .limit(1);
-      return {
-        session: {
-          ...sessionData,
-          thumbnailUrl:
-            session.status === "complete" && thumbnailR2Key
-              ? `${baseUrl}/api/media/${session.id}/thumbnail.jpg`
-              : null,
-          videoUrl: videoR2Key
-            ? `${baseUrl}/api/media/${session.id}/video.mp4`
-            : null,
+  // Get many sessions' details at once - the same answer as GET
+  // /api/internal/sessions/:sessionId gives for each, in a fixed number of
+  // queries however many are asked for.
+  //
+  // A program listing its user's recordings otherwise sends one GET per
+  // recording at the same moment. Each of those runs its own screenshot
+  // aggregates, and a few dozen arriving together queue on the pool for
+  // seconds.
+  //
+  // Ids that don't exist and ids belonging to another program both land in
+  // `missing`, for the same reason the single GET answers 404 for both.
+  app.post<{
+    Body: { sessionIds: string[] };
+  }>(
+    "/api/internal/sessions/batch",
+    {
+      schema: {
+        body: {
+          type: "object" as const,
+          required: ["sessionIds"] as const,
+          properties: {
+            sessionIds: {
+              type: "array" as const,
+              items: { type: "string" as const, format: "uuid" },
+              minItems: 1,
+              maxItems: 100,
+              uniqueItems: true,
+            },
+          },
+          additionalProperties: false,
         },
-        trackedSeconds,
-        uncutTrackedSeconds,
-        screenshotCount: Number(confirmedCount),
-        clientInfo: firstClient?.clientInfo ?? null,
-        ja4: firstJa4?.ja4 ?? null,
+      },
+    },
+    async (request) => {
+      const { sessionIds } = request.body;
+
+      const rows = await db.query.sessions.findMany({
+        where: inArray(schema.sessions.id, sessionIds),
+      });
+
+      const owned = rows.filter((row) => callerOwns(request, row));
+      const found = new Set(owned.map((row) => row.id));
+
+      return {
+        sessions: await sessionDetails(owned),
+        missing: sessionIds.filter((id) => !found.has(id)),
       };
     },
   );
@@ -625,18 +720,7 @@ export async function internalRoutes(app: FastifyInstance) {
       },
     });
 
-    if (!session) return null;
-
-    // Ownership, not "is scoped": the caller must be the session's owner, and
-    // for a key with no program that owner is the unowned pool. `programId` is
-    // NULL for legacy/global keys by design, so demanding a program here locked
-    // every pre-programs key out of its own sessions.
-    //
-    // What this still refuses is the case worth refusing: one program writing
-    // another's session, or either direction across the legacy boundary.
-    const owner = session.programId ?? null;
-    const caller = request.programId ?? null;
-    if (owner !== caller) return null;
+    if (!session || !callerOwns(request, session)) return null;
 
     return session;
   }
