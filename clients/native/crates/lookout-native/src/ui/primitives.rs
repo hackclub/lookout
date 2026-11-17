@@ -207,8 +207,8 @@ impl RenderOnce for AspectBox {
 
 /// Wrap `content` so it shrinks toward its centre while pressed, the way a
 /// `motion.div whileTap={{scale}}` did. GPUI can't scale arbitrary
-/// content, so the wrapper insets it by `(1 - scale)/2` of its measured size
-/// on each side — at 0.99 on a card this is visually indistinguishable.
+/// content, so the wrapper insets it evenly on every side by `(1 - scale)/2`
+/// of its shorter measured edge (`paint::press_inset`), as Button does.
 #[derive(IntoElement)]
 pub struct PressScale {
     id: ElementId,
@@ -300,10 +300,9 @@ impl RenderOnce for PressScale {
         let measured = window.use_keyed_state((self.id.clone(), "m"), cx, |_, _| Measured(Bounds::default()));
         let (_, scale) = press_values(&state, window, cx);
         let b = measured.read(cx).0;
-        let w = f32::from(b.size.width);
-        let h = f32::from(b.size.height);
-        let ix = w * (1.0 - scale) / 2.0;
-        let iy = h * (1.0 - scale) / 2.0;
+        // Even inset on every side, from the shorter edge (as Button does).
+        let ix = crate::ui::paint::press_inset(b, scale);
+        let iy = ix;
         let depth = 1.0 - self.scale;
         let s1 = state.clone();
         let s2 = state.clone();

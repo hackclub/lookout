@@ -13,8 +13,10 @@
 //!
 //! Only the background scales — the label stays put, which is what gives the
 //! press its "squish". Disabled/loading buttons drop to 60% opacity and get
-//! no hover or tap. We paint the squircle ourselves with the scale baked
-//! into the geometry (GPUI has no element transforms), and drive hover and
+//! no hover or tap. We paint the squircle ourselves with the press baked
+//! into the geometry (GPUI has no element transforms). Unlike a CSS scale,
+//! the press moves every edge in by the same amount, taken from the shorter
+//! side, so wide buttons don't pinch in more at the ends; we drive hover and
 //! press from separate springs so a quick tap that leaves the pointer
 //! hovering keeps the hover fill, exactly as framer-motion's variants do.
 
@@ -271,9 +273,10 @@ fn variant_colors(v: Variant, t: &Theme) -> (Hsla, Hsla, Hsla, Hsla, Hsla) {
     }
 }
 
-/// Paint the squircle background with a 1px inner border, scaled about the
-/// centre. Used by Button and by every other "pressable" surface that
-/// mirrored it.
+/// Paint the squircle background with a 1px inner border, pressed to
+/// `scale`: every edge moves in by the same amount (the shorter side's
+/// shrink, see [`paint::press_inset`]) and the corner radius with it. Used
+/// by Button and by every other "pressable" surface that mirrored it.
 pub fn paint_squircle_bg(
     bounds: gpui_kit::gpui::Bounds<gpui_kit::gpui::Pixels>,
     radius: f32,
@@ -283,42 +286,24 @@ pub fn paint_squircle_bg(
     border: Hsla,
     window: &mut Window,
 ) {
+    let d = paint::press_inset(bounds, scale);
+    let outer = paint::inset(bounds, d);
+    let radius = (radius - d).max(0.0);
     if fill.a > 0.001 {
-        let inner = paint::inset(bounds, if border.a > 0.001 { 1.0 } else { 0.0 });
+        let inner = paint::inset(outer, if border.a > 0.001 { 1.0 } else { 0.0 });
         let r = if border.a > 0.001 { (radius - 1.0).max(0.0) } else { radius };
-        let scaled_inner = scale_about(inner, bounds, scale);
-        if let Some(p) = paint::squircle(scaled_inner, r, smoothing, 1.0) {
+        if let Some(p) = paint::squircle(inner, r, smoothing, 1.0) {
             window.paint_path(p, fill);
         }
     }
     if border.a > 0.001 {
-        let outer = paint::scale_bounds(bounds, scale);
-        let inner = scale_about(paint::inset(bounds, 1.0), bounds, scale);
+        let inner = paint::inset(outer, 1.0);
         let mut b = PathBuilder::fill();
         paint::add_squircle(&mut b, outer, radius, smoothing, 1.0);
         paint::add_squircle(&mut b, inner, (radius - 1.0).max(0.0), smoothing, 1.0);
         if let Ok(p) = b.build() {
             window.paint_path(p, border);
         }
-    }
-}
-
-/// Scale `inner` about the centre of `outer` (keeps a ring concentric).
-fn scale_about(
-    inner: gpui_kit::gpui::Bounds<gpui_kit::gpui::Pixels>,
-    outer: gpui_kit::gpui::Bounds<gpui_kit::gpui::Pixels>,
-    scale: f32,
-) -> gpui_kit::gpui::Bounds<gpui_kit::gpui::Pixels> {
-    let c = paint::bounds_center(outer);
-    let x0 = f32::from(inner.origin.x);
-    let y0 = f32::from(inner.origin.y);
-    let w = f32::from(inner.size.width);
-    let h = f32::from(inner.size.height);
-    let nx = c.x + (x0 - c.x) * scale;
-    let ny = c.y + (y0 - c.y) * scale;
-    gpui_kit::gpui::Bounds {
-        origin: gpui_kit::gpui::point(px(nx), px(ny)),
-        size: gpui_kit::gpui::size(px(w * scale), px(h * scale)),
     }
 }
 

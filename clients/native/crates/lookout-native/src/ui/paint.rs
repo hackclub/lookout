@@ -250,6 +250,21 @@ pub fn scale_bounds_from(b: Bounds<Pixels>, scale: f32, ax: f32, ay: f32) -> Bou
     }
 }
 
+/// How much stronger an even press is than a CSS scale on the shorter side.
+/// The press scales (0.96 on buttons, 0.99 on cards…) were tuned for a CSS
+/// `scale()`, where most of what you see is the long side pinching in. With
+/// the same inset on every side that's gone, so the short side's shrink is
+/// doubled to keep the press as visible (a 36px button moves ~1.4px a side).
+const PRESS_GAIN: f32 = 2.0;
+
+/// How far each edge moves in when a surface is pressed to `scale`: the
+/// shorter side's shrink (times [`PRESS_GAIN`]), applied evenly all round,
+/// so a wide button squishes as much on its sides as on its top and bottom.
+pub fn press_inset(b: Bounds<Pixels>, scale: f32) -> f32 {
+    let short = f32::from(b.size.width).min(f32::from(b.size.height));
+    (short * (1.0 - scale) / 2.0 * PRESS_GAIN).max(0.0)
+}
+
 pub fn inset(b: Bounds<Pixels>, by: f32) -> Bounds<Pixels> {
     Bounds {
         origin: point(b.origin.x + px(by), b.origin.y + px(by)),
@@ -260,8 +275,7 @@ pub fn inset(b: Bounds<Pixels>, by: f32) -> Bounds<Pixels> {
     }
 }
 
-/// A CSS rounded box (`border-radius`, 1px border) scaled about its centre —
-/// for surfaces whose *background layer* scaled on press.
+/// A CSS rounded box (`border-radius`, 1px border) scaled about its centre.
 pub fn paint_rounded_bg(
     bounds: Bounds<Pixels>,
     radius: f32,
@@ -272,6 +286,29 @@ pub fn paint_rounded_bg(
 ) {
     let b = scale_bounds(bounds, scale);
     let r = radius * scale;
+    if fill.a > 0.001 {
+        window.paint_quad(gpui_kit::gpui::fill(b, fill).corner_radii(px(r)));
+    }
+    if border.a > 0.001 {
+        window.paint_quad(
+            gpui_kit::gpui::quad(b, px(r), gpui_kit::gpui::transparent_black(), px(1.0), border, Default::default()),
+        );
+    }
+}
+
+/// A rounded box (`border-radius`, 1px border) pressed to `scale`: every
+/// edge moves in by the same [`press_inset`], and the radius by as much.
+pub fn paint_pressed_rounded_bg(
+    bounds: Bounds<Pixels>,
+    radius: f32,
+    scale: f32,
+    fill: gpui_kit::gpui::Hsla,
+    border: gpui_kit::gpui::Hsla,
+    window: &mut gpui_kit::gpui::Window,
+) {
+    let d = press_inset(bounds, scale);
+    let b = inset(bounds, d);
+    let r = (radius - d).max(0.0);
     if fill.a > 0.001 {
         window.paint_quad(gpui_kit::gpui::fill(b, fill).corner_radii(px(r)));
     }

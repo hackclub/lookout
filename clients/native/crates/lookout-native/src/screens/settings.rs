@@ -795,7 +795,7 @@ fn pressable_row(id: ElementId, selected_fill: Hsla, window: &mut Window, cx: &m
         .w_full()
         .rounded(px(8.0))
         .child(
-            canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_rounded_bg(bounds, 8.0, scale, fill, theme::transparent(), window))
+            canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_pressed_rounded_bg(bounds, 8.0, scale, fill, theme::transparent(), window))
                 .absolute()
                 .inset_0(),
         )
