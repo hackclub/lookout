@@ -522,12 +522,13 @@ pub fn oklab_mix_black(c: Hsla, p: f32) -> Hsla {
     .into()
 }
 
-/// Text on an accent fill: whichever of black and white reads better.
-/// (`accentForeground` in linuxChrome.ts switched at luminance 0.45, which
-/// put white on mid-tone accents such as GNOME's orange at under 3:1.)
+/// Text on an accent fill: white, as macOS and GNOME draw it, with the
+/// fill darkened to AA by [`readable_fill`] where it needs it. Black only
+/// when darkening would turn the accent muddy (yellow, light orange).
+/// Picking whichever of black and white had more contrast put black text
+/// on GNOME's own blue (#3584e4), which no native control does.
 pub fn accent_foreground(accent: Hsla) -> Hsla {
-    let (b, w) = (hex(0x000000), hex(0xffffff));
-    if contrast_ratio(b, accent) > contrast_ratio(w, accent) { b } else { w }
+    readable_pill(accent).1
 }
 
 // ── Contrast (WCAG 2.x) ────────────────────────────────────────────────
@@ -771,6 +772,10 @@ mod tests {
             let t = Theme::light().with_accent(Some(hex(accent)));
             let fill = readable_fill(t.accent, t.on_accent);
             assert!(contrast_ratio(t.on_accent, fill) >= 4.5, "accent {accent:06x}");
+        }
+        // Every GNOME accent keeps white text, as libadwaita draws it.
+        for accent in [0x3584e4, 0x2190a4, 0x3a944a, 0xc88800, 0xed5b00, 0xe62d42, 0xd56199, 0x9141ac, 0x6f8396] {
+            assert_eq!(accent_foreground(hex(accent)), hex(0xffffff), "accent {accent:06x}");
         }
     }
 
