@@ -156,6 +156,31 @@ Response:
 - `trackedSeconds` — tamper-proof tracked time. Sessions created post-0.2.1 use **credit mode**: each capture that arrives within ±30s of the streak-anchored expected mark credits 60s; out-of-window captures reset the streak. Pre-0.2.1 sessions remain on **bucket mode** (`distinct confirmed minute buckets × 60`). Mode is sticky per session — clients that send `capturedAt` flip the session to credit on first upload.
 - `screenshotCount` — number of confirmed screenshots
 
+### Get many sessions at once
+
+When you list several of a user's sessions, ask for them together rather than sending one request each:
+
+```bash
+curl -X POST https://lookout.hackclub.com/api/internal/sessions/batch \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"sessionIds": ["137c9b2f-3e74-4c25-a295-b41bd4d2c5d1", "8f2d6c1e-5b4a-4c3d-9e8f-7a6b5c4d3e2f"]}'
+```
+
+Response:
+```json
+{
+  "sessions": [
+    { "session": { "id": "137c9b2f-3e74-4c25-a295-b41bd4d2c5d1", "status": "complete", "...": "..." }, "trackedSeconds": 123, "screenshotCount": 45 }
+  ],
+  "missing": ["8f2d6c1e-5b4a-4c3d-9e8f-7a6b5c4d3e2f"]
+}
+```
+
+- Each entry in `sessions` is exactly what [Get session info](#get-session-info) returns for that session, in the order you asked.
+- `missing` lists ids that don't exist or belong to another program - the cases where the single request answers 404.
+- Up to 100 ids per request, with no duplicates.
+
 ### Force-stop a session
 
 ```bash

@@ -79,6 +79,92 @@ describe("GET /api/internal/sessions/:id", () => {
   });
 });
 
+describe("POST /api/internal/sessions/batch", () => {
+  async function batch(key: string, sessionIds: string[]) {
+    return app.inject({
+      method: "POST",
+      url: "/api/internal/sessions/batch",
+      headers: { "x-api-key": key },
+      payload: { sessionIds },
+    });
+  }
+
+  it("answers for each session as the single GET does", async () => {
+    const key = await programKey();
+    const a = await createSession(key);
+    const b = await createSession(key);
+
+    const r = await batch(key, [a.sessionId, b.sessionId]);
+    expect(r.statusCode).toBe(200);
+
+    const body = r.json();
+    expect(body.missing).toEqual([]);
+    expect(body.sessions.map((x: any) => x.session.id)).toEqual([a.sessionId, b.sessionId]);
+
+    for (const { sessionId } of [a, b]) {
+      const single = await app.inject({
+        method: "GET",
+        url: `/api/internal/sessions/${sessionId}`,
+        headers: { "x-api-key": key },
+      });
+      expect(body.sessions.find((x: any) => x.session.id === sessionId)).toEqual(single.json());
+    }
+  });
+
+  it("counts each session's own screenshots", async () => {
+    const key = await programKey();
+    const a = await createSession(key);
+    const b = await createSession(key);
+
+    const shot = (sessionId: string, minute: number, clientInfo: string | null) => ({
+      sessionId,
+      r2Key: `screenshots/${sessionId}/${minute}.jpg`,
+      minuteBucket: minute,
+      confirmed: true,
+      requestedAt: new Date(Date.UTC(2025, 5, 1, 12, minute)),
+      clientInfo,
+    });
+    await db.insert(schema.screenshots).values([
+      shot(a.sessionId, 0, "Lookout Desktop/1.0 (first)"),
+      shot(a.sessionId, 1, "Lookout Desktop/1.0 (later)"),
+      shot(a.sessionId, 2, null),
+      shot(b.sessionId, 0, null),
+    ]);
+
+    const body = (await batch(key, [a.sessionId, b.sessionId])).json();
+    const byId = new Map(body.sessions.map((x: any) => [x.session.id, x]));
+
+    expect(byId.get(a.sessionId)).toMatchObject({ screenshotCount: 3, clientInfo: "Lookout Desktop/1.0 (first)" });
+    expect(byId.get(b.sessionId)).toMatchObject({ screenshotCount: 1, clientInfo: null });
+  });
+
+  it("lists another program's sessions and unknown ids as missing, without their tokens", async () => {
+    const owner = await programKey();
+    const other = await programKey();
+    const mine = await createSession(other);
+    const theirs = await createSession(owner);
+    const unknown = "00000000-0000-4000-8000-000000000000";
+
+    const r = await batch(other, [mine.sessionId, theirs.sessionId, unknown]);
+    expect(r.statusCode).toBe(200);
+
+    const body = r.json();
+    expect(body.sessions.map((x: any) => x.session.id)).toEqual([mine.sessionId]);
+    expect(body.missing).toEqual([theirs.sessionId, unknown]);
+    expect(r.body).not.toContain(theirs.token);
+  });
+
+  it("refuses an empty or oversized batch", async () => {
+    const key = await programKey();
+    expect((await batch(key, [])).statusCode).toBe(400);
+
+    const tooMany = Array.from({ length: 101 }, (_, i) =>
+      `00000000-0000-4000-8000-${i.toString().padStart(12, "0")}`,
+    );
+    expect((await batch(key, tooMany)).statusCode).toBe(400);
+  });
+});
+
 describe("POST /api/internal/sessions/:id/stop", () => {
   it("404s another program and leaves the session running", async () => {
     const owner = await programKey();
