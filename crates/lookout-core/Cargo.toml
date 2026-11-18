@@ -76,6 +76,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     # GetCurrentProcess, for the GDI-object leak check in test_support.
     "Win32_System_Threading",
+    # A UI Automation property condition's value (caret.rs).
+    "Win32_System_Ole",
+    "Win32_System_Variant",
     # Per-monitor DPI awareness while sampling the pointer (activity.rs).
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
