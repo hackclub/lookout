@@ -11,6 +11,7 @@ use gpui_kit::gpui::{
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render, RenderImage, ScrollHandle,
     SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
+use lookout_core::screencast::{Cast, StreamInfo};
 use lookout_core::sources::CaptureSourceList;
 use lookout_core::{CaptureSource, PickedSource};
 
@@ -22,6 +23,7 @@ use crate::theme::{self, Theme, eid, theme};
 use crate::ui::a11y::prelude::*;
 use crate::ui::button::{BtnSize, Button, PressState, Variant, press_values};
 use crate::ui::feedback::error_page;
+use crate::ui::icon::Icon;
 use crate::ui::paint;
 use crate::ui::primitives::edge_faded;
 use crate::ui::spinner::{Spinner, SpinnerSize};
@@ -33,6 +35,18 @@ pub enum Tab {
     Windows,
     Cameras,
     Cast,
+}
+
+/// What a press of a Wayland share button asks the portal for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CastMode {
+    /// A fresh pick, replacing what is shared now.
+    Replace,
+    /// One more pick, on top of what is shared.
+    Add,
+    /// Reopen the remembered shares (restore tokens): no dialog where the
+    /// desktop allows it.
+    Restore,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -183,6 +197,10 @@ pub struct SourcePicker {
     current_row: Option<Sel>,
     /// A [`Self::relist`] is in flight.
     relisting: bool,
+    /// Wayland: the live portal streams, in the order they were shared.
+    casts: Vec<StreamInfo>,
+    /// Wayland: a portal request is open (its dialog is up).
+    casting: Option<CastMode>,
 }
 
 impl EventEmitter<PickerEvent> for SourcePicker {}
@@ -226,6 +244,8 @@ impl SourcePicker {
             tab_focus: HashMap::new(),
             current_row: None,
             relisting: false,
+            casts: Vec::new(),
+            casting: None,
         };
         p.refresh(cx);
         p
@@ -419,6 +439,11 @@ impl SourcePicker {
 
     fn forget_casts_where(&mut self, dead: impl Fn(u32) -> bool, cx: &mut Context<Self>) {
         let gone = |s: &Sel| matches!(s, Sel::Pipewire(id) if dead(*id));
+        let before = self.casts.len();
+        self.casts.retain(|c| !dead(c.node_id));
+        if self.casts.len() != before {
+            cx.notify();
+        }
         if self.selected.iter().any(gone) {
             let next = self.selected.iter().filter(|s| !gone(s)).cloned().collect();
             self.set_selected(next);
@@ -452,29 +477,50 @@ impl SourcePicker {
         cx.emit(PickerEvent::Submit(self.selected.clone()));
     }
 
-    fn cast(&mut self, add: bool, cx: &mut Context<Self>) {
+    fn cast(&mut self, mode: CastMode, cx: &mut Context<Self>) {
+        if self.casting.is_some() {
+            return;
+        }
+        let tokens: Vec<String> = match mode {
+            CastMode::Restore => store(cx).saved_casts.iter().map(|c| c.token.clone()).collect(),
+            _ => vec![],
+        };
+        if mode == CastMode::Restore && tokens.is_empty() {
+            return;
+        }
+        self.casting = Some(mode);
+        cx.notify();
         let core = app::state(cx).core.clone();
         let fut = app::tokio(cx, async move {
-            if add { core.add_screencast().await } else { core.request_screencast().await }
+            match mode {
+                CastMode::Replace => core.request_screencast(None).await.map(|c| vec![c]),
+                CastMode::Add => core.add_screencast(None).await.map(|c| vec![c]),
+                CastMode::Restore => {
+                    // One portal session per remembered share, as they were
+                    // made; the first replaces whatever is open.
+                    let mut out: Vec<Cast> = Vec::new();
+                    for tok in tokens {
+                        let res = if out.is_empty() {
+                            core.request_screencast(Some(tok)).await
+                        } else {
+                            core.add_screencast(Some(tok)).await
+                        };
+                        match res {
+                            Ok(c) => out.push(c),
+                            Err(e) if out.is_empty() => return Err(e),
+                            Err(e) => log::warn!("[sources] reopening a remembered share failed: {e}"),
+                        }
+                    }
+                    Ok(out)
+                }
+            }
         });
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
+                this.casting = None;
                 match res {
-                    Ok(streams) if !streams.is_empty() => {
-                        let new: Vec<Sel> = streams.iter().map(|s| Sel::Pipewire(s.node_id)).collect();
-                        if add {
-                            let mut next = this.selected.clone();
-                            for s in new {
-                                if !next.contains(&s) {
-                                    next.push(s);
-                                }
-                            }
-                            this.set_selected(next);
-                        } else {
-                            this.set_selected(new);
-                        }
-                    }
+                    Ok(casts) if casts.iter().any(|c| !c.streams.is_empty()) => this.took_casts(mode, casts, cx),
                     Ok(_) => {}
                     Err(e) => {
                         let cancelled = regex_lite_cancel(&e);
@@ -496,6 +542,61 @@ impl SourcePicker {
             .ok();
         })
         .detach();
+    }
+
+    /// The portal handed streams over: list and select them, and remember
+    /// the shares that can be reopened without asking.
+    fn took_casts(&mut self, mode: CastMode, casts: Vec<Cast>, cx: &mut Context<Self>) {
+        let streams: Vec<StreamInfo> = casts.iter().flat_map(|c| c.streams.iter().cloned()).collect();
+        let saved: Vec<crate::store::SavedCast> = casts
+            .iter()
+            .filter_map(|c| c.restore_token.clone().map(|token| crate::store::SavedCast { token, streams: c.streams.clone() }))
+            .collect();
+        let new: Vec<Sel> = streams.iter().map(|s| Sel::Pipewire(s.node_id)).collect();
+        if mode == CastMode::Add {
+            self.casts.extend(streams);
+            let mut next: Vec<Sel> = self.selected.iter().filter(|s| matches!(s, Sel::Pipewire(_))).cloned().collect();
+            for s in new {
+                if !next.contains(&s) {
+                    next.push(s);
+                }
+            }
+            self.set_selected(next);
+            store_mut(cx).saved_casts.extend(saved);
+        } else {
+            self.casts = streams;
+            self.set_selected(new);
+            store_mut(cx).saved_casts = saved;
+        }
+        store(cx).save();
+    }
+
+    /// Take one stream out of the share. Its portal session closes too
+    /// (leaving the system's sharing indicator) once none of its streams is
+    /// listed — unless the open recording is still capturing from it, in
+    /// which case it goes when the recording does.
+    fn remove_cast(&mut self, node: u32, cx: &mut Context<Self>) {
+        self.casts.retain(|c| c.node_id != node);
+        let next = self.selected.iter().filter(|s| **s != Sel::Pipewire(node)).cloned().collect();
+        self.set_selected(next);
+        let mut keep: Vec<u32> = self.casts.iter().map(|c| c.node_id).collect();
+        if let Some(lookout_core::RecordingSource::Screen { sources }) = app::state(cx).recorder.read(cx).state.as_ref().map(|s| &s.source) {
+            keep.extend(sources.iter().filter_map(|s| if let CaptureSource::PipeWire { id } = s { Some(*id) } else { None }));
+        }
+        app::state(cx).core.keep_screencast_nodes(&keep);
+        // The remembered shares follow: one whose streams are all gone is
+        // forgotten, so "Share the same again" brings back what's listed.
+        let live: Vec<u32> = self.casts.iter().map(|c| c.node_id).collect();
+        store_mut(cx).saved_casts.retain(|c| c.streams.iter().any(|s| live.contains(&s.node_id)));
+        store(cx).save();
+        cx.notify();
+    }
+
+    /// "Screen", "Window 2": a cast's name, numbered when there's more than
+    /// one of its kind. The portal never says which screen or window it is.
+    fn cast_name(&self, node: u32) -> String {
+        let names = cast_names(&self.casts);
+        self.casts.iter().position(|c| c.node_id == node).map(|i| names[i].clone()).unwrap_or_else(|| "Screen or window".into())
     }
 
     /// The rows of the current tab, in order (what the list shows).
@@ -624,7 +725,7 @@ impl SourcePicker {
                 .and_then(|s| s.windows.iter().find(|w| w.id == *id))
                 .map(|w| if w.app_name.is_empty() { w.title.clone() } else { w.app_name.clone() })
                 .unwrap_or_else(|| "Window".into()),
-            Sel::Pipewire(_) => "Cast stream".into(),
+            Sel::Pipewire(id) => self.cast_name(*id),
             Sel::Camera(id) => self
                 .cameras
                 .iter()
@@ -641,7 +742,7 @@ impl SourcePicker {
         let n_win = src.map(|s| s.windows.len()).unwrap_or(0);
         let mut tabs = Vec::new();
         if self.is_wayland {
-            tabs.push((Tab::Cast, "Cast ".to_string()));
+            tabs.push((Tab::Cast, "Screens & windows".to_string()));
         } else {
             tabs.push((Tab::Screens, format!("Screens ({n_mon})")));
             if n_win > 0 {
@@ -815,7 +916,8 @@ impl Render for SourcePicker {
             window.request_animation_frame();
         }
 
-        let has_tabs = windows_len > 0 || !self.cameras.is_empty() || self.is_wayland;
+        // Wayland's one share tab only shows beside the cameras one.
+        let has_tabs = windows_len > 0 || !self.cameras.is_empty();
         let camera_selected = self.selected.iter().any(|s| matches!(s, Sel::Camera(_)));
 
         // ── Preview box ───────────────────────────────────────────────
@@ -1034,6 +1136,7 @@ impl SourcePicker {
             row = row.child(div().absolute().inset_0().opacity(o).child(el));
         }
         let empty_o = self.empty_text.get();
+        let cta = (self.is_wayland && self.tab == Tab::Cast && self.casts.is_empty() && !camera_selected).then(|| self.cast_cta(cx));
         let empty = (empty_o > 0.001 || !any_tile).then(|| {
             div()
                 .absolute()
@@ -1042,13 +1145,15 @@ impl SourcePicker {
                 .items_center()
                 .justify_center()
                 .opacity(empty_o)
-                .child(
-                    div().ts(13.0).text_color(t.text_quaternary).text_center().child(if camera_selected {
-                        "Starting camera preview..."
-                    } else {
-                        "Select a source below"
-                    }),
-                )
+                .child(match cta {
+                    Some(cta) => cta,
+                    None => div()
+                        .ts(13.0)
+                        .text_color(t.text_quaternary)
+                        .text_center()
+                        .child(if camera_selected { "Starting camera preview..." } else { "Select a source below" })
+                        .into_any_element(),
+                })
         });
 
         // Window hover cards (top-right). Enter scales from 0.92 with the
@@ -1297,78 +1402,167 @@ impl SourcePicker {
         out
     }
 
+    /// Wayland, nothing shared: the empty preview box asks to be filled.
+    fn cast_cta(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let loading = self.casting == Some(CastMode::Replace);
+        Button::empty("cast-first")
+            .aria_label("Choose a screen or window")
+            .variant(Variant::Primary)
+            .size(BtnSize::Md)
+            .gap(6.0)
+            .loading(loading)
+            .disabled(self.casting.is_some())
+            .when(!loading, |b| b.child(Icon::PlusBold.el(14.0, theme::hex(0xffffff))))
+            .child("Choose screen or window")
+            .on_click(cx.listener(|p, _, _, cx| p.cast(CastMode::Replace, cx)))
+            .into_any_element()
+    }
+
+    /// Wayland: what is shared, one row each, and a way to add more.
     fn cast_tab(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let pipewire: Vec<u32> = self.selected.iter().filter_map(|s| if let Sel::Pipewire(id) = s { Some(*id) } else { None }).collect();
-        let e1 = cx.entity();
-        let e2 = cx.entity();
-        let e3 = cx.entity();
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .size_full()
-            .gap(px(12.0))
-            .p(px(20.0))
-            .child(
-                div()
-                    .text_center()
-                    .ts(13.0)
-                    .text_color(t.text_secondary)
-                    .a11y_text("cast-note", "Wayland requires explicit permission to capture screens or windows.")
-                    .child("Wayland requires explicit permission to capture screens or windows."),
-            );
-        if !pipewire.is_empty() {
-            let mut rows = div().w_full().flex().flex_col().gap(px(4.0)).my(px(8.0));
-            for (i, _) in pipewire.iter().enumerate() {
-                rows = rows.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .p(px(12.0))
-                        .bg(t.bg_selected)
-                        .border_1()
-                        .border_color(t.border_selected)
-                        .rounded(px(8.0))
-                        .w_full()
-                        .child(radio(true, t))
-                        .child(div().ts(13.0).w600().text_color(t.text_primary).a11y_text(("cast-stream", i), format!("Cast Stream {}, selected", i + 1)).child(format!("Cast Stream {}", i + 1))),
-                );
+        let busy = self.casting.is_some();
+        if self.casts.is_empty() {
+            // The shares from last time, drawn as the rows they'll become,
+            // and one button that brings them all back.
+            let saved: Vec<StreamInfo> = store(cx).saved_casts.iter().flat_map(|c| c.streams.iter().cloned()).collect();
+            if saved.is_empty() {
+                return div().into_any_element();
             }
-            col = col.child(rows).child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .w_full()
-                    .child(
-                        Button::new("cast-new", "Select new sets of windows")
+            let names = cast_names(&saved);
+            let mut col = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(div().px(px(4.0)).pb(px(2.0)).ts(12.0).w500().text_color(t.text_tertiary).child("Last time"));
+            for (i, (c, name)) in saved.iter().zip(names).enumerate() {
+                col = col.child(cast_row(eid("saved-cast", i.to_string()), c, name, false, t));
+            }
+            return col
+                .child(
+                    div().mt(px(4.0)).child(
+                        Button::new("cast-restore", "Share these again")
                             .variant(Variant::Secondary)
                             .size(BtnSize::Md)
-                            .flex_1()
-                            .on_click(move |_, _, cx| e1.update(cx, |p, cx| p.cast(false, cx))),
-                    )
-                    .child(
-                        Button::new("cast-add", "+")
-                            .aria_label("Add more screens or windows")
-                            .variant(Variant::Secondary)
-                            .size(BtnSize::Md)
-                            .fixed(40.0, 34.0)
-                            .padding(0.0, 0.0)
-                            .on_click(move |_, _, cx| e2.update(cx, |p, cx| p.cast(true, cx))),
+                            .full_width()
+                            .loading(self.casting == Some(CastMode::Restore))
+                            .disabled(busy)
+                            .on_click(cx.listener(|p, _, _, cx| p.cast(CastMode::Restore, cx))),
                     ),
-            );
-        } else {
-            col = col.child(
-                Button::new("cast-first", "+ Add new Screen/Window")
-                    .aria_label("Add new screen or window")
-                    .variant(Variant::Secondary)
-                    .size(BtnSize::Md)
-                    .on_click(move |_, _, cx| e3.update(cx, |p, cx| p.cast(false, cx))),
+                )
+                .into_any_element();
+        }
+        let mut rows = div().w_full().flex().flex_col().gap(px(4.0));
+        for c in self.casts.clone() {
+            let node = c.node_id;
+            let name = self.cast_name(node);
+            rows = rows.child(
+                cast_row(eid("cast-row", node.to_string()), &c, name.clone(), true, t).child(
+                    Button::empty(eid("cast-remove", node.to_string()))
+                        .aria_label(format!("Stop sharing {name}"))
+                        .tooltip("Stop sharing")
+                        .variant(Variant::Ghost)
+                        .size(BtnSize::Sm)
+                        .fixed(28.0, 28.0)
+                        .padding(0.0, 0.0)
+                        .disabled(busy)
+                        .child(Icon::XBold.el(12.0, t.text_secondary))
+                        .on_click(cx.listener(move |p, _, _, cx| p.remove_cast(node, cx))),
+                ),
             );
         }
-        col.into_any_element()
+        rows.child(
+            Button::empty("cast-add")
+                .aria_label("Add a screen or window")
+                .variant(Variant::Ghost)
+                .size(BtnSize::Md)
+                .full_width()
+                .gap(6.0)
+                .loading(self.casting == Some(CastMode::Add))
+                .disabled(busy)
+                .when(self.casting != Some(CastMode::Add), |b| b.child(Icon::PlusBold.el(12.0, t.text_secondary)))
+                .child("Add")
+                .on_click(cx.listener(|p, _, _, cx| p.cast(CastMode::Add, cx))),
+        )
+        .into_any_element()
     }
+}
+
+/// "Screen", "Window 2": each stream's name, numbered when there's more
+/// than one of its kind.
+fn cast_names(streams: &[StreamInfo]) -> Vec<String> {
+    let kind = |c: &StreamInfo| cast_kind(c.source_type.as_deref());
+    streams
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let same = streams.iter().filter(|o| kind(o) == kind(c)).count();
+            if same > 1 {
+                let n = streams[..=i].iter().filter(|o| kind(o) == kind(c)).count();
+                format!("{} {n}", kind(c))
+            } else {
+                kind(c).to_string()
+            }
+        })
+        .collect()
+}
+
+/// One stream as a row: its kind's icon, name and size. Shared rows are
+/// drawn selected; remembered ones plain.
+fn cast_row(id: ElementId, c: &StreamInfo, name: String, shared: bool, t: &Theme) -> gpui_kit::gpui::Stateful<gpui_kit::gpui::Div> {
+    let sub = c.size.map(|(w, h)| format!("{w}×{h}")).unwrap_or_default();
+    let (fill, border, icon) =
+        if shared { (t.bg_selected, t.border_selected, t.icon_selected) } else { (t.bg_surface, t.border_default, t.text_tertiary) };
+    div()
+        .id(id)
+        .role(Role::Group)
+        .aria_label(name.clone())
+        .when(!sub.is_empty(), |d| d.aria_description(sub.clone()))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .pl(px(12.0))
+        .pr(px(6.0))
+        .h(px(46.0))
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .rounded(px(8.0))
+        .w_full()
+        .child(cast_icon(c.source_type.as_deref()).el(20.0, icon))
+        .child(div().ts(13.0).w600().text_color(t.text_primary).child(name))
+        .child(div().flex_1().ts(12.0).text_color(t.text_tertiary).child(sub))
+}
+
+fn cast_icon(source_type: Option<&str>) -> Icon {
+    if source_type == Some("window") { Icon::AppWindow } else { Icon::Monitor }
+}
+
+/// A portal stream's kind as the UI names it.
+fn cast_kind(source_type: Option<&str>) -> &'static str {
+    match source_type {
+        Some("monitor") => "Screen",
+        Some("window") => "Window",
+        Some("virtual") => "Virtual screen",
+        _ => "Shared view",
+    }
+}
+
+/// "1 screen and 2 windows".
+fn cast_summary(streams: &[StreamInfo]) -> String {
+    let count = |k: &str| streams.iter().filter(|s| s.source_type.as_deref() == Some(k)).count();
+    let (screens, windows) = (count("monitor"), count("window"));
+    let other = streams.len() - screens - windows;
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let parts: Vec<String> = [
+        (screens > 0).then(|| plural(screens, "screen", "screens")),
+        (windows > 0).then(|| plural(windows, "window", "windows")),
+        (other > 0).then(|| plural(other, "other view", "other views")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    parts.join(" and ")
 }
 
 fn trim_float(f: f32) -> String {

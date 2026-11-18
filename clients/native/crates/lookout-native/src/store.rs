@@ -104,6 +104,15 @@ pub struct PendingUpdate {
     pub notified: bool,
 }
 
+/// One remembered portal share: the token that reopens it and what it held
+/// (node ids go stale across launches; only the kinds and sizes are shown).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SavedCast {
+    pub token: String,
+    pub streams: Vec<lookout_core::screencast::StreamInfo>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Persisted {
@@ -117,6 +126,10 @@ pub struct Persisted {
     pub blacklisted_apps: Vec<String>,
     /// `lookout-last-monitor-selection`
     pub last_monitor_selection: Vec<u32>,
+    /// Wayland: the portal shares Lookout may reopen without asking again
+    /// (their restore tokens), from the last time screens or windows were
+    /// picked. Native only.
+    pub saved_casts: Vec<SavedCast>,
     /// `lookout-perm-screen` / `lookout-perm-camera`
     pub perm_screen: bool,
     pub perm_camera: bool,

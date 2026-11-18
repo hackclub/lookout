@@ -19,6 +19,16 @@ pub struct StreamInfo {
     pub size: Option<(i32, i32)>,
 }
 
+/// What a portal session handed back: its streams, and — where the portal
+/// supports persistence (ScreenCast v4+: GNOME, KDE, recent wlroots) — a
+/// token that reopens the same sources next time without asking again.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Cast {
+    pub streams: Vec<StreamInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token: Option<String>,
+}
+
 /// Emitted to the webview when the compositor tears a screencast session down
 /// under us — the user hitting "Stop sharing" in the system indicator. From
 /// that moment every capture returns nothing, so the UI must stop claiming to
@@ -80,7 +90,8 @@ static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 async fn portal_session_task(
     core: Arc<Core>,
     id: u64,
-    result_tx: tokio::sync::oneshot::Sender<Result<(Vec<StreamInfo>, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String>>,
+    restore_token: Option<String>,
+    result_tx: tokio::sync::oneshot::Sender<Result<(Cast, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String>>,
     close_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     use ashpd::desktop::screencast::{
@@ -114,7 +125,7 @@ async fn portal_session_task(
 
     // Past this point the session exists on the portal side, so every bail-out
     // has to close it — a dismissed picker used to leave one behind too.
-    let started: Result<(Vec<StreamInfo>, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String> = async {
+    let started: Result<(Cast, std::os::fd::RawFd, Option<std::os::fd::RawFd>), String> = async {
         // The cursor stays out of the pixels either way. "Metadata" also
         // reports where it is with each buffer — on Wayland the only way
         // to learn the pointer position (pw_cursor.rs) — where the portal
@@ -124,7 +135,11 @@ async fn portal_session_task(
             _ => CursorMode::Hidden,
         };
 
-        // Ask user to select sources (multiple selection enabled)
+        // Ask user to select sources (multiple selection enabled). Ask the
+        // portal to remember the choice until the user revokes it: with a
+        // restore token the next session reopens the same sources without
+        // the dialog (or with it prefilled, depending on the desktop).
+        // Portals older than v4 ignore both options and just ask.
         proxy
             .select_sources(
                 &session,
@@ -132,7 +147,8 @@ async fn portal_session_task(
                     .set_cursor_mode(cursor_mode)
                     .set_sources(SourceType::Monitor | SourceType::Window)
                     .set_multiple(true)
-                    .set_persist_mode(PersistMode::DoNot),
+                    .set_persist_mode(PersistMode::ExplicitlyRevoked)
+                    .set_restore_token(restore_token.as_deref()),
             )
             .await
             .map_err(|e| format!("Failed to select sources: {}", e))?;
@@ -178,11 +194,12 @@ async fn portal_session_task(
             None
         };
 
-        Ok((streams, fd.into_raw_fd(), cursor_fd))
+        let cast = Cast { streams, restore_token: response.restore_token().map(str::to_owned) };
+        Ok((cast, fd.into_raw_fd(), cursor_fd))
     }
     .await;
 
-    let (streams, raw_fd, cursor_raw_fd) = match started {
+    let (cast, raw_fd, cursor_raw_fd) = match started {
         Ok(v) => v,
         Err(e) => {
             let _ = session.close().await;
@@ -191,10 +208,13 @@ async fn portal_session_task(
         }
     };
 
-    let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
-    lookout_session::log_line!("[screencast] session {id} started, nodes {node_ids:?}");
+    let node_ids: Vec<u32> = cast.streams.iter().map(|s| s.node_id).collect();
+    lookout_session::log_line!(
+        "[screencast] session {id} started, nodes {node_ids:?}, persistent: {}",
+        cast.restore_token.is_some()
+    );
 
-    if result_tx.send(Ok((streams, raw_fd, cursor_raw_fd))).is_err() {
+    if result_tx.send(Ok((cast, raw_fd, cursor_raw_fd))).is_err() {
         // The caller walked away (command cancelled). Don't leave a cast
         // running for nobody, and close the fds we just took ownership of.
         use std::os::fd::FromRawFd;
@@ -252,10 +272,11 @@ async fn portal_session_task(
 #[cfg(target_os = "linux")]
 async fn open_portal_session(
     core: Arc<Core>,
+    restore_token: Option<String>,
 ) -> Result<
     (
         u64,
-        Vec<StreamInfo>,
+        Cast,
         std::os::fd::OwnedFd,
         Option<std::os::fd::OwnedFd>,
         tokio::sync::oneshot::Sender<()>,
@@ -270,15 +291,15 @@ async fn open_portal_session(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
 
-    tokio::spawn(portal_session_task(core, id, result_tx, close_rx));
+    tokio::spawn(portal_session_task(core, id, restore_token, result_tx, close_rx));
 
     match result_rx.await {
-        Ok(Ok((streams, raw_fd, cursor_raw_fd))) => {
+        Ok(Ok((cast, raw_fd, cursor_raw_fd))) => {
             // SAFETY: the task handed ownership of these fds over the
             // channel and gave up its own claim to them.
             let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
             let cursor_fd = cursor_raw_fd.map(|c| unsafe { std::os::fd::OwnedFd::from_raw_fd(c) });
-            Ok((id, streams, fd, cursor_fd, close_tx))
+            Ok((id, cast, fd, cursor_fd, close_tx))
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err("Screencast portal task ended unexpectedly".to_string()),
@@ -335,17 +356,20 @@ impl Core {
     }
 
     /// Replace all existing screencast sources with a fresh portal session.
+    /// `restore_token` (from an earlier [`Cast`]) reopens what was shared
+    /// then, skipping the portal's dialog where the desktop allows.
     /// Linux only; elsewhere it fails with a fixed message.
-    pub async fn request_screencast(self: &Arc<Self>) -> Result<Vec<StreamInfo>, String> {
+    pub async fn request_screencast(self: &Arc<Self>, restore_token: Option<String>) -> Result<Cast, String> {
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = restore_token;
             Err("Screencast portal is only supported on Linux".into())
         }
         #[cfg(target_os = "linux")]
         {
             let state = self;
-            let (id, streams, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
-            let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
+            let (id, cast, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self), restore_token).await?;
+            let node_ids: Vec<u32> = cast.streams.iter().map(|s| s.node_id).collect();
 
             if let Ok(mut sessions) = state.screencast_sessions.lock() {
                 // Replace: dropping the old handles closes their portal sessions and
@@ -356,7 +380,7 @@ impl Core {
                 sessions.push(ScreencastSession {
                     id,
                     node_ids,
-                    streams: streams.clone(),
+                    streams: cast.streams.clone(),
                     fd,
                     cursor_fd,
                     close_tx: Some(close_tx),
@@ -364,7 +388,7 @@ impl Core {
             }
             rebuild_fd_map(state);
 
-            Ok(streams)
+            Ok(cast)
         }
     }
 
@@ -372,23 +396,24 @@ impl Core {
     /// previously selected streams). This lets users incrementally build up their
     /// source list even on DEs where the portal dialog doesn't support multi-select.
     /// Linux only; elsewhere it fails with a fixed message.
-    pub async fn add_screencast(self: &Arc<Self>) -> Result<Vec<StreamInfo>, String> {
+    pub async fn add_screencast(self: &Arc<Self>, restore_token: Option<String>) -> Result<Cast, String> {
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = restore_token;
             Err("Screencast portal is only supported on Linux".into())
         }
         #[cfg(target_os = "linux")]
         {
             let state = self;
-            let (id, streams, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self)).await?;
-            let node_ids: Vec<u32> = streams.iter().map(|s| s.node_id).collect();
+            let (id, cast, fd, cursor_fd, close_tx) = open_portal_session(Arc::clone(self), restore_token).await?;
+            let node_ids: Vec<u32> = cast.streams.iter().map(|s| s.node_id).collect();
 
             // Append — keep existing sessions, add the new one
             if let Ok(mut sessions) = state.screencast_sessions.lock() {
                 sessions.push(ScreencastSession {
                     id,
                     node_ids,
-                    streams: streams.clone(),
+                    streams: cast.streams.clone(),
                     fd,
                     cursor_fd,
                     close_tx: Some(close_tx),
@@ -396,7 +421,29 @@ impl Core {
             }
             rebuild_fd_map(state);
 
-            Ok(streams)
+            Ok(cast)
+        }
+    }
+
+    /// Close every session none of whose streams is in `keep` (the user
+    /// took them out of the picker), so they leave the system's sharing
+    /// indicator too. A session still holding a kept stream stays open.
+    /// A no-op off Linux.
+    pub fn keep_screencast_nodes(&self, keep: &[u32]) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = keep;
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(mut sessions) = self.screencast_sessions.lock() {
+                sessions.retain(|s| {
+                    let wanted = s.node_ids.iter().any(|n| keep.contains(n));
+                    if !wanted {
+                        lookout_session::log_line!("[screencast] releasing session {} (removed in the picker)", s.id);
+                    }
+                    wanted
+                });
+            }
+            rebuild_fd_map(self);
         }
     }
 
