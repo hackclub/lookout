@@ -41,6 +41,7 @@
 //! a tokio runtime.
 
 mod activity;
+mod caret;
 pub mod api;
 pub mod apps;
 pub mod capture;
@@ -137,6 +138,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 pub use api::{ApiError, ApiResult};
+pub use caret::set_prefer_accessibility;
 pub use capture_loop::{
     CaptureLoopHandle, CaptureLoopSpec, CapturePreviewFrame, CaptureSessionTerminated,
     CaptureSourceLost, CaptureTickError, CaptureTickResult, FrameSource,

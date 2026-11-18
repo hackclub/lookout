@@ -32,6 +32,8 @@ base64 = "0.23"
 # full JPEG copy. Already in the dependency tree via tokio/reqwest.
 bytes = "1"
 os_info = "3"
+# Reading the editor's line and column off its status bar (caret.rs).
+regex = "1"
 
 [dev-dependencies]
 # `test-util` enables tokio's paused-clock (`start_paused`) so retry-backoff
@@ -50,11 +52,24 @@ objc2-av-foundation = { version = "0.3.2", features = ["AVAssetWriter", "AVAsset
 objc2-core-media = { version = "0.3.2", features = ["CMTime"] }
 objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVBuffer", "CVReturn", "CVImageBuffer"] }
 block2 = "0.6"
+# On-device text recognition of an editor's status bar strip, for the
+# caret's line and column (caret.rs). A system framework.
+objc2-vision = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-graphics", "objc2-core-foundation", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "VNRequest", "VNTypes"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    # The caret's line and column (caret.rs): UI Automation for text
+    # controls, on-device OCR of an editor's status bar.
+    "Win32_UI_Accessibility",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Globalization",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Foundation_Collections",
     # Clip encoding: hardware H.264 via the Media Foundation sink writer.
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",

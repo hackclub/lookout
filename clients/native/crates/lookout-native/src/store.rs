@@ -124,6 +124,10 @@ pub struct Persisted {
     /// only (no Tauri key): false for everyone who passed the older page,
     /// so they see it once more.
     pub perm_accessibility: bool,
+    /// Settings → "Prefer accessibility": read VS Code's line and column
+    /// through accessibility rather than OCR (lookout-core caret.rs).
+    /// Native only. Off by default.
+    pub prefer_accessibility: bool,
     /// `onboardingShown`: the onboarding was finished (or skipped through
     /// to the end). Until it is, it shows at launch — for new and existing
     /// users alike. Native only.

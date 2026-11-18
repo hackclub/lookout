@@ -476,6 +476,25 @@ impl SettingsPage {
         list = list.child(menu_row("menu-advanced", Icon::WrenchFill, "Advanced", adv_desc, t, move |_, cx| {
             m3.update(cx, |s, cx| s.go(Sub::Advanced, cx))
         }));
+        // Linux reads no line and column, so there is nothing to prefer.
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            let me = cx.entity();
+            list = list.child(ToggleRow {
+                id: "menu-prefer-ax",
+                icon: Icon::LkEditorWindow,
+                title: "Prefer accessibility",
+                description: "Read VS Code's line and column exactly. VS Code may think a screen reader is on.".into(),
+                on: store(cx).prefer_accessibility,
+                t: t.clone(),
+                on_toggle: Rc::new(move |on, cx| {
+                    let st = store_mut(cx);
+                    st.prefer_accessibility = on;
+                    st.save();
+                    lookout_core::set_prefer_accessibility(on);
+                    me.update(cx, |_, cx| cx.notify());
+                }),
+            });
+        }
         if crate::updater::supported() {
             let me = cx.entity();
             list = list.child(ToggleRow {

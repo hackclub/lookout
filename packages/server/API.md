@@ -164,7 +164,7 @@ The value is best-effort: a client that can't detect part of this omits it; the 
 
 ## Interaction Metadata
 
-Native clients sample, at every clip frame (and at each upload tick), where the pointer is and what has the focus, and send the interval's samples with the confirm as `activity`. Programs read it back per capture with [`GET /api/internal/sessions/:sessionId/activity`](#get-capture-activity).
+Native clients sample, at every clip frame (and at each upload tick), where the pointer is, what has the focus and where the text cursor is in the frontmost editor, and send the interval's samples with the confirm as `activity`. Programs read it back per capture with [`GET /api/internal/sessions/:sessionId/activity`](#get-capture-activity).
 
 **Internal only**, like the JA4 fingerprint: it is never returned on a token-authenticated endpoint (the token belongs to the person being recorded, and echoing the data back would let a forger tune it). It is client-reported, so spoofable like `clientInfo` — a signal for spotting lazy cheating (a pointer that never moves, coordinates repeating exactly, a recorded window that is never in front), not proof.
 
@@ -177,7 +177,8 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
       "method": "ax",
       "cursor": { "display": 1, "x": 0.4123, "y": 0.7331, "inCapture": true },
       "frontmost": { "app": "com.microsoft.VSCode", "captured": true },
-      "windows": [{ "id": 123, "active": true }]
+      "windows": [{ "id": 123, "active": true }],
+      "caret": { "line": 128, "column": 17, "via": "ocr" }
     }
   ]
 }
@@ -189,9 +190,10 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
 | `method` | How focus was determined, i.e. how far to trust it. `ax` (macOS Accessibility, exact), `window-order` (macOS without Accessibility: the frontmost app's topmost window), `win32`, `x11` (exact). On Wayland: `gnome-shell` (via the Lookout GNOME extension), `kwin`, `hyprland`, `sway` (the compositor names the focused app exactly; whether that is a *captured* window is inferred from geometry, see `windows`), or `portal` (no compositor support: the pointer only, from the screencast stream). |
 | `cursor` | `null` when unknown. `display` is the display's id — the same id a monitor capture source uses (on Wayland, the screencast stream's PipeWire node id; a screen nobody records is named by the compositor's monitor index; with `method: "portal"` and only a window recorded, the window's stream is the "display"). `x`/`y` are 0–1 fractions of that display, rounded to 1/10000, origin top-left. `inCapture`: the pointer is over what is being recorded — on a captured display, or over a captured window (on X11, Windows and macOS: with nothing on top of it there). |
 | `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. |
+| `caret` | Absent when unknown. The text cursor's 1-based `line` and `column` in the frontmost app's editor at that instant (with a selection, where it starts). `via` says how it was read: `ax` (macOS Accessibility: native text views such as Xcode, TextEdit, BBEdit), `uia` (Windows UI Automation: Notepad, Visual Studio and other native text controls), `scintilla` (Notepad++ and other Scintilla editors, asked directly), `ax-status` / `uia-status` (VS Code and its forks with the app's opt-in "Prefer accessibility" setting on: the cursor-position status bar item's own accessibility label, exact), or `ocr` (on-device text recognition of the editor's own status bar — VS Code and its forks such as Cursor and Windsurf, JetBrains IDEs, Sublime Text, Zed — which draw their own text and can't be asked without switching them into screen-reader mode). With `ocr`, `ax-status`, `uia-status` and `scintilla` the column is the editor's own (tabs expanded as it shows them); with `ax` and `uia` it is characters since the start of the line. Browsers, terminals and other apps send none; Linux sends none (no system-wide text access or built-in OCR without side effects). |
 | `windows` | Window captures only: each captured window (on Wayland, by its stream's node id) and whether it has the focus (or owns the focused dialog). On Wayland the portal never says which window a stream is, so focus is inferred — the pointer sitting at the same place in the focused window and in the stream, or the shapes not matching — and a window it can't decide is **left out** rather than guessed. |
 
-Window titles are never sent. Absent (`activity: null` on read) for clients that can't sample: the web SDK, cameras, and older builds. On Wayland the pointer needs a portal with the "metadata" cursor mode (GNOME, KDE); the focus needs GNOME Shell with the Lookout extension loaded (installed by the app, active from the next login), KWin, Hyprland or Sway.
+Window titles and text are never sent: for `caret` only the two numbers leave the machine — the status bar strip read by `ocr` is recognised on the device and discarded. `ocr` readings the recogniser isn't confident about, or where the status bar shows two different positions, are dropped rather than sent. Absent (`activity: null` on read) for clients that can't sample: the web SDK, cameras, and older builds. On Wayland the pointer needs a portal with the "metadata" cursor mode (GNOME, KDE); the focus needs GNOME Shell with the Lookout extension loaded (installed by the app, active from the next login), KWin, Hyprland or Sway.
 
 ---
 

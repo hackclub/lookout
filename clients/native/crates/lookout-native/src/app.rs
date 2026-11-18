@@ -248,6 +248,7 @@ pub fn init(cx: &mut App, rt: tokio::runtime::Handle) {
     // Push the persisted Filtered Apps list into the engine at launch.
     let apps = store(cx).blacklisted_apps.clone();
     let _ = core.set_blacklisted_apps(apps);
+    lookout_core::set_prefer_accessibility(store(cx).prefer_accessibility);
 
     cx.spawn(async move |cx| {
         while let Ok(msg) = rx.recv_async().await {

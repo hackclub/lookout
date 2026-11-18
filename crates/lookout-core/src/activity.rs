@@ -18,7 +18,7 @@
 //!   `GetWindowRect` all report unscaled values.
 //! - X11: root-window pixels (`QueryPointer`, RandR monitors).
 
-use lookout_recorder::host::{ActivitySample, CursorSample, FrontmostSample, WindowFocus};
+use lookout_recorder::host::{ActivitySample, CaretSample, CursorSample, FrontmostSample, WindowFocus};
 use lookout_session::source::CaptureSource;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -77,6 +77,8 @@ pub(crate) struct Snapshot {
     /// from what was recorded (Wayland's PipeWire nodes, resolved to the
     /// screens and windows they are).
     pub sources: Option<Vec<CaptureSource>>,
+    /// The text cursor in the frontmost app's editor (caret.rs).
+    pub caret: Option<CaretSample>,
 }
 
 /// A screencast stream the portal opened (Wayland), and the PipeWire
@@ -181,6 +183,7 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
                 active: snap.focused.contains(&id),
             })
             .collect(),
+        caret: snap.caret.clone(),
     }
 }
 
@@ -327,15 +330,19 @@ mod platform {
         #[allow(unused_unsafe)]
         let front = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
         #[allow(unused_unsafe)]
-        let (pid, app) = match &front {
+        let (pid, app, bundle) = match &front {
             Some(a) => unsafe {
                 let app = a
                     .bundleIdentifier()
                     .or_else(|| a.localizedName())
                     .map(|s| s.to_string());
-                (Some(a.processIdentifier()), app)
+                let bundle = a
+                    .bundleURL()
+                    .and_then(|u| u.path())
+                    .map(|p| std::path::PathBuf::from(p.to_string()));
+                (Some(a.processIdentifier()), app, bundle)
             },
-            None => (None, None),
+            None => (None, None, None),
         };
 
         // Accessibility names the focused window exactly. Without it (or
@@ -353,6 +360,9 @@ mod platform {
             ),
         };
         let focused_rect = focused_id.and_then(|id| list.iter().find(|e| e.id == id)).map(|e| e.rect);
+        let caret = pid.zip(app.as_deref()).and_then(|(pid, app)| {
+            crate::caret::platform::read(pid, app, bundle.as_deref(), focused_id, focused_rect)
+        });
 
         // The topmost visible window at the pointer: the menu bar, a
         // popover or another app's window in front all count as covering.
@@ -369,6 +379,7 @@ mod platform {
             focused: focused_id.into_iter().collect(),
             focused_rect,
             app,
+            caret,
             ..Default::default()
         })
     }
@@ -521,6 +532,7 @@ mod platform {
             let focused_rect = unsafe { GetWindowRect(fg, &mut r) }.ok().map(|_| rect(r));
             (lineage(fg), focused_rect, app_of(fg))
         };
+        let caret = app.as_deref().and_then(|app| crate::caret::platform::read(fg, app));
 
         Some(Snapshot {
             method: "win32",
@@ -530,6 +542,7 @@ mod platform {
             focused,
             focused_rect,
             app,
+            caret,
             ..Default::default()
         })
     }
@@ -959,6 +972,25 @@ mod tests {
 
         let s = build(&snap, &[CaptureSource::Monitor { id: 2 }]);
         assert!(s.cursor.unwrap().in_capture);
+    }
+
+    #[test]
+    fn the_caret_rides_along_with_the_sample() {
+        let caret = CaretSample { line: 12, column: 5, via: "ocr" };
+        let snap = Snapshot {
+            method: "test",
+            displays: two_displays(),
+            app: Some("com.microsoft.VSCode".into()),
+            caret: Some(caret.clone()),
+            ..Default::default()
+        };
+        let s = build(&snap, &[CaptureSource::Monitor { id: 1 }]);
+        assert_eq!(s.caret, Some(caret));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["caret"], serde_json::json!({ "line": 12, "column": 5, "via": "ocr" }));
+
+        let none = build(&Snapshot { caret: None, ..snap }, &[CaptureSource::Monitor { id: 1 }]);
+        assert!(serde_json::to_value(&none).unwrap().get("caret").is_none(), "absent, not null");
     }
 
     #[test]

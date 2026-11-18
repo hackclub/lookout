@@ -31,7 +31,7 @@ pub use events::{
     CaptureTickResult, CoreEvent, ScreencastRevoked,
 };
 pub use host::{
-    ActivitySample, CursorSample, FrontmostSample, WindowFocus, BoxFuture, CaptureSession, ClipOutput, Frame, Grab, GrabJpeg, Host, MaybeSend, MaybeSync,
+    ActivitySample, CaretSample, CursorSample, FrontmostSample, WindowFocus, BoxFuture, CaptureSession, ClipOutput, Frame, Grab, GrabJpeg, Host, MaybeSend, MaybeSync,
     Runtime, TaskHandle,
 };
 pub use recorder::Recorder;

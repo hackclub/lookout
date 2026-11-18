@@ -539,6 +539,15 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   recording resumes on the pick). A lost source uses the same flow. Tauri
   only offered a new source after a loss, and closed and reopened the
   recording to do it, which dropped any undelivered uploads.
+- Settings has a **Prefer accessibility** checkbox (macOS and Windows, off by
+  default; Tauri had no equivalent). The recorder samples the text cursor's
+  line and column in the frontmost editor (`lookout-core/src/caret.rs`).
+  VS Code and its forks are normally read by on-device OCR of their status
+  bar, because asking them through accessibility makes VS Code think a
+  screen reader is on. With the box ticked, Lookout switches their
+  accessibility on and reads the cursor-position item's own label instead
+  (exact; OCR stays the fallback). Unticking hands the app's accessibility
+  back on macOS; on Windows Chromium keeps it until the app restarts.
 
 ## Known gaps and next steps
 

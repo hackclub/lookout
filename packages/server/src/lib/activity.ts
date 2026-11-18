@@ -1,7 +1,8 @@
 /**
  * Interaction metadata a native client sends with each confirm (`activity`):
- * pointer position as a fraction of its display, the frontmost app, and
- * whether the captured windows had the focus — sampled at every clip frame.
+ * pointer position as a fraction of its display, the frontmost app, whether
+ * the captured windows had the focus, and the text cursor's line and column
+ * in the frontmost editor — sampled at every clip frame.
  *
  * Client-reported, so it is spoofable the way clientInfo is (unlike the
  * edge-observed JA4) — but it is what makes lazy cheating visible: a pointer
@@ -24,6 +25,9 @@ export const ACTIVITY_MAX_SAMPLES = 120;
 const MAX_APP_LENGTH = 256;
 const MAX_WINDOWS = 32;
 const METHOD_SHAPE = /^[a-z0-9-]{1,32}$/;
+/** Past any real file: a bigger line or column is a misread. */
+const MAX_CARET_LINE = 10_000_000;
+const MAX_CARET_COLUMN = 1_000_000;
 
 export type ActivityCursor = {
   display: number;
@@ -38,7 +42,11 @@ export type ActivitySample = {
   cursor: ActivityCursor | null;
   frontmost: { app: string; captured: boolean | null } | null;
   windows?: { id: number; active: boolean }[];
+  caret?: ActivityCaret;
 };
+
+/** The text cursor in the frontmost editor: 1-based line and column. */
+export type ActivityCaret = { line: number; column: number; via: string };
 
 export type Activity = { v: number; samples: ActivitySample[] };
 
@@ -67,6 +75,17 @@ function sanitizeFrontmost(raw: unknown): ActivitySample["frontmost"] {
   return { app, captured };
 }
 
+const isPositiveUpTo = (v: unknown, max: number): v is number =>
+  Number.isInteger(v) && (v as number) >= 1 && (v as number) <= max;
+
+function sanitizeCaret(raw: unknown): ActivityCaret | undefined {
+  if (!isObject(raw)) return undefined;
+  const { line, column, via } = raw;
+  if (!isPositiveUpTo(line, MAX_CARET_LINE) || !isPositiveUpTo(column, MAX_CARET_COLUMN)) return undefined;
+  if (typeof via !== "string" || !METHOD_SHAPE.test(via)) return undefined;
+  return { line, column, via };
+}
+
 function sanitizeSample(raw: unknown): ActivitySample | null {
   if (!isObject(raw)) return null;
   const { at, method } = raw;
@@ -88,6 +107,8 @@ function sanitizeSample(raw: unknown): ActivitySample | null {
       .map(({ id, active }) => ({ id, active }));
     if (windows.length > 0) sample.windows = windows;
   }
+  const caret = sanitizeCaret(raw.caret);
+  if (caret) sample.caret = caret;
   return sample;
 }
 

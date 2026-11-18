@@ -7,6 +7,7 @@ const sample = (over: Record<string, unknown> = {}) => ({
   cursor: { display: 1, x: 0.25, y: 0.75, inCapture: true },
   frontmost: { app: "com.microsoft.VSCode", captured: true },
   windows: [{ id: 77, active: true }],
+  caret: { line: 128, column: 17, via: "ocr" },
   ...over,
 });
 
@@ -68,5 +69,21 @@ describe("sanitizeActivity", () => {
     const out = sanitizeActivity({ v: 1, samples });
     expect(out?.samples).toHaveLength(ACTIVITY_MAX_SAMPLES);
     expect(out?.samples[0].at).toBe(6);
+  });
+
+  it("keeps a caret only when it is a real 1-based position", () => {
+    const out = sanitizeActivity({
+      v: 1,
+      samples: [
+        sample({ caret: { line: 0, column: 1, via: "ax" } }),
+        sample({ caret: { line: 3, column: 1.5, via: "ax" } }),
+        sample({ caret: { line: 3, column: 2, via: "OCR!" } }),
+        sample({ caret: { line: 3, column: 2, via: "uia", text: "let x = 1;" } }),
+        sample({ caret: undefined }),
+      ],
+    });
+    const carets = out?.samples.map((s) => s.caret);
+    expect(carets).toEqual([undefined, undefined, undefined, { line: 3, column: 2, via: "uia" }, undefined]);
+    expect(out?.samples.every((s) => s.frontmost !== null)).toBe(true);
   });
 });

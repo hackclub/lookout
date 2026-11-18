@@ -147,6 +147,32 @@ pub struct ActivitySample {
     /// windows are being captured.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowFocus>,
+    /// Where the text cursor is in the frontmost app's editor, when the
+    /// focused app is a text editor the platform can read it from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caret: Option<CaretSample>,
+}
+
+/// The text cursor's place in the frontmost editor: numbers only, never
+/// the text around it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaretSample {
+    /// 1-based line.
+    pub line: u32,
+    /// 1-based column. Read from the editor's own status bar (`ocr`,
+    /// `ax-status`, `uia-status`, `scintilla`) it is the editor's column, tabs expanded the way it
+    /// counts them; read from the text (`ax`, `uia`) it is characters
+    /// since the start of the line.
+    pub column: u32,
+    /// How it was read: `"ax"` (macOS Accessibility), `"uia"` (Windows UI
+    /// Automation), `"scintilla"` (asked the Scintilla control directly),
+    /// `"ax-status"` / `"uia-status"` (the editor's cursor-position status
+    /// bar item, by accessibility: VS Code with "Prefer accessibility" on),
+    /// `"ocr"` (on-device text recognition of the editor's status bar,
+    /// for editors that draw their own text: VS Code and its forks,
+    /// JetBrains IDEs, Sublime Text, Zed).
+    pub via: &'static str,
 }
 
 /// The pointer, as a fraction of the display it's on.
