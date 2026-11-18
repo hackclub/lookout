@@ -164,7 +164,7 @@ The value is best-effort: a client that can't detect part of this omits it; the 
 
 ## Interaction Metadata
 
-Native clients sample, at every clip frame (and at each upload tick), where the pointer is and what has the focus, and send the interval's samples with the confirm as `activity`. Programs read it back per capture with [`GET /api/internal/sessions/:sessionId/activity`](#get-capture-activity).
+Native clients sample, at every clip frame (and at each upload tick), where the pointer is, what has the focus and where its window sits, and which displays are attached, and send the interval's samples with the confirm as `activity`. Programs read it back per capture with [`GET /api/internal/sessions/:sessionId/activity`](#get-capture-activity).
 
 **Internal only**, like the JA4 fingerprint: it is never returned on a token-authenticated endpoint (the token belongs to the person being recorded, and echoing the data back would let a forger tune it). It is client-reported, so spoofable like `clientInfo` — a signal for spotting lazy cheating (a pointer that never moves, coordinates repeating exactly, a recorded window that is never in front), not proof.
 
@@ -176,8 +176,16 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
       "at": 1750000000000,
       "method": "ax",
       "cursor": { "display": 1, "x": 0.4123, "y": 0.7331, "inCapture": true },
-      "frontmost": { "app": "com.microsoft.VSCode", "captured": true },
-      "windows": [{ "id": 123, "active": true }]
+      "frontmost": {
+        "app": "com.microsoft.VSCode",
+        "captured": true,
+        "window": { "display": 1, "x": 0, "y": 0.0336, "width": 0.5, "height": 0.9664 }
+      },
+      "windows": [{ "id": 123, "active": true }],
+      "displays": [
+        { "id": 1, "x": 0, "y": 0, "width": 1512, "height": 982, "pixelWidth": 3024, "pixelHeight": 1964, "captured": true },
+        { "id": 2, "x": 1512, "y": -200, "width": 2560, "height": 1440, "pixelWidth": 2560, "pixelHeight": 1440, "captured": false }
+      ]
     }
   ]
 }
@@ -188,7 +196,8 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
 | `at` | Unix ms (corrected to server time) the sample was taken. |
 | `method` | How focus was determined, i.e. how far to trust it. `ax` (macOS Accessibility, exact), `window-order` (macOS without Accessibility: the frontmost app's topmost window), `win32`, `x11` (exact). On Wayland: `gnome-shell` (via the Lookout GNOME extension), `kwin`, `hyprland`, `sway` (the compositor names the focused app exactly; whether that is a *captured* window is inferred from geometry, see `windows`), or `portal` (no compositor support: the pointer only, from the screencast stream). |
 | `cursor` | `null` when unknown. `display` is the display's id — the same id a monitor capture source uses (on Wayland, the screencast stream's PipeWire node id; a screen nobody records is named by the compositor's monitor index; with `method: "portal"` and only a window recorded, the window's stream is the "display"). `x`/`y` are 0–1 fractions of that display, rounded to 1/10000, origin top-left. `inCapture`: the pointer is over what is being recorded — on a captured display, or over a captured window (on X11, Windows and macOS: with nothing on top of it there). |
-| `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. |
+| `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. `window` (absent when unknown) is the focused window's frame as fractions of the display its centre is on (or the nearest one): `display` is that display's id as in `cursor` and `displays`; `x`/`y` is the window's top-left corner and `width`/`height` its size, 0–1 of the display's width and height, rounded to 1/10000. Not clamped — a window hanging off the display's edge has `x`/`y` below 0 or `x + width` past 1, and one spanning several displays is wider than 1. On Windows it is the visible frame (without the invisible resize borders); on macOS and X11 the window manager's frame. On Wayland only with a compositor that reports the focused window's geometry (the GNOME extension, KWin, Hyprland, Sway). |
+| `displays` | Absent when unknown. Every attached display, recorded or not, and where it sits: `id` (as in `cursor.display`), `x`/`y` its top-left corner and `width`/`height` its size in the desktop layout — points on macOS (origin top-left of the main display), physical pixels on Windows (origin top-left of the primary monitor), root-window pixels on X11 and logical pixels on Wayland — so displays with negative `x`/`y` sit left of or above the main one. `pixelWidth`/`pixelHeight`: the resolution in device pixels when known (on macOS the current mode, e.g. 2× the points on a Retina display at default scaling; equal to `width`/`height` on Windows and X11; absent on Wayland). `captured`: this display is being recorded. On Wayland the layout comes from the compositor (or the recorded screens' streams); with `method: "portal"` and only a window recorded it is unknown and left out. |
 | `windows` | Window captures only: each captured window (on Wayland, by its stream's node id) and whether it has the focus (or owns the focused dialog). On Wayland the portal never says which window a stream is, so focus is inferred — the pointer sitting at the same place in the focused window and in the stream, or the shapes not matching — and a window it can't decide is **left out** rather than guessed. |
 
 Window titles are never sent. Absent (`activity: null` on read) for clients that can't sample: the web SDK, cameras, and older builds. On Wayland the pointer needs a portal with the "metadata" cursor mode (GNOME, KDE); the focus needs GNOME Shell with the Lookout extension loaded (installed by the app, active from the next login), KWin, Hyprland or Sway.

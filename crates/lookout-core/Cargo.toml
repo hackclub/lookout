@@ -54,6 +54,8 @@ block2 = "0.6"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # The focused window's visible frame (activity.rs).
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     # Clip encoding: hardware H.264 via the Media Foundation sink writer.
     "Win32_Media_MediaFoundation",

@@ -5,8 +5,16 @@ const sample = (over: Record<string, unknown> = {}) => ({
   at: 1_750_000_000_000,
   method: "ax",
   cursor: { display: 1, x: 0.25, y: 0.75, inCapture: true },
-  frontmost: { app: "com.microsoft.VSCode", captured: true },
+  frontmost: {
+    app: "com.microsoft.VSCode",
+    captured: true,
+    window: { display: 1, x: -0.0047, y: 0.025, width: 0.5, height: 0.95 },
+  },
   windows: [{ id: 77, active: true }],
+  displays: [
+    { id: 1, x: 0, y: 0, width: 1512, height: 982, pixelWidth: 3024, pixelHeight: 1964, captured: true },
+    { id: 2, x: 1512, y: -200, width: 2560, height: 1440, captured: false },
+  ],
   ...over,
 });
 
@@ -68,5 +76,46 @@ describe("sanitizeActivity", () => {
     const out = sanitizeActivity({ v: 1, samples });
     expect(out?.samples).toHaveLength(ACTIVITY_MAX_SAMPLES);
     expect(out?.samples[0].at).toBe(6);
+  });
+
+  it("keeps the frontmost window's frame only when it is a plausible fraction of a display", () => {
+    const fm = (window: unknown) => sample({ frontmost: { app: "Code", captured: true, window } });
+    const out = sanitizeActivity({
+      v: 1,
+      samples: [
+        fm({ display: 1, x: 0.1, y: 0.1, width: 0, height: 0.5 }),
+        fm({ display: 1, x: 99, y: 0, width: 0.5, height: 0.5 }),
+        fm({ display: "1", x: 0, y: 0, width: 0.5, height: 0.5 }),
+        fm({ display: 2, x: -0.1, y: 0, width: 2.4, height: 1, title: "secret" }),
+      ],
+    });
+    expect(out?.samples.slice(0, 3).map((s) => s.frontmost)).toEqual(
+      Array(3).fill({ app: "Code", captured: true }),
+    );
+    expect(out?.samples[3].frontmost?.window).toEqual({ display: 2, x: -0.1, y: 0, width: 2.4, height: 1 });
+  });
+
+  it("keeps well-formed displays, drops bad ones and a half resolution", () => {
+    const out = sanitizeActivity({
+      v: 1,
+      samples: [
+        sample({
+          displays: [
+            { id: 1, x: 0, y: 0, width: 1920, height: 1080, pixelWidth: 1920, captured: true },
+            { id: 2, x: 0, y: 0, width: -5, height: 1080, captured: false },
+            { id: 3, x: 0, y: 0, width: 800, height: 600 },
+            { id: 4, x: 1920, y: 0, width: 800, height: 600, captured: false, name: "DELL U2720Q" },
+          ],
+        }),
+        sample({ displays: [{ id: -1 }] }),
+        sample({ displays: Array.from({ length: 40 }, (_, i) => ({ id: i, x: 0, y: 0, width: 1, height: 1, captured: false })) }),
+      ],
+    });
+    expect(out?.samples[0].displays).toEqual([
+      { id: 1, x: 0, y: 0, width: 1920, height: 1080, captured: true },
+      { id: 4, x: 1920, y: 0, width: 800, height: 600, captured: false },
+    ]);
+    expect(out?.samples[1]).not.toHaveProperty("displays");
+    expect(out?.samples[2].displays).toHaveLength(16);
   });
 });

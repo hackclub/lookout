@@ -1,7 +1,8 @@
 /**
  * Interaction metadata a native client sends with each confirm (`activity`):
- * pointer position as a fraction of its display, the frontmost app, and
- * whether the captured windows had the focus — sampled at every clip frame.
+ * pointer position as a fraction of its display, the frontmost app and where
+ * its window sits on its display, whether the captured windows had the
+ * focus, and the attached displays — sampled at every clip frame.
  *
  * Client-reported, so it is spoofable the way clientInfo is (unlike the
  * edge-observed JA4) — but it is what makes lazy cheating visible: a pointer
@@ -24,6 +25,13 @@ export const ACTIVITY_MAX_SAMPLES = 120;
 const MAX_APP_LENGTH = 256;
 const MAX_WINDOWS = 32;
 const METHOD_SHAPE = /^[a-z0-9-]{1,32}$/;
+const MAX_DISPLAYS = 16;
+/** Desktop coordinates past this are not a real layout. */
+const MAX_LAYOUT_COORD = 1_000_000;
+const MAX_DISPLAY_PIXELS = 100_000;
+/** A window's frame as fractions of its display: it may hang off the edges
+ *  or span displays, but not by this much. */
+const MAX_WINDOW_FRACTION = 16;
 
 export type ActivityCursor = {
   display: number;
@@ -36,8 +44,34 @@ export type ActivitySample = {
   at: number;
   method: string;
   cursor: ActivityCursor | null;
-  frontmost: { app: string; captured: boolean | null } | null;
+  frontmost: ActivityFrontmost | null;
   windows?: { id: number; active: boolean }[];
+  displays?: ActivityDisplay[];
+};
+
+export type ActivityFrontmost = {
+  app: string;
+  captured: boolean | null;
+  window?: ActivityWindowRect;
+};
+
+/**
+ * The focused window's frame as fractions of the display its centre is on
+ * (0 = that display's left / top edge, 1 = its right / bottom edge). Not
+ * clamped: off-edge windows go below 0 or past 1.
+ */
+export type ActivityWindowRect = { display: number; x: number; y: number; width: number; height: number };
+
+/** One attached display, in the platform's desktop layout space. */
+export type ActivityDisplay = {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pixelWidth?: number;
+  pixelHeight?: number;
+  captured: boolean;
 };
 
 export type Activity = { v: number; samples: ActivitySample[] };
@@ -59,12 +93,49 @@ function sanitizeCursor(raw: unknown): ActivityCursor | null {
   return { display, x, y, inCapture };
 }
 
+const isPositiveUpTo = (v: unknown, max: number): v is number =>
+  Number.isInteger(v) && (v as number) >= 1 && (v as number) <= max;
+
+const isFiniteWithin = (v: unknown, min: number, max: number): v is number =>
+  typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+
+function sanitizeWindowRect(raw: unknown): ActivityWindowRect | undefined {
+  if (!isObject(raw)) return undefined;
+  const { display, x, y, width, height } = raw;
+  if (!isU32(display)) return undefined;
+  if (!isFiniteWithin(x, -MAX_WINDOW_FRACTION, MAX_WINDOW_FRACTION)) return undefined;
+  if (!isFiniteWithin(y, -MAX_WINDOW_FRACTION, MAX_WINDOW_FRACTION)) return undefined;
+  if (!isFiniteWithin(width, 0, MAX_WINDOW_FRACTION) || width === 0) return undefined;
+  if (!isFiniteWithin(height, 0, MAX_WINDOW_FRACTION) || height === 0) return undefined;
+  return { display, x, y, width, height };
+}
+
 function sanitizeFrontmost(raw: unknown): ActivitySample["frontmost"] {
   if (!isObject(raw) || typeof raw.app !== "string") return null;
   const app = raw.app.trim().slice(0, MAX_APP_LENGTH);
   if (!app) return null;
   const captured = typeof raw.captured === "boolean" ? raw.captured : null;
-  return { app, captured };
+  const frontmost: ActivityFrontmost = { app, captured };
+  const window = sanitizeWindowRect(raw.window);
+  if (window) frontmost.window = window;
+  return frontmost;
+}
+
+function sanitizeDisplay(raw: unknown): ActivityDisplay | null {
+  if (!isObject(raw)) return null;
+  const { id, x, y, width, height, pixelWidth, pixelHeight, captured } = raw;
+  if (!isU32(id) || typeof captured !== "boolean") return null;
+  if (!isFiniteWithin(x, -MAX_LAYOUT_COORD, MAX_LAYOUT_COORD)) return null;
+  if (!isFiniteWithin(y, -MAX_LAYOUT_COORD, MAX_LAYOUT_COORD)) return null;
+  if (!isFiniteWithin(width, 0, MAX_LAYOUT_COORD) || width === 0) return null;
+  if (!isFiniteWithin(height, 0, MAX_LAYOUT_COORD) || height === 0) return null;
+  const display: ActivityDisplay = { id, x, y, width, height, captured };
+  // The resolution only as a pair.
+  if (isPositiveUpTo(pixelWidth, MAX_DISPLAY_PIXELS) && isPositiveUpTo(pixelHeight, MAX_DISPLAY_PIXELS)) {
+    display.pixelWidth = pixelWidth;
+    display.pixelHeight = pixelHeight;
+  }
+  return display;
 }
 
 function sanitizeSample(raw: unknown): ActivitySample | null {
@@ -87,6 +158,13 @@ function sanitizeSample(raw: unknown): ActivitySample | null {
       .slice(0, MAX_WINDOWS)
       .map(({ id, active }) => ({ id, active }));
     if (windows.length > 0) sample.windows = windows;
+  }
+  if (Array.isArray(raw.displays)) {
+    const displays = raw.displays
+      .map(sanitizeDisplay)
+      .filter((d): d is ActivityDisplay => d !== null)
+      .slice(0, MAX_DISPLAYS);
+    if (displays.length > 0) sample.displays = displays;
   }
   return sample;
 }

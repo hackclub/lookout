@@ -147,6 +147,49 @@ pub struct ActivitySample {
     /// windows are being captured.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowFocus>,
+    /// Every display attached, in the platform's desktop layout. Empty
+    /// when the layout can't be told (Wayland without a compositor that
+    /// reports it).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub displays: Vec<DisplaySample>,
+}
+
+/// One display and where it sits in the desktop. `x`, `y`, `width` and
+/// `height` are in the platform's layout space: points on macOS (origin
+/// top-left of the main display), physical pixels on Windows (origin
+/// top-left of the primary monitor), root-window pixels on X11, logical
+/// pixels on Wayland.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplaySample {
+    /// The same id a monitor capture source and `cursor.display` use.
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// The display's resolution in device pixels, when known (differs
+    /// from `width` × `height` on a scaled macOS display).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_height: Option<u32>,
+    /// It is being recorded.
+    pub captured: bool,
+}
+
+/// The focused window's frame as fractions of the display its centre is
+/// on: 0 = that display's left / top edge, 1 = its right / bottom edge.
+/// Not clamped — a window hanging off the display's edge goes below 0 or
+/// past 1, and one spanning displays is wider than 1.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowRectSample {
+    pub display: u32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// The pointer, as a fraction of the display it's on.
@@ -174,6 +217,9 @@ pub struct FrontmostSample {
     /// its centre is on a captured display. `None` when there is no
     /// focused window to place.
     pub captured: Option<bool>,
+    /// Where the focused window is, when the platform can place it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowRectSample>,
 }
 
 /// One captured window's focus.

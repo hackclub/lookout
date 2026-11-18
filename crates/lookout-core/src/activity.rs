@@ -18,7 +18,9 @@
 //!   `GetWindowRect` all report unscaled values.
 //! - X11: root-window pixels (`QueryPointer`, RandR monitors).
 
-use lookout_recorder::host::{ActivitySample, CursorSample, FrontmostSample, WindowFocus};
+use lookout_recorder::host::{
+    ActivitySample, CursorSample, DisplaySample, FrontmostSample, WindowFocus, WindowRectSample,
+};
 use lookout_session::source::CaptureSource;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -52,6 +54,8 @@ impl Rect {
 pub(crate) struct Display {
     pub ids: Vec<u32>,
     pub rect: Rect,
+    /// The resolution in device pixels, when the platform tells it.
+    pub pixels: Option<(u32, u32)>,
 }
 
 /// What a platform could see at one instant.
@@ -77,6 +81,10 @@ pub(crate) struct Snapshot {
     /// from what was recorded (Wayland's PipeWire nodes, resolved to the
     /// screens and windows they are).
     pub sources: Option<Vec<CaptureSource>>,
+    /// `displays` is one stream's own pixels, not the desktop layout
+    /// (Wayland with only a stream's pointer): good for the pointer's
+    /// fraction, not for reporting as the displays.
+    pub stream_space: bool,
 }
 
 /// A screencast stream the portal opened (Wayland), and the PipeWire
@@ -119,19 +127,15 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
         })
         .collect();
     let display_captured = |d: &Display| d.ids.iter().any(|id| monitors.contains(id));
+    // Name a display by the id it was captured under, if it was.
+    let display_id = |d: &Display| d.ids.iter().find(|id| monitors.contains(id)).or_else(|| d.ids.first()).copied();
 
     let cursor = snap.cursor.and_then(|(px, py)| {
         let d = display_at(&snap.displays, px, py)?;
         if d.rect.w <= 0.0 || d.rect.h <= 0.0 {
             return None;
         }
-        // Name the display by the id it was captured under, if it was.
-        let id = d
-            .ids
-            .iter()
-            .find(|id| monitors.contains(id))
-            .or_else(|| d.ids.first())
-            .copied()?;
+        let id = display_id(d)?;
         let on_display = d.rect.contains(px, py);
         Some(CursorSample {
             display: id,
@@ -163,10 +167,48 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
     } else {
         None
     };
+    // Fractions of the display the window's centre is on (or the nearest
+    // one), like the pointer. Not in a stream's own pixels: the window's
+    // frame is in the layout.
+    let window = snap.focused_rect.filter(|r| r.w > 0.0 && r.h > 0.0 && !snap.stream_space).and_then(|r| {
+        let (cx, cy) = r.centre();
+        let d = display_at(&snap.displays, cx, cy)?;
+        if d.rect.w <= 0.0 || d.rect.h <= 0.0 {
+            return None;
+        }
+        Some(WindowRectSample {
+            display: display_id(d)?,
+            x: round4((r.x - d.rect.x) / d.rect.w),
+            y: round4((r.y - d.rect.y) / d.rect.h),
+            width: round4(r.w / d.rect.w),
+            height: round4(r.h / d.rect.h),
+        })
+    });
     let frontmost = snap.app.as_ref().map(|app| FrontmostSample {
         app: app.clone(),
         captured,
+        window,
     });
+    let displays = if snap.stream_space {
+        Vec::new()
+    } else {
+        snap.displays
+            .iter()
+            .filter(|d| d.rect.w > 0.0 && d.rect.h > 0.0)
+            .filter_map(|d| {
+                Some(DisplaySample {
+                    id: display_id(d)?,
+                    x: d.rect.x,
+                    y: d.rect.y,
+                    width: d.rect.w,
+                    height: d.rect.h,
+                    pixel_width: d.pixels.map(|p| p.0),
+                    pixel_height: d.pixels.map(|p| p.1),
+                    captured: display_captured(d),
+                })
+            })
+            .collect()
+    };
 
     ActivitySample {
         at: 0,
@@ -181,6 +223,7 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
                 active: snap.focused.contains(&id),
             })
             .collect(),
+        displays,
     }
 }
 
@@ -202,7 +245,8 @@ mod platform {
     use objc2_app_kit::NSWorkspace;
     use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
     use objc2_core_graphics::{
-        CGDisplayBounds, CGEvent, CGGetActiveDisplayList, CGWindowListCopyWindowInfo, CGWindowListOption,
+        CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode, CGEvent, CGGetActiveDisplayList,
+        CGWindowListCopyWindowInfo, CGWindowListOption,
     };
     use lookout_session::source::CaptureSource;
 
@@ -281,6 +325,14 @@ mod platform {
         out
     }
 
+    /// The display's current mode in device pixels (2× its points on a
+    /// Retina display at the default scaling).
+    fn pixel_size(id: u32) -> Option<(u32, u32)> {
+        let mode = CGDisplayCopyDisplayMode(id)?;
+        let (w, h) = (CGDisplayMode::pixel_width(Some(&mode)), CGDisplayMode::pixel_height(Some(&mode)));
+        (w > 0 && h > 0).then_some((w as u32, h as u32))
+    }
+
     fn displays() -> Vec<Display> {
         let mut ids = [0u32; 32];
         let mut count = 0u32;
@@ -290,7 +342,7 @@ mod platform {
         }
         ids[..(count as usize).min(ids.len())]
             .iter()
-            .map(|&id| Display { ids: vec![id], rect: rect(CGDisplayBounds(id)) })
+            .map(|&id| Display { ids: vec![id], rect: rect(CGDisplayBounds(id)), pixels: pixel_size(id) })
             .collect()
     }
 
@@ -380,6 +432,7 @@ mod platform {
 mod platform {
     use windows::core::{BOOL, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -400,6 +453,26 @@ mod platform {
             w: (r.right - r.left) as f64,
             h: (r.bottom - r.top) as f64,
         }
+    }
+
+    /// The window's visible frame: DWM's bounds, without the invisible
+    /// resize borders `GetWindowRect` counts (about 7px each side on
+    /// Windows 10 and 11). `GetWindowRect` when DWM won't say.
+    fn frame(hwnd: HWND) -> Option<Rect> {
+        let mut r = RECT::default();
+        let dwm = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut r as *mut RECT as *mut std::ffi::c_void,
+                std::mem::size_of::<RECT>() as u32,
+            )
+        };
+        if dwm.is_ok() && r.right > r.left && r.bottom > r.top {
+            return Some(rect(r));
+        }
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut r) }.ok().map(|_| rect(r))
     }
 
     /// xcap's window id for an HWND.
@@ -423,7 +496,8 @@ mod platform {
         let out = unsafe { &mut *(data.0 as *mut Vec<Display>) };
         let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
-            out.push(Display { ids: vec![m.0 as usize as u32], rect: rect(info.rcMonitor) });
+            let r = rect(info.rcMonitor);
+            out.push(Display { ids: vec![m.0 as usize as u32], rect: r, pixels: Some((r.w as u32, r.h as u32)) });
         }
         true.into()
     }
@@ -517,8 +591,7 @@ mod platform {
         let (focused, focused_rect, app) = if fg.is_invalid() {
             (Vec::new(), None, None)
         } else {
-            let mut r = RECT::default();
-            let focused_rect = unsafe { GetWindowRect(fg, &mut r) }.ok().map(|_| rect(r));
+            let focused_rect = frame(fg);
             (lineage(fg), focused_rect, app_of(fg))
         };
 
@@ -610,6 +683,7 @@ mod platform {
                     .monitors()
                     .map(|m| Display {
                         ids: m.outputs().iter().map(|o| o.resource_id()).collect(),
+                        pixels: Some((m.width() as u32, m.height() as u32)),
                         rect: Rect {
                             x: m.x() as f64,
                             y: m.y() as f64,
@@ -861,12 +935,12 @@ pub(crate) mod wayland {
                         .filter(|(info, _)| logical_rect(info).is_some_and(|m| close(&m, r)))
                         .map(|(info, _)| info.node_id)
                         .collect();
-                    Display { ids: if ids.is_empty() { vec![i as u32] } else { ids }, rect: *r }
+                    Display { ids: if ids.is_empty() { vec![i as u32] } else { ids }, rect: *r, pixels: None }
                 })
                 .collect(),
             None => monitor_streams
                 .iter()
-                .filter_map(|(info, _)| Some(Display { ids: vec![info.node_id], rect: logical_rect(info)? }))
+                .filter_map(|(info, _)| Some(Display { ids: vec![info.node_id], rect: logical_rect(info)?, pixels: None }))
                 .collect(),
         };
 
@@ -888,7 +962,8 @@ pub(crate) mod wayland {
             // Only a stream knows where the pointer is, and only in its own
             // pixels: the stream is the "display" it is a fraction of.
             snap.cursor = Some((x, y));
-            snap.displays = vec![Display { ids: vec![info.node_id], rect: Rect { x: 0.0, y: 0.0, w, h } }];
+            snap.displays = vec![Display { ids: vec![info.node_id], rect: Rect { x: 0.0, y: 0.0, w, h }, pixels: None }];
+            snap.stream_space = true;
             logical = false;
         } else {
             snap.displays = layout;
@@ -936,9 +1011,9 @@ mod tests {
 
     fn two_displays() -> Vec<Display> {
         vec![
-            Display { ids: vec![1], rect: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 } },
+            Display { ids: vec![1], rect: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }, pixels: Some((1920, 1080)) },
             // Right of the first, taller and offset upward.
-            Display { ids: vec![2], rect: Rect { x: 1920.0, y: -200.0, w: 2560.0, h: 1440.0 } },
+            Display { ids: vec![2], rect: Rect { x: 1920.0, y: -200.0, w: 2560.0, h: 1440.0 }, pixels: None },
         ]
     }
 
@@ -1016,6 +1091,71 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_window_is_placed_as_fractions_of_the_display_its_centre_is_on() {
+        let snap = Snapshot {
+            method: "test",
+            displays: two_displays(),
+            focused: vec![5],
+            // Centre (2300, 300) is on display 2; hangs 120px off its left edge.
+            focused_rect: Some(Rect { x: 1800.0, y: 0.0, w: 1000.0, h: 600.0 }),
+            app: Some("firefox".into()),
+            ..Default::default()
+        };
+        let w = build(&snap, &[CaptureSource::Monitor { id: 2 }]).frontmost.unwrap().window.unwrap();
+        assert_eq!(w.display, 2);
+        assert_eq!(w.x, round4(-120.0 / 2560.0));
+        assert_eq!(w.y, round4(200.0 / 1440.0));
+        assert_eq!(w.width, round4(1000.0 / 2560.0));
+        assert_eq!(w.height, round4(600.0 / 1440.0));
+
+        let no_rect = Snapshot { focused_rect: None, ..snap.clone() };
+        assert!(build(&no_rect, &[]).frontmost.unwrap().window.is_none());
+        let stream = Snapshot { stream_space: true, ..snap };
+        assert!(build(&stream, &[]).frontmost.unwrap().window.is_none(), "not in a stream's own pixels");
+    }
+
+    #[test]
+    fn every_display_is_listed_with_its_place_size_and_whether_it_is_recorded() {
+        let snap = Snapshot { method: "test", displays: two_displays(), ..Default::default() };
+        let s = build(&snap, &[CaptureSource::Monitor { id: 2 }]);
+        assert_eq!(
+            s.displays,
+            vec![
+                DisplaySample {
+                    id: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                    pixel_width: Some(1920),
+                    pixel_height: Some(1080),
+                    captured: false,
+                },
+                DisplaySample {
+                    id: 2,
+                    x: 1920.0,
+                    y: -200.0,
+                    width: 2560.0,
+                    height: 1440.0,
+                    pixel_width: None,
+                    pixel_height: None,
+                    captured: true,
+                },
+            ]
+        );
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["displays"][0],
+            serde_json::json!({ "id": 1, "x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0,
+                "pixelWidth": 1920, "pixelHeight": 1080, "captured": false })
+        );
+        assert!(json["displays"][1].get("pixelWidth").is_none());
+
+        let stream = Snapshot { stream_space: true, ..snap };
+        assert!(build(&stream, &[]).displays.is_empty(), "a stream's own pixels aren't the layout");
+    }
+
+    #[test]
     fn unknown_focus_stays_unknown() {
         let snap = Snapshot { method: "test", app: Some("Finder".into()), ..Default::default() };
         assert_eq!(build(&snap, &[CaptureSource::Monitor { id: 1 }]).frontmost.unwrap().captured, None);
@@ -1025,7 +1165,7 @@ mod tests {
     fn a_mirrored_display_reports_the_output_that_was_captured() {
         let snap = Snapshot {
             method: "test",
-            displays: vec![Display { ids: vec![10, 11], rect: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 } }],
+            displays: vec![Display { ids: vec![10, 11], rect: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, pixels: None }],
             cursor: Some((50.0, 50.0)),
             ..Default::default()
         };
@@ -1161,18 +1301,29 @@ mod tests {
             cursor: Some((960.0, 540.0)),
             under_cursor: vec![3],
             focused: vec![3],
+            focused_rect: Some(Rect { x: 480.0, y: 270.0, w: 960.0, h: 540.0 }),
             app: Some("com.apple.Terminal".into()),
             ..Default::default()
         };
-        let mut s = build(&snap, &[CaptureSource::Monitor { id: 1 }]);
+        let mut s = build(&snap, &[CaptureSource::Window { id: 7 }]);
         s.at = 1_700_000_000_000;
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::json!({
                 "at": 1_700_000_000_000i64,
                 "method": "ax",
-                "cursor": { "display": 1, "x": 0.5, "y": 0.5, "inCapture": true },
-                "frontmost": { "app": "com.apple.Terminal", "captured": null },
+                "cursor": { "display": 1, "x": 0.5, "y": 0.5, "inCapture": false },
+                "frontmost": {
+                    "app": "com.apple.Terminal",
+                    "captured": false,
+                    "window": { "display": 1, "x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5 },
+                },
+                "windows": [{ "id": 7, "active": false }],
+                "displays": [
+                    { "id": 1, "x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0,
+                      "pixelWidth": 1920, "pixelHeight": 1080, "captured": false },
+                    { "id": 2, "x": 1920.0, "y": -200.0, "width": 2560.0, "height": 1440.0, "captured": false },
+                ],
             })
         );
     }
