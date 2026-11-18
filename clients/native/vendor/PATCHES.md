@@ -1,7 +1,7 @@
 # Vendored GPUI crates
 
-These are the crates.io releases of `gpui-pre`, `gpui-pre-wgpu`, `gpui-pre-macos`,
-`gpui-pre-windows` and `gpui-pre-apple` **0.3.10**, wired in with
+These are the crates.io releases of `gpui-pre`, `gpui-pre-wgpu`,
+`gpui-pre-windows`, `gpui-pre-apple`, `gpui-pre-macos` and `gpui-pre-linux` **0.3.10**, wired in with
 `[patch.crates-io]` in `../Cargo.toml`. They're patched so video frames can be
 drawn as GPU surfaces on every platform (upstream only implements
 `PaintSurface` on macOS, with square corners and a BT.601 matrix). The video
@@ -48,6 +48,26 @@ from `gpui-pre` (5 MB, not needed), and so were its `[[example]]` entries in
   surface source is H.264 video via `AVPlayerItemVideoOutput` (`420f`).
   Only compiled on a Mac (the cross-check stubs it), so CI is the first
   compile.
+
+## gpui-pre-linux
+
+The crates.io 0.3.10 release, vendored only for this patch. Upstream ignores
+`WindowOptions::is_resizable` on Linux, so GNOME let the fixed 480×640 main
+window be maximized (title-bar double-click, Super+Up) and resized it when
+the display resolution changed, with no way to shrink it back.
+
+- `wayland/window.rs`: an `xdg_toplevel` opened non-resizable pins its min
+  and max size to its window geometry (outer size less the client inset;
+  `apply_size_limits`, re-run on each configure and on `set_client_inset`),
+  which Mutter and KWin treat as not resizable or maximizable, and ignores
+  configure sizes unless full screen. Mutter won't full screen a pinned
+  window, so `toggle_fullscreen` lifts the pin and commits before
+  `set_fullscreen`; it comes back with the first non-full-screen configure.
+- `x11/window.rs`: the same through `WM_NORMAL_HINTS` (`SizeLimits`); the
+  pin is lifted in `toggle_fullscreen` and restored when `_NET_WM_STATE`
+  drops `_NET_WM_STATE_FULLSCREEN`.
+- Both: `PlatformWindow::resize` moves the pin to the new size, so the app
+  can still resize a fixed-size window itself (`shed_unused_margin`).
 
 ## gpui-pre-macos
 
