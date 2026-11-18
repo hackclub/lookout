@@ -74,7 +74,7 @@ windows = { version = "0.62", features = [
 # the other runtime (GPUI's Linux backend uses async-io; ashpd refuses both)
 # can pick it: the Tauri shell keeps the default tokio, the native GPUI app
 # builds with `default-features = false, features = ["ashpd-async-io"]`.
-ashpd = { version = "0.13", default-features = false, features = ["screencast"] }
+ashpd = { version = "0.14", default-features = false, features = ["screencast"] }
 # `StreamExt::next`, to await the screencast portal's `Closed` signal
 # (screencast.rs). Already in the tree via ashpd/zbus — this is a direct dep
 # on an existing build.
