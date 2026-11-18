@@ -262,6 +262,25 @@ pub fn uses_header_bar(window: &Window) -> bool {
     is_linux() && matches!(window.window_decorations(), Decorations::Client { .. })
 }
 
+/// Linux: a window opened with room for our shadow margin that ended up with
+/// the window manager's frame anyway (GPUI fell back to server decorations)
+/// sheds the margin, so it isn't 80px too big. The size is pinned (not
+/// resizable), so nothing else would ever shrink it.
+pub fn shed_unused_margin(window: &mut Window, visible: (f32, f32)) {
+    if !is_linux()
+        || uses_header_bar(window)
+        || window.is_fullscreen()
+        || !crate::platform::desktop_appearance::client_frames()
+    {
+        return;
+    }
+    let vp = window.viewport_size();
+    if f32::from(vp.width) > visible.0 + 1.0 || f32::from(vp.height) > visible.1 + 1.0 {
+        log::info!("[chrome] got the window manager's frame: dropping the shadow margin");
+        window.resize(size(px(visible.0), px(visible.1)));
+    }
+}
+
 /// Radius for fills that reach the visible window edge. GPUI's overflow
 /// mask is rectangular, so overlay backgrounds must round themselves.
 pub fn window_corner_radius(window: &Window) -> f32 {
@@ -1506,6 +1525,7 @@ impl Render for MainWindow {
             window.request_animation_frame();
         }
         let t = theme(cx).clone();
+        shed_unused_margin(window, (WIN_W, WIN_H));
         let csd = uses_header_bar(window);
         crate::theme::set_header_bar_shown(true);
         crate::theme::set_vibrant(self.vibrant);

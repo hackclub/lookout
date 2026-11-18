@@ -689,6 +689,10 @@ mod tests {
 /// counts any EWMH window manager as a compositor (`_NET_SUPPORTING_WM_CHECK`),
 /// so on X11 we ask the real question: does anything own the
 /// `_NET_WM_CM_S<screen>` selection (the compositing-manager handshake)?
+/// GPUI also falls back to the WM's frame unless the WM lists
+/// `_GTK_FRAME_EXTENTS` in `_NET_SUPPORTED` (WSLg's doesn't), so that is
+/// required too. Otherwise the window opens with room for our shadow margin
+/// but gets the WM's frame, and the margin becomes 80px of extra window.
 /// Wayland is always composited.
 pub fn client_frames() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -703,12 +707,7 @@ pub fn client_frames() -> bool {
                 return true;
             }
             match x11_compositing() {
-                Some(on) => {
-                    if !on {
-                        log::info!("[chrome] no X11 compositor: using the window manager's frame");
-                    }
-                    on
-                }
+                Some(on) => on,
                 None => true,
             }
         }
@@ -719,10 +718,27 @@ pub fn client_frames() -> bool {
 
 #[cfg(target_os = "linux")]
 fn x11_compositing() -> Option<bool> {
+    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt;
     let (conn, screen) = x11rb::connect(None).ok()?;
     let name = format!("_NET_WM_CM_S{screen}");
     let atom = conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok()?.atom;
     let owner = conn.get_selection_owner(atom).ok()?.reply().ok()?.owner;
-    Some(owner != x11rb::NONE)
+    if owner == x11rb::NONE {
+        log::info!("[chrome] no X11 compositor: using the window manager's frame");
+        return Some(false);
+    }
+    let root = conn.setup().roots.get(screen)?.root;
+    let intern = |name: &[u8]| conn.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom);
+    let (supported, frame_extents) = (intern(b"_NET_SUPPORTED")?, intern(b"_GTK_FRAME_EXTENTS")?);
+    let reply = conn
+        .get_property(false, root, supported, x11rb::protocol::xproto::AtomEnum::ATOM, 0, 1024)
+        .ok()?
+        .reply()
+        .ok()?;
+    let listed = reply.value32().is_some_and(|mut atoms| atoms.any(|a| a == frame_extents));
+    if !listed {
+        log::info!("[chrome] window manager lacks _GTK_FRAME_EXTENTS: using its frame");
+    }
+    Some(listed)
 }

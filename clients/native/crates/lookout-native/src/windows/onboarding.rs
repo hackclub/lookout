@@ -1135,6 +1135,7 @@ impl Render for Onboarding {
         if self.any_animating() {
             window.request_animation_frame();
         }
+        super::main_window::shed_unused_margin(window, (W, H));
         let t = theme(cx).clone();
         let now = motion::now();
         let pos = self.pos.get();

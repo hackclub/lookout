@@ -9,8 +9,9 @@
 //! however it happened: our button, Esc, or the green traffic light. This
 //! is what winit does for the same case.
 //!
-//! Windows and Linux full screen non-resizable windows already; there it is
-//! a no-op.
+//! Windows full screens non-resizable windows already, and on Linux the
+//! vendored gpui-pre-linux lifts the window's pinned size around full screen
+//! itself (vendor/PATCHES.md); there it is a no-op.
 
 use gpui_kit::gpui::Window;
 
