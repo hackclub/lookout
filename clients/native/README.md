@@ -494,15 +494,6 @@ GPUI has no CSS, so the motion is reimplemented from the libraries' source:
   buttons (hit-tested by the OS, so Snap and accessibility stay native), and
   GNOME's close on Linux. Under a window manager's own frame (X11 without a
   compositor) Linux keeps the bar without its close button.
-- **The GNOME close button follows the user's theme.** libadwaita draws it:
-  `lookout-window-controls`, a small helper installed next to `lookout`,
-  `dlopen`s libadwaita and renders its real close button offscreen (normal,
-  hover, pressed, backdrop; light and dark), so `~/.config/gtk-4.0/gtk.css`
-  and distro-patched libadwaita apply. The images are cached and redrawn only
-  when the theme inputs change (checked at launch and on refocus). It's a
-  separate binary because GTK 4 can't load next to the GTK 3 that WebKitGTK
-  links into `lookout`. Without libadwaita it's Lookout's own button.
-  `LOOKOUT_THEMED_CONTROLS=0` turns it off.
 - Thumbnails that fail on a network error are retried twice with backoff
   instead of staying blank until restart.
 - Modals (Overlay, NamingModal, confirms) **fade out over 120ms** instead of

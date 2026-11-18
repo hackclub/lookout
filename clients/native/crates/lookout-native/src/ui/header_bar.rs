@@ -317,13 +317,6 @@ impl RenderOnce for HeaderBtn {
         } else {
             (hover, active, fg_hover)
         };
-        // GNOME close drawn by the user's libadwaita (gtk.css, distro
-        // patches): its images replace our circle, in our own 24px slot.
-        let themed = (self.kind == HeaderBtnKind::Control && !self.caption)
-            .then(crate::platform::gtk_window_controls::current)
-            .flatten();
-        let idle = if themed.is_some() { theme::transparent() } else { idle };
-        let (hover, active) = if themed.is_some() { (idle, idle) } else { (hover, active) };
         let bg = theme::mix(theme::mix(idle, hover, h), active, p);
         let fg = theme::mix(fg_idle, fg_hover, h.max(p));
         let (s1, s2, s3, s4) = (st.clone(), st.clone(), st.clone(), st.clone());
@@ -359,25 +352,6 @@ impl RenderOnce for HeaderBtn {
             .bg(bg)
             .text_color(fg)
             .map(|d| match (self.icon, label) {
-                _ if themed.is_some() => {
-                    use crate::platform::gtk_window_controls::CloseState;
-                    let set = themed.clone().unwrap();
-                    let (w, ht) = set.size;
-                    let base = if window.is_window_active() { CloseState::Normal } else { CloseState::Backdrop };
-                    let layer = |state: CloseState, opacity: f32| {
-                        img(set.image(t.dark, state))
-                            .absolute()
-                            .left(px((size - w) / 2.0))
-                            .top(px((size - ht) / 2.0))
-                            .w(px(w))
-                            .h(px(ht))
-                            .opacity(opacity)
-                    };
-                    d.relative()
-                        .child(layer(base, 1.0))
-                        .when(h > 0.0, |d| d.child(layer(CloseState::Hover, h)))
-                        .when(p > 0.0, |d| d.child(layer(CloseState::Pressed, p)))
-                }
                 (Some((icon, size)), _) => d.child(icon.el(size, fg)),
                 (None, Some(l)) => d.child(div().text_size(px(13.0)).line_height(px(16.0)).w600().whitespace_nowrap().child(l)),
                 (None, None) => d.child(self.content),
@@ -491,15 +465,6 @@ impl RenderOnce for HeaderBar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = theme(cx).clone();
         let drag = window.use_keyed_state("headerbar-drag", cx, |_, _| DragState { should_move: false });
-        // Back in focus: the GNOME theme may have changed while away.
-        if self.chrome == HeaderChrome::Gnome {
-            let active = window.is_window_active();
-            let was = window.use_keyed_state("headerbar-was-active", cx, |_, _| active);
-            let was_active = was.update(cx, |w, _| std::mem::replace(w, active));
-            if active && !was_active {
-                crate::platform::gtk_window_controls::recheck(cx);
-            }
-        }
         let make_close = |id: &'static str| {
             let on_close = self.on_close.clone();
             HeaderBtn::new(

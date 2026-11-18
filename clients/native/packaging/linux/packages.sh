@@ -44,10 +44,6 @@ fi
 bin="$stage/usr/bin/lookout"
 install -Dm755 "$root/target/release/lookout" "$bin"
 strip "$bin"
-# Draws libadwaita's close button for the GNOME header bar (dlopens it, so
-# no package dependency); links only libc.
-install -Dm755 "$root/target/release/lookout-window-controls" "$stage/usr/bin/lookout-window-controls"
-strip "$stage/usr/bin/lookout-window-controls"
 install -Dm644 "$here/com.hackclub.lookout.desktop" "$stage/usr/share/applications/Lookout.desktop"
 # Retain the Tauri icon name for existing pinned launchers.
 install -Dm644 "$root/assets/app-icon.png" "$stage/usr/share/icons/hicolor/128x128/apps/lookout.png"
@@ -155,7 +151,7 @@ SPEC
 cat "$legacy/rpm-postinst.sh" >> "$work/rpm/SPECS/lookout.spec"
 printf '\n%%postun\n' >> "$work/rpm/SPECS/lookout.spec"
 cat "$legacy/rpm-postrm.sh" >> "$work/rpm/SPECS/lookout.spec"
-printf '\n%%files\n/usr/bin/lookout\n/usr/bin/lookout-window-controls\n/usr/share/applications/Lookout.desktop\n/usr/share/icons/hicolor/128x128/apps/*.png\n/usr/share/lookout\n' >> "$work/rpm/SPECS/lookout.spec"
+printf '\n%%files\n/usr/bin/lookout\n/usr/share/applications/Lookout.desktop\n/usr/share/icons/hicolor/128x128/apps/*.png\n/usr/share/lookout\n' >> "$work/rpm/SPECS/lookout.spec"
 rpmbuild --define "_topdir $work/rpm" --define '_build_id_links none' -bb "$work/rpm/SPECS/lookout.spec"
 cp "$work"/rpm/RPMS/"$arch"/*.rpm "$out/Lookout_linux-${version}_${arch}.rpm"
 

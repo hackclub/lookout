@@ -21,7 +21,6 @@ pub mod tray;
 pub mod vibrancy;
 pub mod webview;
 pub mod desktop_appearance;
-pub mod gtk_window_controls;
 pub mod dock_menu;
 pub mod haptics;
 pub mod notifications;

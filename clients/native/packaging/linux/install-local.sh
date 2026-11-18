@@ -7,7 +7,6 @@ root="$here/../.."
 bin="$root/target/release/lookout"
 [ -x "$bin" ] || { echo "build first: cargo build --release" >&2; exit 1; }
 install -Dm755 "$bin" "$HOME/.local/bin/lookout"
-install -Dm755 "$root/target/release/lookout-window-controls" "$HOME/.local/bin/lookout-window-controls"
 install -Dm644 "$here/com.hackclub.lookout.desktop" "$HOME/.local/share/applications/com.hackclub.lookout.desktop"
 install -Dm644 "$root/assets/app-icon.png" "$HOME/.local/share/icons/hicolor/128x128/apps/com.hackclub.lookout.png"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
