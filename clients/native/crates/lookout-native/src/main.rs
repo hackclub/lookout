@@ -163,6 +163,7 @@ fn main() {
         platform::notifications::init(cx);
         platform::dock_menu::init(cx);
         hang::start(cx);
+        platform::gtk_window_controls::init(cx);
         // First launch: the onboarding window comes first, and the app
         // proper starts once it's finished.
         let launch = Launch { rt: rt.clone(), initial_urls: initial_urls.clone(), forwarded: forwarded.clone(), open_rx: open_rx.clone() };

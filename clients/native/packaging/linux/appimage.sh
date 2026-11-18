@@ -102,6 +102,8 @@ bin="$root/target/release/lookout"
 
 # ── AppDir ───────────────────────────────────────────────────────────────
 install -Dm755 "$bin" "$appdir/usr/bin/lookout"
+# Draws libadwaita's close button for the GNOME header bar; links only libc.
+install -Dm755 "$root/target/release/lookout-window-controls" "$appdir/usr/bin/lookout-window-controls"
 desktop="$appdir/usr/share/applications/com.hackclub.lookout.desktop"
 install -Dm644 "$here/com.hackclub.lookout.desktop" "$desktop"
 echo "X-AppImage-Version=$version" >> "$desktop"

@@ -5,10 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "Lookout — native desktop client (GPUI)"
 publish = false
+default-run = "lookout"
 
 [[bin]]
 name = "lookout"
 path = "src/main.rs"
+
+# Linux: draws libadwaita's close button for the GNOME header bar. Its own
+# binary because GTK 4 can't load into `lookout`, which links GTK 3.
+[[bin]]
+name = "lookout-window-controls"
+path = "src/bin/lookout_window_controls.rs"
 
 [dependencies]
 gpui-kit = { version = "=0.8.1", default-features = false }
