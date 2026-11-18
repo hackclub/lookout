@@ -1442,7 +1442,7 @@ fn source_row(
         .rounded(px(8.0))
         .w_full()
         .child(
-            canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_pressed_rounded_bg(bounds, 8.0, scale, fill, border, window))
+            canvas(|_, _, _| (), move |bounds, _, window, _| paint::paint_rounded_bg(bounds, 8.0, scale, fill, border, window))
                 .absolute()
                 .inset_0(),
         )
