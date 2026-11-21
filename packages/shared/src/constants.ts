@@ -34,16 +34,22 @@ export const MAX_CLOCK_SKEW_MS = 5_000;
 // ──────────────────────────────────────────────────────────
 
 /** Trust envelope: how far in the past `capturedAt` may be relative
- *  to server `now()` before being rejected. Wide enough to absorb
- *  normal client-clock skew and buffered uploads.
+ *  to server `now()` before server time is substituted for it. Wide
+ *  enough to absorb normal client-clock skew and buffered uploads.
  *  Default: 300000 (5 minutes) */
 export const CAPTURED_AT_PAST_TOLERANCE_MS = 300_000;
 
 /** Trust envelope: how far in the future `capturedAt` may be relative
- *  to server `now()` before being rejected. Symmetric with the past
- *  bound to handle clients with fast-skewed clocks.
- *  Default: 300000 (5 minutes) */
-export const CAPTURED_AT_FUTURE_TOLERANCE_MS = 300_000;
+ *  to server `now()` before server time is substituted for it. A capture
+ *  is taken before its request is sent, so an honest stamp is never
+ *  ahead of the server by more than the clock-offset estimate's residual
+ *  error: anything past a few seconds is a fast clock, and stamping the
+ *  capture on arrival is accurate to within upload latency. This used to
+ *  be symmetric with the past bound, which let a clock 30s–5min fast
+ *  plant its first stamp in the future; every corrected stamp after it
+ *  was then refused as non-monotonic for as long as the skew lasted.
+ *  Default: 5000 (5 seconds) */
+export const CAPTURED_AT_FUTURE_TOLERANCE_MS = 5_000;
 
 /** Credit-mode streak window: |capturedAt - expectedAt| ≤ this credits
  *  60s; outside resets the streak to a fresh anchor with 0 credit.

@@ -611,28 +611,27 @@ export async function sessionRoutes(app: FastifyInstance) {
           .orderBy(sql`${schema.screenshots.capturedAt} DESC NULLS LAST`)
           .limit(1);
 
-        // A wrong system clock must not cost the user their recording. An
-        // out-of-envelope timestamp is adopted as server time rather than
-        // 400'd; anything else (non-monotonic, pre-session) is still refused.
+        // A wrong system clock must not cost the user their recording: a
+        // stamp that fails any check is adopted as server time rather than
+        // 400'd. See adoptedCapturedAt for why that covers the monotonic
+        // check too.
         const resolved = adoptedCapturedAt(
           clientCapturedAt,
           serverNow,
           startedAt,
           latest?.capturedAt ?? null,
         );
-        if (!resolved.ok) {
-          return reply.code(400).send({ error: resolved.code });
-        }
         if (resolved.adopted) {
           capturedAtAdopted = true;
           request.log.warn(
             {
               sessionId: session.id,
+              reason: resolved.reason,
               clientCapturedAt: clientCapturedAt.toISOString(),
               serverNow: serverNow.toISOString(),
               skewMs: clientCapturedAt.getTime() - serverNow.getTime(),
             },
-            "client clock outside the trust envelope — stamping capture with server time",
+            "client capturedAt not trusted — stamping capture with server time",
           );
         }
         clientCapturedAt = resolved.capturedAt;

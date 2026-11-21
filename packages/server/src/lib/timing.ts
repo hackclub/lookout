@@ -24,8 +24,8 @@ export function computeMinuteBucket(
 // Credit-mode helpers
 // ──────────────────────────────────────────────────────────────────
 
-/** Distinct error codes for capturedAt validation. Each maps 1:1 to a
- *  rejection condition so logs and dashboards can be cleanly grepped. */
+/** Distinct reasons a capturedAt is not trusted. Each maps 1:1 to one
+ *  check so logs and dashboards can be cleanly grepped. */
 export type CapturedAtValidationError =
   | "captured_at_future"
   | "captured_at_too_old"
@@ -44,25 +44,8 @@ export type CapturedAtValidation =
   | CapturedAtValidationFail;
 
 /**
- * True for the two failures that mean "this client's clock is wrong" rather
- * than "this client is misbehaving".
- *
- * The distinction matters because the two deserve opposite treatment. A
- * non-monotonic or pre-session timestamp says something is wrong with the
- * request; a timestamp five minutes off says nothing except that the user's
- * system clock is off, which is common, invisible to them, and none of their
- * doing. Rejecting the latter used to fail the upload-url request outright,
- * so a skewed clock cost the user their entire recording — every upload 400'd
- * before a presigned URL was ever issued. The caller substitutes server time
- * for these instead. See adoptedCapturedAt.
- */
-export function isClockSkewError(code: CapturedAtValidationError): boolean {
-  return code === "captured_at_future" || code === "captured_at_too_old";
-}
-
-/**
- * Resolve the `captured_at` to actually use, adopting server time when the
- * client's clock is too far off to trust.
+ * Resolve the `captured_at` to actually use: the client's claim when it
+ * checks out, server time otherwise.
  *
  * Server time is authoritative and unforgeable, so substituting it is
  * strictly SAFER than accepting the client's claim — a hostile client gains
@@ -72,9 +55,22 @@ export function isClockSkewError(code: CapturedAtValidationError): boolean {
  * a little late rather than not at all. That is the right trade against
  * losing the recording.
  *
- * Returns the timestamp to store plus whether a substitution happened, so the
- * route can tell the client (which can then correct its own offset from the
- * `serverTime` in the response) and operators can see it in telemetry.
+ * Every failed check is handled this way, not only the envelope ones. The
+ * monotonic and pre-session checks used to refuse with a 400 on the theory
+ * that they catch a misbehaving request rather than a wrong clock, but in
+ * practice they fired on clocks: a clock 30s–5min fast planted its first
+ * stamp in the future, and every corrected stamp after it read as
+ * non-monotonic; a clock stepped backwards mid-session (Windows syncing its
+ * time) did the same. The desktop app drops a refused capture and tries
+ * again next minute, so the recording lost its first minutes while the user
+ * watched "0m" and gave up. Refusing never protected anything either: a
+ * replayed stamp adopted as server time is indistinguishable from a fresh
+ * capture, which the rate limit and the streak maths already govern.
+ *
+ * Returns the timestamp to store plus whether a substitution happened and
+ * why, so the route can tell the client (which then corrects its own offset
+ * from the `serverTime` in the response) and operators can see it in
+ * telemetry.
  */
 export function adoptedCapturedAt(
   clientCapturedAt: Date,
@@ -82,54 +78,36 @@ export function adoptedCapturedAt(
   sessionStartedAt: Date,
   latestCapturedAt: Date | null,
 ):
-  | { ok: true; capturedAt: Date; adopted: boolean }
-  | { ok: false; code: CapturedAtValidationError } {
-  const first = validateCapturedAt(
+  | { capturedAt: Date; adopted: false }
+  | { capturedAt: Date; adopted: true; reason: CapturedAtValidationError } {
+  const check = validateCapturedAt(
     clientCapturedAt,
     serverNow,
     sessionStartedAt,
     latestCapturedAt,
   );
-  if (first.ok) {
-    return { ok: true, capturedAt: clientCapturedAt, adopted: false };
+  if (check.ok) {
+    return { capturedAt: clientCapturedAt, adopted: false };
   }
-  if (!isClockSkewError(first.code)) {
-    return { ok: false, code: first.code };
-  }
-
-  // Clock skew: stamp with server time instead. Re-validate, because the
-  // substituted value still has to satisfy monotonicity and the session
-  // start — if it doesn't, something other than the clock is wrong and the
-  // caller should still refuse.
-  const second = validateCapturedAt(
-    serverNow,
-    serverNow,
-    sessionStartedAt,
-    latestCapturedAt,
-  );
-  if (!second.ok) {
-    return { ok: false, code: second.code };
-  }
-  return { ok: true, capturedAt: serverNow, adopted: true };
+  return { capturedAt: serverNow, adopted: true, reason: check.code };
 }
 
 /**
  * Validate a client-attested `capturedAt` against the trust envelope and the
- * session's existing state. Returns a tagged result so the caller can map to
- * a specific 4xx error code.
+ * session's existing state. Returns a tagged result naming which check
+ * failed, for the logs.
  *
- * - Envelope: `serverNow - 5min ≤ capturedAt ≤ serverNow + 5min`
+ * - Envelope: `serverNow - 5min ≤ capturedAt ≤ serverNow + 5s`
  * - Must be ≥ session.startedAt
  * - Must be strictly > the latest CONFIRMED capturedAt (monotonic). The
  *   caller must pass the latest confirmed capture only — an unconfirmed
  *   (presign-time) row is an upload that never landed, and using it as the
  *   floor blocks the clip→JPEG fallback retry that deliberately reuses the
- *   failed upload's stamp. Equality is only allowed when the caller is in an
- *   idempotent retry path (same screenshotId); that check lives at the route
- *   handler since it requires the row lookup.
+ *   failed upload's stamp.
  *
- * Envelope failures are usually a wrong clock rather than a bad actor — use
- * `adoptedCapturedAt` to absorb them rather than calling this directly.
+ * A failure is a wrong clock far more often than a bad actor — use
+ * `adoptedCapturedAt`, which substitutes server time, rather than refusing
+ * on this directly.
  */
 export function validateCapturedAt(
   capturedAt: Date,

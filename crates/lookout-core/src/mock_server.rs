@@ -530,22 +530,28 @@ impl MockServer {
                 let Some(claimed) = claimed else {
                     return (400, r#"{"error":"credit_mode_requires_captured_at"}"#.into());
                 };
-                const ENVELOPE_MS: i64 = 5 * 60 * 1000;
+                const PAST_ENVELOPE_MS: i64 = 5 * 60 * 1000;
+                const FUTURE_ENVELOPE_MS: i64 = 5 * 1000;
                 captured_ms = claimed;
-                if claimed > now_ms + ENVELOPE_MS || claimed < now_ms - ENVELOPE_MS {
+                if claimed > now_ms + FUTURE_ENVELOPE_MS || claimed < now_ms - PAST_ENVELOPE_MS {
                     captured_ms = now_ms;
                     adopted = true;
                 }
                 if activating || s.started_at_ms.is_none() {
                     s.started_at_ms = Some(captured_ms.min(now_ms));
                 }
+                // Like the real server, a stamp before the session or not
+                // past the last confirmed one (a clock stepped backwards)
+                // is stamped on arrival, never refused.
                 let started = s.started_at_ms.unwrap();
                 if captured_ms < started - 2_000 {
-                    return (400, r#"{"error":"captured_at_before_session_start"}"#.into());
+                    captured_ms = now_ms;
+                    adopted = true;
                 }
                 if let Some(latest) = s.latest_confirmed_ms {
                     if captured_ms <= latest {
-                        return (400, r#"{"error":"captured_at_not_monotonic"}"#.into());
+                        captured_ms = now_ms;
+                        adopted = true;
                     }
                 }
                 next_expected = match s.anchor_ms {

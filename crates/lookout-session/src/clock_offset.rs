@@ -5,9 +5,10 @@
 //! differently on the same machine.
 //!
 //! Every timestamp the credit system reads comes from the client's own clock,
-//! measured against a ±30s streak window inside a ±5min trust envelope. The
-//! server adopts its own time for captures whose stamps it can't trust, so a
-//! wrong clock never costs the recording. This closes the other half: the
+//! measured against a ±30s streak window inside a trust envelope (5 minutes
+//! behind server time, 5 seconds ahead). The server adopts its own time for
+//! any capture whose stamp it can't trust, so a wrong clock never costs the
+//! recording. This closes the other half: the
 //! client learns how far off it is from the server's own timestamps and
 //! corrects both its stamps and its schedule, so a skewed clock costs nothing
 //! at all.
@@ -21,6 +22,13 @@
 /// Smallest offset worth correcting for. Below this, the "correction" would
 /// be indistinguishable from network jitter and would only add noise.
 pub const CLOCK_OFFSET_DEADBAND_MS: i64 = 2_000;
+
+/// A sample this far from the running estimate is a clock step (the OS
+/// syncing its time, a timezone fix, sleep/wake), not jitter: no round trip
+/// is that asymmetric. Smoothing it in would leave the stamps wrong for the
+/// better part of ten minutes — every one of them outside the credit window
+/// — so it is adopted outright, the same as a first sample.
+pub const CLOCK_OFFSET_STEP_MS: i64 = 10_000;
 
 /// A running estimate of `serverNow - clientNow`, in milliseconds.
 ///
@@ -67,9 +75,10 @@ impl ClockOffset {
 
         // First sample is adopted outright — a badly wrong clock should be
         // corrected on the very next capture, not eased into over many
-        // minutes. Later samples are smoothed, so ordinary jitter doesn't
-        // wobble the stamps we send.
-        self.offset_ms = if self.samples == 0 {
+        // minutes. So is a clock step, for the same reason. Everything else
+        // is smoothed, so ordinary jitter doesn't wobble the stamps we send.
+        let is_step = (sample - self.offset_ms).abs() >= CLOCK_OFFSET_STEP_MS as f64;
+        self.offset_ms = if self.samples == 0 || is_step {
             sample
         } else {
             self.offset_ms * 0.75 + sample * 0.25
@@ -166,10 +175,23 @@ mod tests {
         let skew = 60_000;
         c.observe(LOCAL + skew, LOCAL, LOCAL + 20);
         let after_first = c.offset_ms();
-        // One wild outlier must not move the estimate far.
-        c.observe(LOCAL + skew + 30_000, LOCAL, LOCAL + 20);
+        // One noisy sample must not move the estimate far.
+        c.observe(LOCAL + skew + 5_000, LOCAL, LOCAL + 20);
         assert!(c.offset_ms() > after_first);
-        assert!(c.offset_ms() < after_first + 30_000);
+        assert!(c.offset_ms() < after_first + 5_000);
+    }
+
+    #[test]
+    fn adopts_a_clock_step_outright() {
+        // The OS correcting the clock by minutes mid-recording. Smoothed at
+        // 25% a sample, the estimate would stay outside the ±30s credit
+        // window for six more captures — six minutes of credit lost to a
+        // correction the user never saw.
+        let mut c = ClockOffset::new();
+        c.observe(LOCAL, LOCAL, LOCAL + 20);
+        let stepped = LOCAL + 3 * 60_000; // the clock jumped 3 minutes ahead
+        c.observe(LOCAL + 60_000, stepped + 60_000, stepped + 60_020);
+        assert!((c.correct(stepped + 60_000) - (LOCAL + 60_000)).abs() < 100);
     }
 
     #[test]

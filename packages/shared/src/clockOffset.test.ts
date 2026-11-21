@@ -65,10 +65,23 @@ describe("ClockOffset", () => {
     const skew = 60_000;
     c.observe(iso(local + skew), local, local + 20);
     const afterFirst = c.offset;
-    // One wild outlier must not move the estimate far.
-    c.observe(iso(local + skew + 30_000), local, local + 20);
+    // One noisy sample must not move the estimate far.
+    c.observe(iso(local + skew + 5_000), local, local + 20);
     expect(c.offset).toBeGreaterThan(afterFirst);
-    expect(c.offset).toBeLessThan(afterFirst + 30_000);
+    expect(c.offset).toBeLessThan(afterFirst + 5_000);
+  });
+
+  it("adopts a clock step outright instead of easing into it", () => {
+    // The OS correcting the clock by minutes mid-recording. Smoothed at 25%
+    // a sample, the estimate would stay outside the ±30s credit window for
+    // six more captures — six minutes of credit lost to a correction the
+    // user never saw.
+    const c = new ClockOffset();
+    const local = 1_700_000_000_000;
+    c.observe(iso(local), local, local + 20);
+    const stepped = local + 3 * 60_000; // the clock jumped 3 minutes ahead
+    c.observe(iso(local + 60_000), stepped + 60_000, stepped + 60_020);
+    expect(c.correct(stepped + 60_000)).toBeCloseTo(local + 60_000, -2);
   });
 
   it("ignores a sample whose local window ran backwards", () => {

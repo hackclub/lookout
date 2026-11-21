@@ -431,10 +431,10 @@ async fn a_refused_capture_is_dropped_and_the_next_one_lands() {
     let (server, shell, core, cfg) = setup("active", 100).await;
     core.recorder_open(cfg, camera()).await.unwrap();
     wait_for(&core, 5, |s| s.capture_count >= 1).await;
-    server.fail_next("GET", "/api/sessions/tok/upload-url", 400, r#"{"error":"captured_at_not_monotonic"}"#);
+    server.fail_next("GET", "/api/sessions/tok/upload-url", 400, r#"{"error":"captured_at_invalid"}"#);
     wait_for(&core, 10, |s| s.capture_count >= 3).await;
     assert!(
-        shell.tick_errors().iter().any(|m| m.contains("captured_at_not_monotonic")),
+        shell.tick_errors().iter().any(|m| m.contains("captured_at_invalid")),
         "{:?}",
         shell.tick_errors()
     );

@@ -307,7 +307,7 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 **Query Parameters:**
 | Name | Type | Description |
 |------|------|-------------|
-| `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Must fall within ±5 min of server time and must be strictly monotonic across uploads. |
+| `capturedAt` | ISO-8601 (optional) | Client-attested moment the frame was grabbed. Presence on the **first** upload of a session sticks it to **credit mode** for life; absence sticks it to **bucket mode**. Subsequent uploads on a credit-mode session **must** include it. Trusted when it is no more than 5 min behind or 5 s ahead of server time, not before the session started, and strictly later than the latest confirmed capture; otherwise server time is stored instead (see `capturedAtAdopted`). |
 | `clientInfo` | string (optional) | [Client telemetry string](#client-info) (User-Agent-like). Stored opaquely per screenshot; the session's first non-empty value is surfaced on session-info endpoints. Best-effort — never parsed or validated, silently truncated to 1024 chars; an invalid/oversized value never fails the upload. |
 | `format` | `jpeg` \| `webm` \| `mp4` (optional) | Payload format for this capture unit. Omitted = `jpeg` (legacy single frame). `webm`/`mp4` request a [clip](#clips) upload. The response's `format` is the **granted** format — clip requests on sessions without clips enabled are silently downgraded to `jpeg`, and the client must upload exactly what was granted (the presigned URL is signed with that content type). |
 
@@ -327,10 +327,10 @@ Generates a presigned PUT URL for uploading a screenshot to R2. Activates pendin
 }
 ```
 
-`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below). `format` is the granted payload format (see [Clips](#clips)); `r2Key` carries the matching extension (`.jpg`/`.webm`/`.mp4`).
+`nextExpectedAt` is the server's authoritative target for the **next** capture's `capturedAt` — clients should schedule from it (see Tracking Modes below). `format` is the granted payload format (see [Clips](#clips)); `r2Key` carries the matching extension (`.jpg`/`.webm`/`.mp4`). `capturedAtAdopted: true` is present when the client's `capturedAt` was not trusted and the capture was stamped with `serverTime` instead — a client seeing it should re-derive its clock offset from `serverTime` (`ClockOffset` in `@lookout/shared`).
 
 **Errors:**
-- `400` — `captured_at_future`, `captured_at_too_old`, `captured_at_before_session_start`, `captured_at_not_monotonic`, `captured_at_invalid`, or `credit_mode_requires_captured_at`
+- `400` — `captured_at_invalid` or `credit_mode_requires_captured_at`. A parseable `capturedAt` is never refused: one more than 5 minutes behind or 5 seconds ahead of server time, before the session started, or not later than the latest confirmed capture is replaced with server time and the response says so with `capturedAtAdopted: true`.
 - `404` — Session not found
 - `409` — Session not in `pending` or `active` state
 - `429` — Rate limit exceeded, or max upload requests per session reached (4320)

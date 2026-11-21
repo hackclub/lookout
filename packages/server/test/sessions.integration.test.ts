@@ -177,15 +177,22 @@ describe("activation race / first capture", () => {
     expect(conf.status).toBe(200);
   });
 
-  it("first capture with clientCapturedAt in the future is clamped to serverNow", async () => {
+  it("first capture with clientCapturedAt in the future is stamped with serverNow", async () => {
     const { token, id } = await createSession();
-    // Lying client: capturedAt = serverNow + 30s (within future envelope).
+    // A clock 30s fast. A capture can't come from the future, so the stamp
+    // is replaced with server time — both on the session and on the row,
+    // or the next (corrected) capture would read as non-monotonic.
     const future = new Date(virtualNow + 30_000).toISOString();
     const up = await postUpload(token, future);
     expect(up.status).toBe(200);
+    expect(up.body.capturedAtAdopted).toBe(true);
     const s = await loadSession(id);
     // started_at must never be in the future.
     expect(s?.startedAt?.getTime()).toBe(virtualNow);
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, up.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
   });
 });
 
@@ -283,21 +290,28 @@ describe("credit mode envelope", () => {
     expect(credited).toBe(3 * 60);
   });
 
-  it("does NOT let adoption bypass replay protection", async () => {
-    // Adoption is for clocks, not for requests. A duplicate/non-monotonic
-    // claim must still be refused — server time can't rescue it, so the
-    // envelope's anti-tamper role survives the change.
+  it("adopts server time for a non-monotonic stamp and keeps crediting", async () => {
+    // A clock stepped backwards mid-recording (Windows syncing its time)
+    // puts every later stamp behind the last confirmed one. These used to be
+    // refused, and the desktop app dropped each refused capture: minutes of
+    // recording lost to a correction the user never saw. Stamped on arrival
+    // instead, the capture lands on its expected mark and the minute credits.
     const { token } = await seedCreditSession();
     advanceVirtualMs(60_000);
     const ahead = await postUpload(token, new Date(virtualNow).toISOString());
     expect(ahead.status).toBe(200);
     await confirmUpload(token, ahead.body.screenshotId);
 
-    // Now claim a moment already used, well inside the envelope so adoption
-    // is not triggered.
-    const replay = await postUpload(token, new Date(virtualNow - 1_000).toISOString());
-    expect(replay.status).toBe(400);
-    expect(replay.body.error).toBe("captured_at_not_monotonic");
+    advanceVirtualMs(60_000);
+    const stepped = await postUpload(token, new Date(virtualNow - 90_000).toISOString());
+    expect(stepped.status).toBe(200);
+    expect(stepped.body.capturedAtAdopted).toBe(true);
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, stepped.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
+    const c = await confirmUpload(token, stepped.body.screenshotId);
+    expect(c.body.trackedSeconds).toBe(120);
   });
 
   it("clip fallback: an unconfirmed presign does not block a same-stamp retry", async () => {
@@ -329,34 +343,19 @@ describe("credit mode envelope", () => {
     expect(c.body.trackedSeconds).toBe(60);
   });
 
-  it("rejects non-monotonic capturedAt", async () => {
-    const sess = await seedCreditSession();
-    // Submit a second upload with an EARLIER capturedAt than the first.
-    advanceVirtualMs(60_000);
-    const earlier = new Date(baseTime.getTime() - 1_000).toISOString();
-    const up = await postUpload(sess.token, earlier);
-    // baseTime - 1s is also < startedAt (which equals baseTime), so the
-    // earlier-than-start check fires first. Either error is correct anti-
-    // cheat behavior; lock to whichever the implementation surfaces.
-    expect(up.status).toBe(400);
-    expect([
-      "captured_at_not_monotonic",
-      "captured_at_before_session_start",
-    ]).toContain(up.body.error);
-  });
-
-  it("rejects capturedAt before session.startedAt", async () => {
+  it("adopts server time for a capturedAt before session.startedAt", async () => {
     const { token } = await seedCreditSession();
-    // Build a capturedAt that's within the past envelope but before
-    // startedAt (== baseTime).
+    // Within the past envelope but before startedAt (== baseTime): a clock
+    // that stepped backwards right after the seed. Never a 400.
     advanceVirtualMs(60_000);
     const before = new Date(baseTime.getTime() - 30_000).toISOString();
     const up = await postUpload(token, before);
-    expect(up.status).toBe(400);
-    expect([
-      "captured_at_before_session_start",
-      "captured_at_not_monotonic",
-    ]).toContain(up.body.error);
+    expect(up.status).toBe(200);
+    expect(up.body.capturedAtAdopted).toBe(true);
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, up.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
   });
 });
 
@@ -926,11 +925,12 @@ describe("latency — burst races (the bug we saw in prod)", () => {
   });
 
   it("burst monotonicity: server rejects captured_at not strictly increasing", async () => {
-    // The cap2 having same capturedAt as cap1 hits the
-    // captured_at_not_monotonic guard. cap1 must be CONFIRMED first: the
-    // floor is the latest confirmed capture, so an unconfirmed presign row
-    // doesn't block a same-stamp retry (the clip→JPEG fallback depends on
-    // that — see the regression test in the envelope suite).
+    // cap2 having the same capturedAt as cap1 trips the monotonic check,
+    // and is stamped with server time rather than refused. cap1 must be
+    // CONFIRMED first: the floor is the latest confirmed capture, so an
+    // unconfirmed presign row doesn't block a same-stamp retry (the
+    // clip→JPEG fallback depends on that — see the regression test in the
+    // envelope suite).
     const { token } = await createSession();
     advanceVirtualMs(60_000);
     const cap = new Date(virtualNow).toISOString();
@@ -938,9 +938,14 @@ describe("latency — burst races (the bug we saw in prod)", () => {
     expect(u1.status).toBe(200);
     const c1 = await confirmUpload(token, u1.body.screenshotId);
     expect(c1.status).toBe(200);
+    advanceVirtualMs(5_000);
     const u2 = await postUpload(token, cap); // exact same capturedAt
-    expect(u2.status).toBe(400);
-    expect(u2.body.error).toBe("captured_at_not_monotonic");
+    expect(u2.status).toBe(200);
+    expect(u2.body.capturedAtAdopted).toBe(true);
+    const row = await db.query.screenshots.findFirst({
+      where: eq(schema.screenshots.id, u2.body.screenshotId),
+    });
+    expect(row?.capturedAt?.getTime()).toBe(virtualNow);
   });
 });
 

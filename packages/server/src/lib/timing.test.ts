@@ -10,7 +10,6 @@ import {
   creditFinalCapture,
   validateCapturedAt,
   adoptedCapturedAt,
-  isClockSkewError,
   type CreditDecision,
 } from "./timing.js";
 
@@ -510,19 +509,19 @@ describe("adoptedCapturedAt (client clock skew)", () => {
   it("passes a healthy clock through untouched", () => {
     const cap = ms(serverNow, -500);
     const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
-    expect(r).toEqual({ ok: true, capturedAt: cap, adopted: false });
+    expect(r).toEqual({ capturedAt: cap, adopted: false });
   });
 
   it("adopts server time for a clock hours FAST instead of rejecting", () => {
     const cap = ms(serverNow, 3 * 60 * 60_000);
     const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
-    expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+    expect(r).toEqual({ capturedAt: serverNow, adopted: true, reason: "captured_at_future" });
   });
 
   it("adopts server time for a clock hours SLOW instead of rejecting", () => {
     const cap = ms(serverNow, -3 * 60 * 60_000);
     const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
-    expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+    expect(r).toEqual({ capturedAt: serverNow, adopted: true, reason: "captured_at_too_old" });
   });
 
   it("adopts even for an absurd timestamp — nothing is gained by lying", () => {
@@ -531,30 +530,77 @@ describe("adoptedCapturedAt (client clock skew)", () => {
     // stamped when the server saw it.
     for (const cap of [new Date(0), new Date("2099-01-01T00:00:00.000Z")]) {
       const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
-      expect(r).toEqual({ ok: true, capturedAt: serverNow, adopted: true });
+      expect(r).toMatchObject({ capturedAt: serverNow, adopted: true });
     }
   });
 
-  it("still refuses a non-monotonic timestamp — that is not a clock problem", () => {
-    // Adoption must not become a way to bypass replay protection: a later
-    // capture claiming an earlier moment is a request-level fault, and
-    // server time cannot rescue it either.
-    const latest = ms(serverNow, 30_000);
-    const r = adoptedCapturedAt(ms(serverNow, 10_000), serverNow, startedAt, latest);
-    expect(r).toEqual({ ok: false, code: "captured_at_not_monotonic" });
+  it("adopts server time for a stamp a few seconds ahead — a capture can't come from the future", () => {
+    // A capture is taken before its request is sent, so an honest stamp is
+    // never ahead of the server by more than the offset estimate's error.
+    // Treating anything past a few seconds as a fast clock is what keeps a
+    // session's FIRST stamp (taken before any serverTime was seen) honest.
+    const cap = ms(serverNow, 30_000);
+    const r = adoptedCapturedAt(cap, serverNow, startedAt, null);
+    expect(r).toEqual({ capturedAt: serverNow, adopted: true, reason: "captured_at_future" });
   });
 
-  it("still refuses a pre-session timestamp", () => {
+  it("adopts server time for a non-monotonic stamp — a clock stepped backwards", () => {
+    // Windows syncing its time mid-recording moves every later stamp behind
+    // the last confirmed one. Refusing these cost the user minutes of
+    // recording; stamping them on arrival costs nothing, and nothing was
+    // ever protected by refusing — an adopted replay is indistinguishable
+    // from a fresh capture.
+    const latest = ms(serverNow, -60_000);
+    const r = adoptedCapturedAt(ms(serverNow, -90_000), serverNow, startedAt, latest);
+    expect(r).toEqual({ capturedAt: serverNow, adopted: true, reason: "captured_at_not_monotonic" });
+  });
+
+  it("adopts server time for a pre-session stamp", () => {
     const later = ms(serverNow, 10 * 60_000);
     const r = adoptedCapturedAt(ms(serverNow, -60_000), serverNow, later, null);
-    expect(r.ok).toBe(false);
+    expect(r).toEqual({ capturedAt: serverNow, adopted: true, reason: "captured_at_before_session_start" });
   });
 
-  it("classifies only envelope failures as clock skew", () => {
-    expect(isClockSkewError("captured_at_future")).toBe(true);
-    expect(isClockSkewError("captured_at_too_old")).toBe(true);
-    expect(isClockSkewError("captured_at_not_monotonic")).toBe(false);
-    expect(isClockSkewError("captured_at_before_session_start")).toBe(false);
+  it("a clock a few minutes fast credits from its first minute", () => {
+    // The production case: a PC 3m19s fast. Its seed stamp is ahead of the
+    // server, so it is stamped on arrival; the client reads `serverTime`
+    // from that response and corrects every later stamp, which then lands on
+    // the grid. With the old symmetric envelope the seed was accepted as
+    // stamped, and the corrected stamps that followed were refused as
+    // non-monotonic for the next three minutes.
+    const skew = 199_000;
+    let anchor: Date | null = null;
+    let count = 0;
+    let latest: Date | null = null;
+    let credited = 0;
+    for (let i = 0; i < 5; i++) {
+      const server = ms(serverNow, i * SCREENSHOT_INTERVAL_MS);
+      const learnt = i > 0;
+      const stamp = learnt ? ms(server, -150) : ms(server, skew);
+      const r = adoptedCapturedAt(stamp, server, serverNow, latest);
+      expect(r.adopted).toBe(!learnt);
+      const d = creditCapture(r.capturedAt, anchor, count);
+      anchor = d.newAnchor;
+      count = d.newCount;
+      credited += d.credit;
+      latest = r.capturedAt;
+    }
+    expect(credited).toBe(4 * 60);
+  });
+
+  it("a clock stepped backwards mid-session keeps crediting", () => {
+    // Two minutes in, the OS corrects the clock back by 199s. The client's
+    // offset estimate is now stale by that much, so its next stamp is
+    // before the session even started; the server stamps it on arrival,
+    // which is the expected mark, and the minute credits.
+    const anchor = serverNow;
+    const latest = ms(serverNow, 2 * SCREENSHOT_INTERVAL_MS);
+    const server = ms(serverNow, 3 * SCREENSHOT_INTERVAL_MS);
+    const r = adoptedCapturedAt(ms(server, -199_000), server, serverNow, latest);
+    expect(r.adopted).toBe(true);
+    const d = creditCapture(r.capturedAt, anchor, 2);
+    expect(d.credit).toBe(60);
+    expect(d.inWindow).toBe(true);
   });
 
   it("keeps a skewed client crediting minute after minute", () => {
@@ -568,8 +614,7 @@ describe("adoptedCapturedAt (client clock skew)", () => {
       const server = ms(serverNow, i * SCREENSHOT_INTERVAL_MS);
       const skewed = ms(server, 60 * 60_000); // an hour fast
       const r = adoptedCapturedAt(skewed, server, startedAt, null);
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
+      expect(r.adopted).toBe(true);
       const d = creditCapture(r.capturedAt, anchor, count);
       anchor = d.newAnchor;
       count = d.newCount;

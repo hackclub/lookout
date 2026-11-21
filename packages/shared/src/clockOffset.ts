@@ -1,19 +1,27 @@
 // Client clock-offset estimation.
 //
 // Every timestamp the credit system reads comes from the client's own clock,
-// measured against a ±30s streak window inside a ±5min trust envelope. A
-// system clock that is merely a few minutes off — common, invisible to the
-// user, and none of their doing — therefore used to break recording outright:
-// the server refused every upload-url request before issuing a presigned URL.
+// measured against a ±30s streak window inside a trust envelope (5 minutes
+// behind server time, 5 seconds ahead). A system clock that is merely a few
+// minutes off — common, invisible to the user, and none of their doing —
+// therefore used to break recording outright: the server refused every
+// upload-url request before issuing a presigned URL.
 //
-// The server now adopts its own time for such captures, so the recording is
-// never lost. This closes the other half: clients learn how far off they are
-// from the server's own timestamps and correct their stamps, so a skewed clock
-// costs nothing at all rather than costing precision.
+// The server now adopts its own time for any capture it can't trust, so the
+// recording is never lost. This closes the other half: clients learn how far
+// off they are from the server's own timestamps and correct their stamps, so
+// a skewed clock costs nothing at all rather than costing precision.
 
 /** Smallest offset worth correcting for. Below this, the "correction" would
  *  be indistinguishable from network jitter and would only add noise. */
 export const CLOCK_OFFSET_DEADBAND_MS = 2_000;
+
+/** A sample this far from the running estimate is a clock step (the OS
+ *  syncing its time, a timezone fix, sleep/wake), not jitter: no round trip
+ *  is that asymmetric. Smoothing it in would leave the stamps wrong for the
+ *  better part of ten minutes — every one of them outside the credit window
+ *  — so it is adopted outright, the same as a first sample. */
+export const CLOCK_OFFSET_STEP_MS = 10_000;
 
 /**
  * A running estimate of `serverNow - clientNow`.
@@ -56,10 +64,13 @@ export class ClockOffset {
 
     // First sample is adopted outright — a badly wrong clock should be
     // corrected on the very next capture, not eased into over many minutes.
-    // Later samples are smoothed, so ordinary jitter doesn't wobble the
-    // stamps we send.
+    // So is a clock step, for the same reason. Everything else is smoothed,
+    // so ordinary jitter doesn't wobble the stamps we send.
+    const isStep = Math.abs(sample - this.offsetMs) >= CLOCK_OFFSET_STEP_MS;
     this.offsetMs =
-      this.samples === 0 ? sample : this.offsetMs * 0.75 + sample * 0.25;
+      this.samples === 0 || isStep
+        ? sample
+        : this.offsetMs * 0.75 + sample * 0.25;
     this.samples++;
   }
 
