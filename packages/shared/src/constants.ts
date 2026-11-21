@@ -301,6 +301,15 @@ export const CLIP_WEB_VIDEO_BITS_PER_SECOND = 40_000_000;
  *  Default: 8388608 (8 MB) */
 export const MAX_CLIP_BYTES = 8 * 1024 * 1024;
 
+/** Min clip file size in bytes, validated alongside MAX_CLIP_BYTES. A clip
+ *  below this is a container with no frames — Firefox's MediaRecorder emits
+ *  a bare 217-byte WebM header when its canvas track starves (Mozilla bug
+ *  1344524). Rejecting it at confirm makes the client upload that tick's
+ *  JPEG instead, rather than banking a minute the worker can't decode.
+ *  Real 1080p clips are hundreds of KB.
+ *  Default: 1024 (1 KiB) */
+export const MIN_CLIP_BYTES = 1024;
+
 // ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds
 // ──────────────────────────────────────────────────────────

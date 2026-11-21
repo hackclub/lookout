@@ -7,7 +7,7 @@ import {
   MAX_CLIP_FRAME_OVERRUN,
   MAX_CLIP_BYTES,
 } from "@lookout/shared";
-import { ClipRecorder } from "./clipRecorder.js";
+import { ClipRecorder, webmHasFrames } from "./clipRecorder.js";
 
 /**
  * A clip is cut by its upload tick, not by a timer — so when uploads run
@@ -27,7 +27,7 @@ const BYTES_PER_FRAME = 300_000;
 let framesRequested = 0;
 
 class FakeMediaRecorder {
-  static isTypeSupported = (mime: string) => mime === "video/mp4;codecs=avc1.640028";
+  static isTypeSupported = (mime: string): boolean => mime === "video/mp4;codecs=avc1.640028";
   state = "inactive";
   ondataavailable: ((e: { data: Blob }) => void) | null = null;
   onstop: (() => void) | null = null;
@@ -299,6 +299,64 @@ describe("engine selection", () => {
       CLIP_WEBCODECS_QP + CLIP_WEBCODECS_QP_STEP,
     );
     expect(ClipRecorder.webCodecsDisabled).toBe(false);
+    recorder.stop();
+  });
+});
+
+// ── Header-only WebM (Firefox) ──────────────────────────────────────
+
+/** EBML header + Segment + Info + Tracks, no Cluster — what Firefox's
+ *  MediaRecorder hands back when its canvas track got no frames. */
+const WEBM_HEADER_ONLY = new Uint8Array([
+  0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81, 0x01,
+  0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+  0x16, 0x54, 0xae, 0x6b, 0x80,
+]);
+const WEBM_CLUSTER = new Uint8Array([0x1f, 0x43, 0xb6, 0x75, 0x01, 0xff, 0xa3, 0x81, 0x00]);
+
+let webmPayload: Uint8Array = WEBM_HEADER_ONLY;
+
+class FakeWebmMediaRecorder extends FakeMediaRecorder {
+  static isTypeSupported = (mime: string): boolean => mime === "video/webm;codecs=vp8";
+  stop() {
+    this.state = "inactive";
+    this.ondataavailable?.({ data: new Blob([webmPayload as BlobPart]) });
+    this.onstop?.();
+  }
+}
+
+describe("header-only WebM clips", () => {
+  beforeEach(() => {
+    vi.stubGlobal("MediaRecorder", FakeWebmMediaRecorder);
+  });
+
+  it("detects whether a WebM holds a Cluster", async () => {
+    expect(await webmHasFrames(new Blob([WEBM_HEADER_ONLY as BlobPart]))).toBe(false);
+    expect(
+      await webmHasFrames(new Blob([WEBM_HEADER_ONLY as BlobPart, WEBM_CLUSTER as BlobPart])),
+    ).toBe(true);
+  });
+
+  it("falls back to a JPEG instead of returning a frameless clip", async () => {
+    webmPayload = WEBM_HEADER_ONLY;
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
+    recorder.start();
+    for (let i = 1; i < FRAMES_PER_CLIP; i++) {
+      (recorder as unknown as { drawFrame(): void }).drawFrame();
+    }
+    expect(await recorder.cut()).toBeNull();
+    // The engine is unaffected — the next clip records normally.
+    expect(recorder.recording).toBe(true);
+    recorder.stop();
+  });
+
+  it("keeps a WebM clip that carries frames", async () => {
+    webmPayload = new Uint8Array([...WEBM_HEADER_ONLY, ...WEBM_CLUSTER]);
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
+    recorder.start();
+    const clip = await recorder.cut();
+    expect(clip).not.toBeNull();
+    expect(clip!.format).toBe("webm");
     recorder.stop();
   });
 });
