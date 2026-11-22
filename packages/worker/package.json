@@ -16,7 +16,7 @@
     "@sentry/node": "^11.6.0",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
-    "pg-boss": "^10.4.2"
+    "pg-boss": "^12.38.0"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",
