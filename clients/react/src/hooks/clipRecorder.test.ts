@@ -7,7 +7,7 @@ import {
   MAX_CLIP_FRAME_OVERRUN,
   MAX_CLIP_BYTES,
 } from "@lookout/shared";
-import { ClipRecorder } from "./clipRecorder.js";
+import { ClipRecorder, hasVideoData } from "./clipRecorder.js";
 
 /**
  * A clip is cut by its upload tick, not by a timer — so when uploads run
@@ -27,6 +27,7 @@ const BYTES_PER_FRAME = 300_000;
 let framesRequested = 0;
 
 class FakeMediaRecorder {
+  static customBlob: Blob | null = null;
   static isTypeSupported = (mime: string) => mime === "video/mp4;codecs=avc1.640028";
   state = "inactive";
   ondataavailable: ((e: { data: Blob }) => void) | null = null;
@@ -41,10 +42,27 @@ class FakeMediaRecorder {
   }
   stop() {
     this.state = "inactive";
-    // One blob sized to the frames the canvas actually pushed.
-    this.ondataavailable?.({
-      data: new Blob([new Uint8Array(framesRequested * BYTES_PER_FRAME)]),
-    });
+    if (FakeMediaRecorder.customBlob) {
+      this.ondataavailable?.({
+        data: FakeMediaRecorder.customBlob,
+      });
+    } else {
+      // One blob sized to the frames the canvas actually pushed.
+      const totalBytes = framesRequested * BYTES_PER_FRAME;
+      const buf = new Uint8Array(totalBytes);
+      if (totalBytes >= 4) {
+        if (this.opts.mimeType.includes("webm")) {
+          // WebM Cluster Element ID: 0x1F43B675
+          buf.set([0x1f, 0x43, 0xb6, 0x75], 0);
+        } else {
+          // MP4 'mdat' Box: 0x6d, 0x64, 0x61, 0x74
+          buf.set([0x6d, 0x64, 0x61, 0x74], 0);
+        }
+      }
+      this.ondataavailable?.({
+        data: new Blob([buf], { type: this.opts.mimeType.split(";")[0] }),
+      });
+    }
     this.onstop?.();
   }
 }
@@ -57,6 +75,8 @@ function fakeVideo(): HTMLVideoElement {
 
 beforeEach(() => {
   framesRequested = 0;
+  FakeMediaRecorder.customBlob = null;
+  FakeMediaRecorder.isTypeSupported = (mime: string) => mime === "video/mp4;codecs=avc1.640028";
   ClipRecorder.webCodecsDisabled = false;
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
   vi.spyOn(document, "createElement").mockImplementation(((tag: string) => {
@@ -299,6 +319,120 @@ describe("engine selection", () => {
       CLIP_WEBCODECS_QP + CLIP_WEBCODECS_QP_STEP,
     );
     expect(ClipRecorder.webCodecsDisabled).toBe(false);
+    recorder.stop();
+  });
+});
+
+describe("hasVideoData", () => {
+  it("rejects blobs smaller than 64 bytes", async () => {
+    const tiny = new Blob([new Uint8Array(32)], { type: "video/webm" });
+    expect(await hasVideoData(tiny)).toBe(false);
+    expect(await hasVideoData(tiny, "video/webm")).toBe(false);
+  });
+
+  it("rejects WebM blob when Cluster element ID (0x1F43B675) is absent", async () => {
+    // 217-byte empty WebM header (e.g. Firefox background tab)
+    const headerOnly = new Uint8Array(217);
+    headerOnly.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    const blob = new Blob([headerOnly], { type: "video/webm" });
+    expect(await hasVideoData(blob, "video/webm")).toBe(false);
+  });
+
+  it("accepts WebM blob when Cluster element ID (0x1F43B675) is present", async () => {
+    const webmWithCluster = new Uint8Array(500);
+    webmWithCluster.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    webmWithCluster.set([0x1f, 0x43, 0xb6, 0x75], 217);
+    const blob = new Blob([webmWithCluster], { type: "video/webm" });
+    expect(await hasVideoData(blob, "video/webm")).toBe(true);
+  });
+
+  it("detects WebM by EBML header even if mimeType is omitted", async () => {
+    const headerOnly = new Uint8Array(217);
+    headerOnly.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    const blobNoMime = new Blob([headerOnly]);
+    expect(await hasVideoData(blobNoMime)).toBe(false);
+
+    const withCluster = new Uint8Array(500);
+    withCluster.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    withCluster.set([0x1f, 0x43, 0xb6, 0x75], 217);
+    const blobWithCluster = new Blob([withCluster]);
+    expect(await hasVideoData(blobWithCluster)).toBe(true);
+  });
+
+  it("rejects MP4 blob without mdat or moof boxes", async () => {
+    const mp4HeaderOnly = new Uint8Array(200);
+    // 'ftyp'
+    mp4HeaderOnly.set([0x66, 0x74, 0x79, 0x70], 4);
+    // 'moov'
+    mp4HeaderOnly.set([0x6d, 0x6f, 0x6f, 0x76], 40);
+    const blob = new Blob([mp4HeaderOnly], { type: "video/mp4" });
+    expect(await hasVideoData(blob, "video/mp4")).toBe(false);
+  });
+
+  it("accepts MP4 blob containing mdat box", async () => {
+    const mp4WithMdat = new Uint8Array(200);
+    mp4WithMdat.set([0x66, 0x74, 0x79, 0x70], 4);
+    // 'mdat'
+    mp4WithMdat.set([0x6d, 0x64, 0x61, 0x74], 40);
+    const blob = new Blob([mp4WithMdat], { type: "video/mp4" });
+    expect(await hasVideoData(blob, "video/mp4")).toBe(true);
+  });
+
+  it("accepts MP4 blob containing moof box", async () => {
+    const mp4WithMoof = new Uint8Array(200);
+    mp4WithMoof.set([0x66, 0x74, 0x79, 0x70], 4);
+    // 'moof'
+    mp4WithMoof.set([0x6d, 0x6f, 0x6f, 0x66], 40);
+    const blob = new Blob([mp4WithMoof], { type: "video/mp4" });
+    expect(await hasVideoData(blob, "video/mp4")).toBe(true);
+  });
+
+  it("handles unrecognized generic blobs by size threshold (>= 1024)", async () => {
+    const smallGeneric = new Blob([new Uint8Array(500)], { type: "application/octet-stream" });
+    expect(await hasVideoData(smallGeneric)).toBe(false);
+
+    const largeGeneric = new Blob([new Uint8Array(1024)], { type: "application/octet-stream" });
+    expect(await hasVideoData(largeGeneric)).toBe(true);
+  });
+});
+
+describe("WebM empty cluster fallback (Issue #241)", () => {
+  beforeEach(() => {
+    FakeMediaRecorder.isTypeSupported = (mime: string) => mime.startsWith("video/webm");
+  });
+
+  it("returns null and logs warning when WebM clip contains empty header without Cluster", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emptyWebm = new Uint8Array(217);
+    emptyWebm.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    FakeMediaRecorder.customBlob = new Blob([emptyWebm], { type: "video/webm" });
+
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
+    recorder.start();
+    (recorder as unknown as { drawFrame(): void }).drawFrame();
+
+    const clip = await recorder.cut();
+    expect(clip).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[lookout] clip contained no video frames/cluster — falling back to screenshot for this tick",
+    );
+    recorder.stop();
+  });
+
+  it("returns the clip when WebM blob contains valid Cluster element (0x1F43B675)", async () => {
+    const validWebm = new Uint8Array(500);
+    validWebm.set([0x1a, 0x45, 0xdf, 0xa3], 0);
+    validWebm.set([0x1f, 0x43, 0xb6, 0x75], 217);
+    FakeMediaRecorder.customBlob = new Blob([validWebm], { type: "video/webm" });
+
+    const recorder = new ClipRecorder(fakeVideo(), CLIP_FRAME_INTERVAL_MS);
+    recorder.start();
+    (recorder as unknown as { drawFrame(): void }).drawFrame();
+
+    const clip = await recorder.cut();
+    expect(clip).not.toBeNull();
+    expect(clip!.format).toBe("webm");
+    expect(clip!.blob.size).toBe(500);
     recorder.stop();
   });
 });
