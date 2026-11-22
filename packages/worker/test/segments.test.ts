@@ -19,6 +19,8 @@ import {
   buildSegment,
   probeFrameCount,
   probeDimensions,
+  EmptyClipError,
+  isEmptyClipError,
   cutVideoToKeptRanges,
   concatList,
   SEGMENT_FPS,
@@ -322,6 +324,87 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     const garbagePath = path.join(tmpDir, "garbage.webm");
     await fs.writeFile(garbagePath, Buffer.from("not a webm file at all"));
     await expect(buildSegment(tmpDir, 99, garbagePath, "webm")).rejects.toThrow();
+  }, 120_000);
+
+  it("throws EmptyClipError on empty or zero-frame clips (Issue #241)", async () => {
+    const emptyPath = path.join(tmpDir, "empty.webm");
+    await fs.writeFile(emptyPath, Buffer.alloc(217));
+    await expect(buildSegment(tmpDir, 100, emptyPath, "webm")).rejects.toThrow(EmptyClipError);
+    await expect(probeFrameCount(emptyPath)).rejects.toThrow(EmptyClipError);
+    await expect(probeDimensions(emptyPath)).rejects.toThrow(EmptyClipError);
+  }, 120_000);
+
+  it("isEmptyClipError accurately classifies empty clip errors", () => {
+    expect(isEmptyClipError(new EmptyClipError("no frames"))).toBe(true);
+    expect(isEmptyClipError(new Error("clip contained no decodable frames"))).toBe(true);
+    expect(isEmptyClipError(new Error("End of file"))).toBe(true);
+    expect(isEmptyClipError(new Error("moov atom not found"))).toBe(true);
+    expect(isEmptyClipError(new Error("EBML header parsing failed"))).toBe(true);
+    expect(isEmptyClipError(new Error("some network timeout"))).toBe(false);
+  });
+
+  it("allows compiling a session with runs of empty clips skipped as gaps (Issue #241)", async () => {
+    // Simulates Issue #241: runs of empty clips (217-byte empty WebM headers)
+    // interspersed with valid clips.
+    const emptyWebmPath = path.join(tmpDir, "issue241_empty.webm");
+    await fs.writeFile(emptyWebmPath, Buffer.alloc(217));
+
+    const unitInputs = [
+      emptyWebmPath, // unit 0: empty clip (tests canvas choice fallback!)
+      emptyWebmPath, // unit 1: empty clip
+      webmPath,      // unit 2: valid VP8 clip
+      emptyWebmPath, // unit 3: empty clip
+      jpegPath,      // unit 4: valid JPEG still
+      mp4Path,       // unit 5: valid MP4 clip
+      emptyWebmPath, // unit 6: empty clip
+    ];
+
+    const segmentPaths: (string | null)[] = [];
+    let emptyClipGaps = 0;
+    let buildFailures = 0;
+    let portrait: boolean | undefined;
+
+    for (let i = 0; i < unitInputs.length; i++) {
+      const uPath = unitInputs[i];
+      const isJpeg = uPath === jpegPath;
+      const fmt = isJpeg ? "jpeg" : uPath === mp4Path ? "mp4" : "webm";
+      try {
+        const dimensions = portrait === undefined ? await probeDimensions(uPath) : null;
+        const unitPortrait = portrait ?? (dimensions!.height > dimensions!.width);
+        const seg = await buildSegment(tmpDir, 500 + i, uPath, fmt, "publish", unitPortrait);
+        segmentPaths.push(seg);
+        portrait = unitPortrait;
+      } catch (err) {
+        if (isEmptyClipError(err)) {
+          emptyClipGaps++;
+          segmentPaths.push(null);
+        } else {
+          buildFailures++;
+          segmentPaths.push(null);
+        }
+      }
+    }
+
+    // 4 empty clips detected as gaps, 0 build failures
+    expect(emptyClipGaps).toBe(4);
+    expect(buildFailures).toBe(0);
+
+    const validSegments = segmentPaths.filter((s): s is string => s !== null);
+    expect(validSegments).toHaveLength(3);
+
+    // Stitched video works cleanly with the surviving units
+    const listPath = path.join(tmpDir, "gap_segments.txt");
+    await fs.writeFile(listPath, concatList(validSegments.map((p) => ({ path: p, seconds: 1 }))));
+    const outPath = path.join(tmpDir, "gap_timelapse.mp4");
+    await execFileAsync("ffmpeg", [
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-c", "copy",
+      "-movflags", "+faststart",
+      "-y", outPath,
+    ]);
+    expect(await probeFrameCount(outPath)).toBe(3 * SEGMENT_FPS);
   }, 120_000);
 
   /**

@@ -27,6 +27,7 @@ import * as schema from "./schema.js";
 import {
   buildSegment,
   probeDimensions,
+  isEmptyClipError,
   cutVideoToKeptRanges,
   concatList,
   type VideoMask,
@@ -551,6 +552,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
     const segmentPaths: (string | null)[] = new Array(total).fill(null);
     let downloadFailures = 0;
     let buildFailures = 0;
+    let emptyClipGaps = 0;
     let portrait: boolean | undefined;
     {
       let next = 0;
@@ -617,11 +619,18 @@ export async function compileTimelapse(sessionId: string): Promise<{
             );
             portrait = unitPortrait;
           } catch (err) {
-            buildFailures++;
-            console.warn(
-              `Skipping unit ${i + 1}: segment build failed (${ss.r2_key})`,
-              err,
-            );
+            if (isEmptyClipError(err)) {
+              emptyClipGaps++;
+              console.warn(
+                `Skipping unit ${i + 1}: empty clip with no decodable frames (${ss.r2_key}) — treated as gap`,
+              );
+            } else {
+              buildFailures++;
+              console.warn(
+                `Skipping unit ${i + 1}: segment build failed (${ss.r2_key})`,
+                err,
+              );
+            }
           }
           await reportUnitDone();
         }
@@ -647,12 +656,12 @@ export async function compileTimelapse(sessionId: string): Promise<{
     }
     if (buildFailures > 5) {
       throw new Error(
-        `Too many failed segment builds: ${buildFailures}/${total - downloadFailures} failed`,
+        `Too many failed segment builds: ${buildFailures}/${total - downloadFailures - emptyClipGaps} failed`,
       );
     }
-    if (downloadFailures + buildFailures > 0) {
+    if (downloadFailures + buildFailures + emptyClipGaps > 0) {
       console.warn(
-        `${downloadFailures} download / ${buildFailures} build failures out of ${total} units, continuing`,
+        `${downloadFailures} download / ${buildFailures} build failures / ${emptyClipGaps} empty clip gaps out of ${total} units, continuing`,
       );
     }
 

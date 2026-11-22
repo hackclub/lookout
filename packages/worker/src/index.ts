@@ -102,7 +102,8 @@ await boss.work<{ sessionId: string }>(
         );
         // On final retry, mark session as failed immediately
         // instead of waiting for the 60-min stuck-compiling timeout
-        const retryCount = ((job as unknown as Record<string, unknown>).retrycount as number) ?? 0;
+        const rawJob = job as unknown as Record<string, unknown>;
+        const retryCount = (rawJob.retryCount ?? rawJob.retrycount ?? 0) as number;
         if (retryCount >= RETRY_LIMIT - 1) {
           console.error(`Final retry exhausted for session ${sessionId}, marking as failed`);
           await db
