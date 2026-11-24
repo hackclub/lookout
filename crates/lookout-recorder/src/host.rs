@@ -213,6 +213,12 @@ pub struct CursorSample {
 pub struct FrontmostSample {
     /// Bundle id on macOS, executable name on Windows, `WM_CLASS` on X11.
     pub app: String,
+    /// The app's display name, when the platform has one and it differs
+    /// from `app`: the localized name on macOS, the exe's `FileDescription`
+    /// on Windows, the `.desktop` entry's `Name` on Linux. The same for one
+    /// app on every OS, which `app` is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The focused window is being recorded: it is a captured window, or
     /// its centre is on a captured display. `None` when there is no
     /// focused window to place.

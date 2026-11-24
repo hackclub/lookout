@@ -56,6 +56,8 @@ mod pipewire;
 mod pw_cursor;
 #[cfg(target_os = "linux")]
 mod compositor;
+#[cfg(target_os = "linux")]
+mod desktop_entries;
 #[cfg(target_os = "macos")]
 pub mod power;
 pub mod recorder;

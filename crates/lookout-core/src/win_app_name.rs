@@ -57,6 +57,30 @@ pub(crate) fn app_name_for_window(window_id: u32) -> String {
     name
 }
 
+/// Exe path -> its version-resource name, `None` when it has none.
+static VERSION_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+
+/// The display name from `pid`'s exe's version resource (`FileDescription`,
+/// else `ProductName`, …), or `None` when it has none. Unlike
+/// [`app_name_for_window`] there is no file-stem fallback: activity already
+/// sends the exe name, and a stem would only repeat it. Cached per exe, as
+/// this runs at every activity sample.
+pub(crate) fn version_name_for_pid(pid: u32) -> Option<String> {
+    let path = process_image_path(pid)?;
+    if let Some(name) = VERSION_CACHE.lock().ok().and_then(|c| c.as_ref()?.get(&path).cloned()) {
+        return name;
+    }
+    let name = version_name(&path);
+    if let Ok(mut cache) = VERSION_CACHE.lock() {
+        let cache = cache.get_or_insert_with(HashMap::new);
+        if cache.len() >= CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(path, name.clone());
+    }
+    name
+}
+
 /// Full Win32 path of `pid`'s exe. A limited-information handle is all this
 /// needs, so it works for elevated processes too.
 fn process_image_path(pid: u32) -> Option<String> {

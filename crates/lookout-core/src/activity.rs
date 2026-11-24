@@ -73,6 +73,8 @@ pub(crate) struct Snapshot {
     pub focused_rect: Option<Rect>,
     /// The frontmost app's id (bundle id / exe name / WM_CLASS).
     pub app: Option<String>,
+    /// The frontmost app's display name, when the platform has one.
+    pub app_name: Option<String>,
     /// Captured windows whose focus couldn't be told (Wayland, where the
     /// portal doesn't say which window a stream is). Left out of
     /// `windows` rather than guessed.
@@ -186,6 +188,13 @@ pub(crate) fn build(snap: &Snapshot, sources: &[CaptureSource]) -> ActivitySampl
     });
     let frontmost = snap.app.as_ref().map(|app| FrontmostSample {
         app: app.clone(),
+        // Only when it says something the id doesn't.
+        name: snap
+            .app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && *n != app)
+            .map(str::to_string),
         captured,
         window,
     });
@@ -379,15 +388,13 @@ mod platform {
         #[allow(unused_unsafe)]
         let front = unsafe { NSWorkspace::sharedWorkspace().frontmostApplication() };
         #[allow(unused_unsafe)]
-        let (pid, app) = match &front {
+        let (pid, app, app_name) = match &front {
             Some(a) => unsafe {
-                let app = a
-                    .bundleIdentifier()
-                    .or_else(|| a.localizedName())
-                    .map(|s| s.to_string());
-                (Some(a.processIdentifier()), app)
+                let name = a.localizedName().map(|s| s.to_string());
+                let app = a.bundleIdentifier().map(|s| s.to_string()).or_else(|| name.clone());
+                (Some(a.processIdentifier()), app, name)
             },
-            None => (None, None),
+            None => (None, None, None),
         };
 
         // Accessibility names the focused window exactly. Without it (or
@@ -421,6 +428,7 @@ mod platform {
             focused: focused_id.into_iter().collect(),
             focused_rect,
             app,
+            app_name,
             ..Default::default()
         })
     }
@@ -544,9 +552,10 @@ mod platform {
         true.into()
     }
 
-    /// The process that owns what's in `hwnd`: for a UWP app that is not
-    /// the frame's ApplicationFrameHost.exe but the app inside it.
-    fn app_of(hwnd: HWND) -> Option<String> {
+    /// The process that owns what's in `hwnd`, as its exe name and pid: for
+    /// a UWP app that is not the frame's ApplicationFrameHost.exe but the
+    /// app inside it.
+    fn app_of(hwnd: HWND) -> Option<(String, u32)> {
         let pid = pid_of(hwnd);
         let name = exe_name(pid)?;
         if name.eq_ignore_ascii_case("ApplicationFrameHost.exe") {
@@ -556,11 +565,11 @@ mod platform {
             }
             if search.found != 0 {
                 if let Some(hosted) = exe_name(search.found) {
-                    return Some(hosted);
+                    return Some((hosted, search.found));
                 }
             }
         }
-        Some(name)
+        Some((name, pid))
     }
 
     /// Restores the thread's DPI awareness when dropped.
@@ -594,6 +603,10 @@ mod platform {
             let focused_rect = frame(fg);
             (lineage(fg), focused_rect, app_of(fg))
         };
+        let (app, app_name) = match app {
+            Some((exe, pid)) => (Some(exe), crate::win_app_name::version_name_for_pid(pid)),
+            None => (None, None),
+        };
 
         Some(Snapshot {
             method: "win32",
@@ -603,6 +616,7 @@ mod platform {
             focused,
             focused_rect,
             app,
+            app_name,
             ..Default::default()
         })
     }
@@ -635,6 +649,12 @@ mod platform {
     }
 
     pub(super) fn snapshot(sources: &[CaptureSource], streams: &[super::PortalStream]) -> Option<Snapshot> {
+        let mut snap = snapshot_raw(sources, streams)?;
+        snap.app_name = snap.app.as_deref().and_then(crate::desktop_entries::name_for);
+        Some(snap)
+    }
+
+    fn snapshot_raw(sources: &[CaptureSource], streams: &[super::PortalStream]) -> Option<Snapshot> {
         if is_wayland() {
             return super::wayland::snapshot(sources, streams);
         }
@@ -1153,6 +1173,26 @@ mod tests {
 
         let stream = Snapshot { stream_space: true, ..snap };
         assert!(build(&stream, &[]).displays.is_empty(), "a stream's own pixels aren't the layout");
+    }
+
+    #[test]
+    fn the_app_name_is_sent_only_when_it_adds_something() {
+        let snap = |app: &str, name: Option<&str>| Snapshot {
+            method: "test",
+            app: Some(app.into()),
+            app_name: name.map(Into::into),
+            ..Default::default()
+        };
+        let name = |s: &Snapshot| build(s, &[]).frontmost.unwrap().name;
+        assert_eq!(name(&snap("Code.exe", Some(" Visual Studio Code "))).as_deref(), Some("Visual Studio Code"));
+        assert_eq!(name(&snap("Finder", Some("Finder"))), None, "the same as the id");
+        assert_eq!(name(&snap("code", Some("  "))), None);
+        assert_eq!(name(&snap("code", None)), None);
+
+        let json = serde_json::to_value(build(&snap("code", None), &[])).unwrap();
+        assert!(json["frontmost"].get("name").is_none(), "absent, not null");
+        let json = serde_json::to_value(build(&snap("Code.exe", Some("Visual Studio Code")), &[])).unwrap();
+        assert_eq!(json["frontmost"]["name"], "Visual Studio Code");
     }
 
     #[test]
