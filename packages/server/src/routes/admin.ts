@@ -386,6 +386,7 @@ export async function adminRoutes(app: FastifyInstance) {
         programId: schema.apiKeys.programId,
         name: schema.apiKeys.name,
         key: schema.apiKeys.key,
+        readOnly: schema.apiKeys.readOnly,
         lastUsedAt: schema.apiKeys.lastUsedAt,
         createdAt: schema.apiKeys.createdAt,
       })
@@ -503,6 +504,8 @@ export async function adminRoutes(app: FastifyInstance) {
         keys: (keysByProgram.get(p.id) ?? []).map((k) => ({
           id: k.id,
           key: k.key,
+          name: k.name,
+          readOnly: k.readOnly,
           lastUsedAt: k.lastUsedAt,
           createdAt: k.createdAt,
         })),
@@ -706,6 +709,82 @@ export async function adminRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "Program not found" });
       }
       return updated;
+    },
+  );
+
+  // Mint a read-only key for a program: it reads the program's sessions
+  // (list, details, batch, activity) and every write refuses it. For a
+  // service that reviews a program's sessions — Assay, for Lapse — without
+  // being trusted to change them. The program's own full key is untouched.
+  //
+  // `api_keys.name` is still unique (it mirrors the program name on the
+  // program's first key), so this key is named "<program>:<label>".
+  app.post<{ Params: { id: string }; Body: { label: string } }>(
+    "/api/admin/programs/:id/keys",
+    {
+      schema: {
+        params: programIdParamSchema,
+        body: {
+          type: "object" as const,
+          properties: {
+            label: {
+              type: "string" as const,
+              pattern: "^[a-z0-9][a-z0-9-]{0,39}$",
+            },
+          },
+          required: ["label"] as const,
+          additionalProperties: false,
+        },
+      },
+    },
+    async (request, reply) => {
+      const program = await db.query.programs.findFirst({
+        where: eq(schema.programs.id, request.params.id),
+      });
+      if (!program) {
+        return reply.code(404).send({ error: "Program not found" });
+      }
+      const name = `${program.name}:${request.body.label}`;
+      const existing = await db.query.apiKeys.findFirst({
+        where: eq(schema.apiKeys.name, name),
+      });
+      if (existing) {
+        return reply
+          .code(409)
+          .send({ error: `A key named "${name}" already exists` });
+      }
+      const [key] = await db
+        .insert(schema.apiKeys)
+        .values({ name, programId: program.id, readOnly: true })
+        .returning();
+      return reply.code(201).send({
+        id: key.id,
+        name: key.name,
+        readOnly: key.readOnly,
+        key: key.key,
+      });
+    },
+  );
+
+  // Revoke a read-only key. A program's full key goes only with the program
+  // (deleting it here would cut the program off from its own sessions).
+  app.delete<{ Params: { id: string } }>(
+    "/api/admin/keys/:id",
+    { schema: { params: programIdParamSchema } },
+    async (request, reply) => {
+      const key = await db.query.apiKeys.findFirst({
+        where: eq(schema.apiKeys.id, request.params.id),
+      });
+      if (!key) {
+        return reply.code(404).send({ error: "Key not found" });
+      }
+      if (!key.readOnly) {
+        return reply.code(409).send({
+          error: "Only read-only keys can be revoked here; a program's full key goes with the program",
+        });
+      }
+      await db.delete(schema.apiKeys).where(eq(schema.apiKeys.id, key.id));
+      return { deleted: true };
     },
   );
 

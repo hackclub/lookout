@@ -1,6 +1,7 @@
 /**
  * Interaction metadata a native client sends with each confirm (`activity`):
- * pointer position as a fraction of its display, the frontmost app and where
+ * pointer position as a fraction of its display, the frontmost app (its id and
+ * display name) and where
  * its window sits on its display, whether the captured windows had the
  * focus, and the attached displays — sampled at every clip frame.
  *
@@ -50,7 +51,14 @@ export type ActivitySample = {
 };
 
 export type ActivityFrontmost = {
+  /** The app's id: bundle id (macOS), exe file name (Windows), WM_CLASS or
+   *  app_id (Linux). Stable, but different on every OS for the same app. */
   app: string;
+  /** The app's own display name when the platform has one (CFBundleName,
+   *  the exe's FileDescription, the .desktop Name): what lets a reviewer
+   *  match `Code.exe`, `com.microsoft.VSCode` and `code` as one app. Absent
+   *  from older clients. */
+  name?: string;
   captured: boolean | null;
   window?: ActivityWindowRect;
 };
@@ -116,6 +124,10 @@ function sanitizeFrontmost(raw: unknown): ActivitySample["frontmost"] {
   if (!app) return null;
   const captured = typeof raw.captured === "boolean" ? raw.captured : null;
   const frontmost: ActivityFrontmost = { app, captured };
+  if (typeof raw.name === "string") {
+    const name = raw.name.trim().slice(0, MAX_APP_LENGTH);
+    if (name) frontmost.name = name;
+  }
   const window = sanitizeWindowRect(raw.window);
   if (window) frontmost.window = window;
   return frontmost;

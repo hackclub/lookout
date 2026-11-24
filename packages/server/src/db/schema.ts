@@ -448,6 +448,11 @@ export const apiKeys = pgTable("api_keys", {
     .notNull()
     .unique()
     .$defaultFn(() => `lk_${randomHex(24)}`),
+  // A read-only key reads its program's sessions and nothing else: the
+  // internal API refuses every write with it (see READ_ONLY_ROUTES in
+  // routes/internal.ts). For services that review a program's sessions
+  // without being trusted to change them.
+  readOnly: boolean("read_only").notNull().default(false),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

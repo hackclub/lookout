@@ -42,6 +42,17 @@ function callerOwns(
   return (session.programId ?? null) === (request.programId ?? null);
 }
 
+/**
+ * What a read-only key may call: the internal routes that change nothing.
+ * `POST .../batch` is a read that takes its ids in the body.
+ */
+export const READ_ONLY_ROUTES = new Set([
+  "GET /api/internal/sessions",
+  "GET /api/internal/sessions/:sessionId",
+  "POST /api/internal/sessions/batch",
+  "GET /api/internal/sessions/:sessionId/activity",
+]);
+
 type SessionRow = typeof schema.sessions.$inferSelect;
 
 /**
@@ -191,6 +202,19 @@ export async function internalRoutes(app: FastifyInstance) {
   );
 
   app.addHook("onRequest", requireApiKey);
+
+  // A read-only key gets the routes that only read, named one by one, and is
+  // refused everything else. Listed rather than inferred from the method so a
+  // write added later is closed to read-only keys until someone opens it here.
+  app.addHook("onRequest", async (request, reply) => {
+    if (!request.apiKeyReadOnly) return;
+    const route = `${request.method} ${request.routeOptions.url ?? ""}`;
+    if (!READ_ONLY_ROUTES.has(route)) {
+      return reply
+        .code(403)
+        .send({ error: "This key is read-only" });
+    }
+  });
 
   // Create a new session
   app.post<{
@@ -514,7 +538,7 @@ export async function internalRoutes(app: FastifyInstance) {
 
   // Interaction metadata, per confirmed capture: where the pointer was (as a
   // fraction of its display), the frontmost app, and whether the captured
-  // windows had the focus. INTERNAL ONLY (see the `activity` column) and
+  // windows had the focus, with the capture's clientInfo and JA4. INTERNAL ONLY (see the `activity` column) and
   // owner-scoped like the session writes: it describes what someone was
   // doing on their computer, so only the program that owns the session sees
   // it. `activity` is null for captures from clients that can't sample
@@ -541,6 +565,8 @@ export async function internalRoutes(app: FastifyInstance) {
           format: schema.screenshots.format,
           isFinal: schema.screenshots.isFinal,
           activity: schema.screenshots.activity,
+          clientInfo: schema.screenshots.clientInfo,
+          ja4: schema.screenshots.ja4,
         })
         .from(schema.screenshots)
         .where(
@@ -560,6 +586,11 @@ export async function internalRoutes(app: FastifyInstance) {
           capturedAt: (r.capturedAt ?? r.requestedAt).toISOString(),
           format: r.format,
           final: r.isFinal,
+          // What the upload-url request for this capture claimed to be, and
+          // the TLS fingerprint the edge saw on it. Per capture, so a client
+          // that changes mid-session shows where.
+          clientInfo: r.clientInfo ?? null,
+          ja4: r.ja4 ?? null,
           activity: r.activity ?? null,
         })),
       };

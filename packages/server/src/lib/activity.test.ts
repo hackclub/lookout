@@ -78,6 +78,21 @@ describe("sanitizeActivity", () => {
     expect(out?.samples[0].at).toBe(6);
   });
 
+  it("keeps the app's display name trimmed and capped, drops a blank or non-string one", () => {
+    const fm = (name: unknown) => sample({ frontmost: { app: "Code.exe", name, captured: true } });
+    const out = sanitizeActivity({
+      v: 1,
+      samples: [fm("  Visual Studio Code "), fm("   "), fm(42), fm("n".repeat(1000))],
+    });
+    expect(out?.samples.map((s) => s.frontmost?.name)).toEqual([
+      "Visual Studio Code",
+      undefined,
+      undefined,
+      "n".repeat(256),
+    ]);
+    expect(out?.samples[1].frontmost).toEqual({ app: "Code.exe", captured: true });
+  });
+
   it("keeps the frontmost window's frame only when it is a plausible fraction of a display", () => {
     const fm = (window: unknown) => sample({ frontmost: { app: "Code", captured: true, window } });
     const out = sanitizeActivity({

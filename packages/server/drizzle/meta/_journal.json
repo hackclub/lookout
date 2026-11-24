@@ -253,6 +253,13 @@
       "when": 1791800000002,
       "tag": "0035_session_first_client_info",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791800000003,
+      "tag": "0036_read_only_api_keys",
+      "breakpoints": true
     }
   ]
 }

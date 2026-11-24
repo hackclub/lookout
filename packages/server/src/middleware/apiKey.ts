@@ -16,6 +16,9 @@ declare module "fastify" {
     // requireApiKey. May be null for keys that predate the FK and aren't yet
     // backfilled.
     programId: string | null;
+    // Whether the key that authorized this request is read-only. Set by
+    // requireApiKey; the internal routes refuse writes for it.
+    apiKeyReadOnly: boolean;
   }
 }
 
@@ -38,6 +41,7 @@ export async function requireApiKey(
 
   request.program = row.name;
   request.programId = row.programId;
+  request.apiKeyReadOnly = row.readOnly;
   // Fire-and-forget last-used bookkeeping — never block or fail the request.
   void db
     .update(schema.apiKeys)

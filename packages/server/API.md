@@ -11,17 +11,29 @@
 Public endpoints use a 64-character hex **session token** as a path parameter. No header-based auth required.
 
 ### Internal Routes (API Key)
-Internal endpoints require the `X-API-Key` header carrying a **per-program key** managed in the admin dashboard. Sessions created with a program key are tagged with that program's name (`session.program`), for attribution/tracking only — all keys grant identical access. There is no global/shared key (the legacy `INTERNAL_API_KEY` / `GLOBAL_API_KEY` has been retired); an unrecognized key is rejected with `401`.
+Internal endpoints require the `X-API-Key` header carrying a **per-program key** managed in the admin dashboard. Sessions created with a program key are tagged with that program's name (`session.program`), and every per-session route is scoped to the program that created the session. There is no global/shared key (the legacy `INTERNAL_API_KEY` / `GLOBAL_API_KEY` has been retired); an unrecognized key is rejected with `401`.
+
+A program can also have **read-only keys**, for a service that reviews the program's sessions without being trusted to change them (Assay holds one on Lapse's program). A read-only key reaches the same sessions as the program's full key, but only these routes; everything else answers `403 { "error": "This key is read-only" }`:
+
+- `GET /api/internal/sessions` (list)
+- `GET /api/internal/sessions/:sessionId` (details)
+- `POST /api/internal/sessions/batch` (details, many at once)
+- `GET /api/internal/sessions/:sessionId/activity` (interaction metadata, JA4, clientInfo)
+
+The list is explicit (`READ_ONLY_ROUTES` in `routes/internal.ts`), so a route added later is closed to read-only keys until someone adds it there.
 
 ### Admin Dashboard (`/admin`)
-A minimal HTTP Basic Auth dashboard for CRUD over program keys, gated by `ADMIN_USERNAME` / `ADMIN_PASSWORD`. If either is unset, all admin routes return `503 { "error": "admin disabled" }`.
+A minimal HTTP Basic Auth dashboard for programs and their keys, gated by `ADMIN_USERNAME` / `ADMIN_PASSWORD`. If either is unset, all admin routes return `503 { "error": "admin disabled" }`.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/admin` | HTML dashboard |
-| `GET` | `/api/admin/keys` | List keys `{ id, name, key, lastUsedAt, createdAt }` |
-| `POST` | `/api/admin/keys` | Create a program key `{ name }` → `{ id, name, key }` (409 on duplicate name) |
-| `DELETE` | `/api/admin/keys/:id` | Delete a key (404 if missing) |
+| `GET` | `/api/admin/programs` | Programs, each with its keys `{ id, key, name, readOnly, lastUsedAt, createdAt }` and session aggregates |
+| `POST` | `/api/admin/programs` | Create a program and its full key → `{ id, name, …, key }` (409 on duplicate name) |
+| `PATCH` | `/api/admin/programs/:id` | Set or clear the display name and URLs |
+| `DELETE` | `/api/admin/programs/:id` | Delete a program and its keys (409 while any session is attributed to it) |
+| `POST` | `/api/admin/programs/:id/keys` | Mint a read-only key `{ label }` (lowercase, `[a-z0-9-]`) → `{ id, name: "<program>:<label>", readOnly: true, key }` (409 on duplicate) |
+| `DELETE` | `/api/admin/keys/:id` | Revoke a read-only key (409 for a program's full key, which goes only with the program) |
 
 ---
 
@@ -178,6 +190,7 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
       "cursor": { "display": 1, "x": 0.4123, "y": 0.7331, "inCapture": true },
       "frontmost": {
         "app": "com.microsoft.VSCode",
+        "name": "Visual Studio Code",
         "captured": true,
         "window": { "display": 1, "x": 0, "y": 0.0336, "width": 0.5, "height": 0.9664 }
       },
@@ -196,7 +209,7 @@ Native clients sample, at every clip frame (and at each upload tick), where the 
 | `at` | Unix ms (corrected to server time) the sample was taken. |
 | `method` | How focus was determined, i.e. how far to trust it. `ax` (macOS Accessibility, exact), `window-order` (macOS without Accessibility: the frontmost app's topmost window), `win32`, `x11` (exact). On Wayland: `gnome-shell` (via the Lookout GNOME extension), `kwin`, `hyprland`, `sway` (the compositor names the focused app exactly; whether that is a *captured* window is inferred from geometry, see `windows`), or `portal` (no compositor support: the pointer only, from the screencast stream). |
 | `cursor` | `null` when unknown. `display` is the display's id — the same id a monitor capture source uses (on Wayland, the screencast stream's PipeWire node id; a screen nobody records is named by the compositor's monitor index; with `method: "portal"` and only a window recorded, the window's stream is the "display"). `x`/`y` are 0–1 fractions of that display, rounded to 1/10000, origin top-left. `inCapture`: the pointer is over what is being recorded — on a captured display, or over a captured window (on X11, Windows and macOS: with nothing on top of it there). |
-| `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. `window` (absent when unknown) is the focused window's frame as fractions of the display its centre is on (or the nearest one): `display` is that display's id as in `cursor` and `displays`; `x`/`y` is the window's top-left corner and `width`/`height` its size, 0–1 of the display's width and height, rounded to 1/10000. Not clamped — a window hanging off the display's edge has `x`/`y` below 0 or `x + width` past 1, and one spanning several displays is wider than 1. On Windows it is the visible frame (without the invisible resize borders); on macOS and X11 the window manager's frame. On Wayland only with a compositor that reports the focused window's geometry (the GNOME extension, KWin, Hyprland, Sway). |
+| `frontmost` | `null` when unknown. `app` is the bundle id (macOS), executable name (Windows), `WM_CLASS` (X11) or app id (Wayland). `name` (absent when unknown, and from older clients) is the app's own display name — `CFBundleName`/localized name on macOS, the executable's `FileDescription` on Windows, the `.desktop` entry's `Name` on Linux — the same for one app on every OS where `app` is not. `captured`: the focused window is being recorded — it is a captured window, or its centre is on a captured display; `null` when that can't be told. `window` (absent when unknown) is the focused window's frame as fractions of the display its centre is on (or the nearest one): `display` is that display's id as in `cursor` and `displays`; `x`/`y` is the window's top-left corner and `width`/`height` its size, 0–1 of the display's width and height, rounded to 1/10000. Not clamped — a window hanging off the display's edge has `x`/`y` below 0 or `x + width` past 1, and one spanning several displays is wider than 1. On Windows it is the visible frame (without the invisible resize borders); on macOS and X11 the window manager's frame. On Wayland only with a compositor that reports the focused window's geometry (the GNOME extension, KWin, Hyprland, Sway). |
 | `displays` | Absent when unknown. Every attached display, recorded or not, and where it sits: `id` (as in `cursor.display`), `x`/`y` its top-left corner and `width`/`height` its size in the desktop layout — points on macOS (origin top-left of the main display), physical pixels on Windows (origin top-left of the primary monitor), root-window pixels on X11 and logical pixels on Wayland — so displays with negative `x`/`y` sit left of or above the main one. `pixelWidth`/`pixelHeight`: the resolution in device pixels when known (on macOS the current mode, e.g. 2× the points on a Retina display at default scaling; equal to `width`/`height` on Windows and X11; absent on Wayland). `captured`: this display is being recorded. On Wayland the layout comes from the compositor (or the recorded screens' streams); with `method: "portal"` and only a window recorded it is unknown and left out. |
 | `windows` | Window captures only: each captured window (on Wayland, by its stream's node id) and whether it has the focus (or owns the focused dialog). On Wayland the portal never says which window a stream is, so focus is inferred — the pointer sitting at the same place in the focused window and in the stream, or the shapes not matching — and a window it can't decide is **left out** rather than guessed. |
 
@@ -1027,13 +1040,15 @@ The [interaction metadata](#interaction-metadata) of every confirmed capture, ol
       "capturedAt": "2025-06-01T12:00:00.000Z",
       "format": "mp4",
       "final": false,
+      "clientInfo": "Lookout Desktop/0.9.0 (macOS 15.1)",
+      "ja4": "t13d1516h2_8daaf6152771_b186095e22b6",
       "activity": { "v": 1, "samples": [ ... ] }
     }
   ]
 }
 ```
 
-`activity` is `null` for captures whose client sent none.
+`activity` is `null` for captures whose client sent none. `clientInfo` is what the capture's upload-url request claimed to be and `ja4` the TLS fingerprint the edge saw on it (see [Client Info](#client-info)); either is `null` when absent. Per capture, so a client that changes partway through a session shows where. Readable with a [read-only key](#internal-routes-api-key).
 
 **Errors:**
 - `401` — Missing or invalid API key

@@ -257,8 +257,12 @@ function keysHtml(keys) {
   return '<div class="keylist">' + keys.map(function (k) {
     return '<div class="keyrow">' +
       '<code class="key" data-full="' + esc(k.key) + '">' + KEY_MASK + "</code>" +
+      (k.readOnly ? '<span class="muted" title="' + esc(k.name || "") + '">read-only</span>' : "") +
       '<button class="secondary" data-reveal>reveal</button>' +
       '<button class="secondary" data-copy="' + esc(k.key) + '">copy</button>' +
+      (k.readOnly
+        ? '<button class="danger" data-revoke="' + esc(k.id) + '" data-name="' + esc(k.name || "") + '">revoke</button>'
+        : "") +
       "</div>";
   }).join("") + "</div>";
 }
@@ -309,6 +313,8 @@ function rowHtml(p) {
       '<button class="secondary" data-desktop="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '" data-pair="' + esc(p.pairUrl || "") + '" data-start="' + esc(p.startUrl || "") +
         '">set desktop</button>' +
+      '<button class="secondary" data-readkey="' + esc(p.id) + '" data-name="' + esc(p.name) +
+        '">add read-only key</button>' +
       '<button class="danger" data-del="' + esc(p.id) + '" data-name="' + esc(p.name) +
         '">delete</button></td>' +
     "</tr>";
@@ -479,6 +485,40 @@ rows.addEventListener("click", async function (ev) {
       flash("Copied to clipboard.");
     } catch (e) {
       flash("Copy failed.", true);
+    }
+    return;
+  }
+
+  var readKeyBtn = ev.target.closest("[data-readkey]");
+  if (readKeyBtn) {
+    var label = prompt(
+      'Label for a read-only key on "' + readKeyBtn.getAttribute("data-name") +
+        '" (lowercase, e.g. "assay"). It can read this program\'s sessions and change nothing:',
+      "",
+    );
+    if (label === null) return; // cancelled
+    try {
+      await api("POST", "/api/admin/programs/" + readKeyBtn.getAttribute("data-readkey") + "/keys", {
+        label: label.trim(),
+      });
+      flash("Added a read-only key.");
+      await load();
+    } catch (e) {
+      flash(e.message, true);
+    }
+    return;
+  }
+
+  var revokeBtn = ev.target.closest("[data-revoke]");
+  if (revokeBtn) {
+    if (!confirm('Revoke the read-only key "' + revokeBtn.getAttribute("data-name") +
+        '"? Anything using it stops working immediately.')) return;
+    try {
+      await api("DELETE", "/api/admin/keys/" + revokeBtn.getAttribute("data-revoke"));
+      flash("Revoked the key.");
+      await load();
+    } catch (e) {
+      flash(e.message, true);
     }
     return;
   }

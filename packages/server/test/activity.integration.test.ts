@@ -45,6 +45,9 @@ async function makeApiKey(): Promise<string> {
   return row.key;
 }
 
+const CLIENT_INFO = "Lookout Desktop/0.9.0 (macOS 15.1)";
+const JA4 = "t13d1516h2_8daaf6152771_b186095e22b6";
+
 const ACTIVITY = {
   v: 1,
   samples: [
@@ -62,7 +65,8 @@ async function capture(token: string, activity?: unknown) {
   const capturedAt = new Date(virtualNow).toISOString();
   const up = await app.inject({
     method: "GET",
-    url: `/api/sessions/${token}/upload-url?capturedAt=${encodeURIComponent(capturedAt)}`,
+    url: `/api/sessions/${token}/upload-url?capturedAt=${encodeURIComponent(capturedAt)}&clientInfo=${encodeURIComponent(CLIENT_INFO)}`,
+    headers: { "cf-ja4": JA4 },
   });
   expect(up.statusCode).toBe(200);
   const screenshotId = up.json().screenshotId as string;
@@ -101,6 +105,8 @@ describe("capture activity", () => {
           capturedAt: baseTime.toISOString(),
           format: "jpeg",
           final: false,
+          clientInfo: CLIENT_INFO,
+          ja4: JA4,
           activity: ACTIVITY,
         },
       ],
@@ -140,6 +146,7 @@ describe("capture activity", () => {
       const r = await app.inject({ method: "GET", url });
       expect(r.body).not.toContain("com.microsoft.VSCode");
       expect(r.body).not.toContain("inCapture");
+      expect(r.body).not.toContain(JA4);
     }
   });
 });
