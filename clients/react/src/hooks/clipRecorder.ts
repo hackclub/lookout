@@ -19,6 +19,12 @@ import {
   type ClipEngineOutput,
 } from "./webCodecsClipEngine.js";
 
+declare module "./webCodecsClipEngine.js" {
+  interface ClipEngineOutput {
+    mimeType?: string;
+  }
+}
+
 /** One finalized per-minute clip, ready for the upload pipeline. */
 export interface ClipCaptureResult {
   blob: Blob;
@@ -183,6 +189,7 @@ class MediaRecorderClipEngine implements ClipEngine {
     return {
       blob: new Blob(this.parts, { type: this.contentType }),
       format: this.format,
+      mimeType: this.contentType,
     };
   }
 
@@ -195,6 +202,77 @@ class MediaRecorderClipEngine implements ClipEngine {
     this.stream.getTracks().forEach((t) => t.stop());
     this.parts = [];
   }
+}
+
+const WEBM_EBML_HEADER = [0x1a, 0x45, 0xdf, 0xa3];
+const WEBM_CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75];
+const MP4_FTYP = [0x66, 0x74, 0x79, 0x70];
+const MP4_MOOV = [0x6d, 0x6f, 0x6f, 0x76];
+const MP4_MDAT = [0x6d, 0x64, 0x61, 0x74];
+const MP4_MOOF = [0x6d, 0x6f, 0x6f, 0x66];
+
+function hasPattern(bytes: Uint8Array, pattern: number[]): boolean {
+  const pLen = pattern.length;
+  if (bytes.length < pLen) return false;
+  const first = pattern[0];
+  const limit = bytes.length - pLen;
+  for (let i = 0; i <= limit; i++) {
+    if (bytes[i] === first) {
+      let match = true;
+      for (let j = 1; j < pLen; j++) {
+        if (bytes[i + j] !== pattern[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Checks whether a container blob actually contains video frame data.
+ * When Firefox runs in background tabs or throttles the canvas stream,
+ * MediaRecorder can emit an empty WebM container (~217 bytes) containing
+ * only headers without any WebM Cluster elements (0x1F43B675).
+ */
+export async function hasVideoData(
+  blob: Blob,
+  mimeType?: string,
+): Promise<boolean> {
+  if (!blob || blob.size < 64) {
+    return false;
+  }
+
+  let bytes: Uint8Array;
+  try {
+    const chunk = await blob
+      .slice(0, Math.min(blob.size, 65536))
+      .arrayBuffer();
+    bytes = new Uint8Array(chunk);
+  } catch {
+    return false;
+  }
+
+  const mime = (mimeType || blob.type || "").toLowerCase();
+  const isWebm =
+    mime.includes("webm") || hasPattern(bytes, WEBM_EBML_HEADER);
+
+  if (isWebm) {
+    return hasPattern(bytes, WEBM_CLUSTER_ID);
+  }
+
+  const isMp4 =
+    mime.includes("mp4") ||
+    hasPattern(bytes, MP4_FTYP) ||
+    hasPattern(bytes, MP4_MOOV);
+
+  if (isMp4) {
+    return hasPattern(bytes, MP4_MDAT) || hasPattern(bytes, MP4_MOOF);
+  }
+
+  return blob.size >= 1024;
 }
 
 /** Per-recorder display knobs. Cadence and rate control are deliberately
@@ -438,7 +516,16 @@ export class ClipRecorder {
       );
     }
 
-    const blob = out && frameCount > 0 && out.blob.size > 0 ? out.blob : null;
+    let blob: Blob | null = null;
+    if (out && frameCount > 0 && out.blob.size > 0) {
+      if (await hasVideoData(out.blob, out.mimeType)) {
+        blob = out.blob;
+      } else {
+        console.warn(
+          "[lookout] clip contained no video frames/cluster — falling back to screenshot for this tick",
+        );
+      }
+    }
 
     // Oversize clips are rejected server-side (HeadObject vs
     // MAX_CLIP_BYTES), which would cost the whole minute. Back the active

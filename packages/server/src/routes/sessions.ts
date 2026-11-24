@@ -27,6 +27,7 @@ import {
   CLIP_FRAME_INTERVAL_MS,
   PRESIGNED_URL_EXPIRY_SECONDS,
   MAX_SCREENSHOT_BYTES,
+  MIN_CLIP_BYTES,
   MAX_CLIP_BYTES,
   MAX_SCREENSHOTS_PER_SESSION,
   MAX_UPLOAD_REQUESTS_PER_SESSION,
@@ -898,6 +899,15 @@ export async function sessionRoutes(app: FastifyInstance) {
           rowFormat === "jpeg" ? MAX_SCREENSHOT_BYTES : MAX_CLIP_BYTES;
         if (head.ContentLength && head.ContentLength > maxBytes) {
           return reply.code(400).send({ error: "Uploaded object is too large" });
+        }
+        if (
+          rowFormat !== "jpeg" &&
+          head.ContentLength !== undefined &&
+          head.ContentLength < MIN_CLIP_BYTES
+        ) {
+          return reply
+            .code(400)
+            .send({ error: "Uploaded clip is empty or corrupt" });
         }
       } catch {
         return reply

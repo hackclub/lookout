@@ -18,7 +18,7 @@ import { sql, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { db, schema } from "../src/db/index.js";
 import { setClock, resetClock } from "../src/lib/clock.js";
-import { CLIP_FRAME_INTERVAL_MS } from "@lookout/shared";
+import { CLIP_FRAME_INTERVAL_MS, MIN_CLIP_BYTES } from "@lookout/shared";
 
 let app: FastifyInstance;
 const baseTime = new Date("2025-06-01T12:00:00.000Z");
@@ -243,6 +243,34 @@ describe("per-format confirm validation", () => {
     });
     expect(confirm.status).toBe(400);
     expect(confirm.body.error).toContain("too large");
+  });
+
+  it("rejects a clip smaller than MIN_CLIP_BYTES (e.g. empty WebM)", async () => {
+    const s = await createSession(true);
+    const up = await getUploadUrl(s.token, { capturedAt: nowIso(), format: "webm" });
+    (globalThis as any).__r2HeadObjectOverride = {
+      ContentType: "video/webm",
+      ContentLength: 217,
+    };
+    const confirm = await confirmUpload(s.token, up.body.screenshotId, {
+      frameCount: 20,
+    });
+    expect(confirm.status).toBe(400);
+    expect(confirm.body.error).toBe("Uploaded clip is empty or corrupt");
+  });
+
+  it("rejects a clip whose ContentLength is less than MIN_CLIP_BYTES", async () => {
+    const s = await createSession(true);
+    const up = await getUploadUrl(s.token, { capturedAt: nowIso(), format: "webm" });
+    (globalThis as any).__r2HeadObjectOverride = {
+      ContentType: "video/webm",
+      ContentLength: MIN_CLIP_BYTES - 1,
+    };
+    const confirm = await confirmUpload(s.token, up.body.screenshotId, {
+      frameCount: 20,
+    });
+    expect(confirm.status).toBe(400);
+    expect(confirm.body.error).toBe("Uploaded clip is empty or corrupt");
   });
 });
 

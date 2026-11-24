@@ -274,21 +274,59 @@ export async function probeFps(filePath: string): Promise<number> {
   return SEGMENT_FPS;
 }
 
-/** Count the video frames in a file with ffprobe. */
+/** Thrown when a video clip contains no decodable frames or is empty/corrupt. */
+export class EmptyClipError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyClipError";
+  }
+}
+
+/** Check if an error was caused by an empty or undecodable clip with zero frames. */
+export function isEmptyClipError(err: unknown): boolean {
+  if (err instanceof EmptyClipError) return true;
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    return (
+      msg.includes("no decodable frames") ||
+      msg.includes("end of file") ||
+      msg.includes("eof") ||
+      msg.includes("moov atom not found") ||
+      msg.includes("ebml header") ||
+      msg.includes("invalid data found")
+    );
+  }
+  return false;
+}
+
+/** Count the video frames in a file with ffprobe. Throws EmptyClipError on empty/undecodable files. */
 export async function probeFrameCount(filePath: string): Promise<number> {
-  const { stdout } = await execFileAsync(
-    "ffprobe",
-    [
-      "-v", "error",
-      "-count_packets",
-      "-select_streams", "v:0",
-      "-show_entries", "stream=nb_read_packets",
-      "-of", "csv=p=0",
-      filePath,
-    ],
-    { timeout: 30_000 },
-  );
-  return parseInt(stdout.trim(), 10);
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v", "error",
+        "-count_packets",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_packets",
+        "-of", "csv=p=0",
+        filePath,
+      ],
+      { timeout: 30_000 },
+    );
+    const parsed = parseInt(stdout.trim(), 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      throw new EmptyClipError(`clip contained no decodable frames: ${filePath}`);
+    }
+    return parsed;
+  } catch (err) {
+    if (isEmptyClipError(err)) {
+      throw new EmptyClipError(
+        `clip contained no decodable frames (${filePath}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    throw err;
+  }
 }
 
 /** Assert a built segment holds exactly SEGMENT_FPS frames. Strict — a
@@ -351,7 +389,7 @@ export async function buildSegment(
   } else {
     const frames = await probeFrameCount(unitPath);
     if (!Number.isFinite(frames) || frames < 1) {
-      throw new Error("clip contained no decodable frames");
+      throw new EmptyClipError("clip contained no decodable frames");
     }
     // setpts spreads the N decoded frames evenly across [0, 1s); fps
     // resamples onto the SEGMENT_FPS grid (a clip carrying more frames
@@ -520,7 +558,7 @@ export async function probeDimensions(
             stream.width <= 0 ||
             stream.height <= 0
         )
-            throw new Error(`probeDimensions: could not determine video dimensions for ${filePath}`);
+            throw new EmptyClipError(`probeDimensions: could not determine video dimensions for ${filePath}`);
 
         const rotation = stream.side_data_list?.find((s) => s.rotation != null)?.rotation
             ?? Number(stream.tags?.rotate ?? 0);
@@ -531,6 +569,11 @@ export async function probeDimensions(
         };
     }
     catch (err) {
+        if (isEmptyClipError(err)) {
+            throw new EmptyClipError(
+                `probeDimensions failed (empty clip): ${err instanceof Error ? err.message : String(err)}`,
+            );
+        }
         throw new Error(
             `probeDimensions failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
         );

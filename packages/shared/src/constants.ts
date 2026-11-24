@@ -307,6 +307,14 @@ export const CLIP_WEB_VIDEO_BITS_PER_SECOND = 40_000_000;
  *  Default: 8388608 (8 MB) */
 export const MAX_CLIP_BYTES = 8 * 1024 * 1024;
 
+/** Minimum clip file size in bytes, validated server-side via HeadObject
+ *  after upload. Empty WebM files (EBML header only with no Cluster /
+ *  video frames) are ~217 bytes and cannot be a valid 1-minute video clip.
+ *  Any clip smaller than this is rejected as empty or corrupt.
+ *  Default: 1024 (1 KB) */
+export const MIN_CLIP_BYTES = 1024;
+
+
 // ──────────────────────────────────────────────────────────
 // Auto-timeout thresholds
 // ──────────────────────────────────────────────────────────
