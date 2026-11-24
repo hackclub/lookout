@@ -46,6 +46,20 @@ use std::borrow::Cow;
 use gpui_kit::gpui::App;
 
 fn main() {
+    // The Windows exe is its own installer, so it usually first runs from
+    // Downloads, and elevated for a Program Files install. Keep every later
+    // LoadLibrary off the exe's folder, where a drive-by download can plant a
+    // DLL. (Static imports get the same rule from /DEPENDENTLOADFLAG in
+    // build.rs.) WebView2's loader is linked statically; nothing else loads
+    // from beside the exe.
+    #[cfg(windows)]
+    {
+        use ::windows::Win32::System::LibraryLoader::{SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32};
+        // SAFETY: plain flag call, first thing in main.
+        if let Err(e) = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) } {
+            eprintln!("SetDefaultDllDirectories: {e}");
+        }
+    }
     startup::begin();
     // WebKitGTK's DMA-BUF renderer aborts the whole app (SIGABRT inside
     // gtk_main_iteration, LOOKOUT-NATIVE-G) when the panel webview lives in

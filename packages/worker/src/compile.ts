@@ -27,6 +27,7 @@ import * as schema from "./schema.js";
 import {
   buildSegment,
   probeDimensions,
+  unitInputArgs,
   cutVideoToKeptRanges,
   concatList,
   type VideoMask,
@@ -604,7 +605,7 @@ export async function compileTimelapse(sessionId: string): Promise<{
 
           try {
             const dimensions = portrait === undefined
-              ? await probeDimensions(unitPath)
+              ? await probeDimensions(unitPath, unitInputArgs(ss.format))
               : null;
             const unitPortrait = portrait ?? (dimensions!.height > dimensions!.width);
             segmentPaths[i] = await buildSegment(

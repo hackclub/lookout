@@ -274,12 +274,32 @@ export async function probeFps(filePath: string): Promise<number> {
   return SEGMENT_FPS;
 }
 
+/** Input options for a downloaded capture unit. Uploads are untrusted bytes:
+ *  the presigned PUT only pins the Content-Type header, not the contents.
+ *  Left to sniff the container, ffmpeg will happily read a "clip" that is
+ *  really a DASH manifest and pull other local files (another session's
+ *  compile temp files) into this session's video. So force the container the
+ *  server accepted and keep every read on the local file. */
+export function unitInputArgs(format: string): string[] {
+  const demuxer =
+    format === "jpeg" ? "jpeg_pipe"
+    : format === "webm" ? "matroska"
+    : format === "mp4" ? "mov"
+    : null;
+  if (!demuxer) throw new Error(`unsupported capture format: ${format}`);
+  return ["-protocol_whitelist", "file", "-f", demuxer];
+}
+
 /** Count the video frames in a file with ffprobe. */
-export async function probeFrameCount(filePath: string): Promise<number> {
+export async function probeFrameCount(
+  filePath: string,
+  inputArgs: string[] = [],
+): Promise<number> {
   const { stdout } = await execFileAsync(
     "ffprobe",
     [
       "-v", "error",
+      ...inputArgs,
       "-count_packets",
       "-select_streams", "v:0",
       "-show_entries", "stream=nb_read_packets",
@@ -329,6 +349,7 @@ export async function buildSegment(
   );
   const encodeArgs = segmentEncodeArgs(quality);
   const scale = scaleFilter(quality, portrait);
+  const inputArgs = unitInputArgs(format);
 
   if (format === "jpeg") {
     // -framerate 1 over one still = exactly one second of input; fps
@@ -337,6 +358,7 @@ export async function buildSegment(
     await execFileAsync(
       "ffmpeg",
       [
+        ...inputArgs,
         "-framerate", "1",
         "-i", unitPath,
         "-vf", `${scale},fps=${SEGMENT_FPS}`,
@@ -349,7 +371,7 @@ export async function buildSegment(
       { timeout: SEGMENT_TIMEOUT_MS },
     );
   } else {
-    const frames = await probeFrameCount(unitPath);
+    const frames = await probeFrameCount(unitPath, inputArgs);
     if (!Number.isFinite(frames) || frames < 1) {
       throw new Error("clip contained no decodable frames");
     }
@@ -362,6 +384,7 @@ export async function buildSegment(
     await execFileAsync(
       "ffmpeg",
       [
+        ...inputArgs,
         "-i", unitPath,
         "-vf",
         `setpts=N/(${frames}*TB),${scale},fps=${SEGMENT_FPS},tpad=stop_mode=clone:stop=-1`,
@@ -493,12 +516,14 @@ export function masksToVideoMasks(
 // Read display dimensions, matching ffmpeg's default input autorotation.
 export async function probeDimensions(
     filePath: string,
+    inputArgs: string[] = [],
 ): Promise<{ width: number; height: number }> {
     try {
         const { stdout } = await execFileAsync(
             "ffprobe",
             [
                 "-v", "error",
+                ...inputArgs,
                 "-select_streams", "v:0",
                 "-show_entries", "stream=width,height:stream_side_data=rotation:stream_tags=rotate",
                 "-of", "json",

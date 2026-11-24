@@ -324,6 +324,25 @@ describe.skipIf(!ffmpegAvailable)("segment pipeline", () => {
     await expect(buildSegment(tmpDir, 99, garbagePath, "webm")).rejects.toThrow();
   }, 120_000);
 
+  // Uploads are untrusted bytes. A DASH manifest uploaded as a "clip" would,
+  // if ffmpeg sniffed the container, read whatever local file its BaseURL
+  // names (another session's compile files) into this session's video.
+  it("refuses a manifest disguised as a clip instead of reading the file it names", async () => {
+    for (const [format, victim] of [["mp4", mp4Path], ["webm", webmPath], ["jpeg", mp4Path]] as const) {
+      const manifestPath = path.join(tmpDir, `manifest.${format === "jpeg" ? "jpg" : format}`);
+      await fs.writeFile(
+        manifestPath,
+        `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S">
+<Period><AdaptationSet mimeType="video/mp4"><Representation id="1" bandwidth="1000" width="320" height="240">
+<BaseURL>file://${victim}</BaseURL>
+</Representation></AdaptationSet></Period></MPD>
+`,
+      );
+      await expect(buildSegment(tmpDir, 98, manifestPath, format)).rejects.toThrow();
+    }
+  }, 120_000);
+
   /**
    * The two-tier contract. The preview tier exists only to open the editor
    * quickly and is deleted at publish, so it may be small and cheap — but it

@@ -55,6 +55,13 @@ fn mode_for(args: &[String]) -> Mode {
         Ok("1") if cfg!(windows) => return Mode::Install { ops: Ops::Real },
         _ => {}
     }
+    // A deep link is the app, full stop. The protocol handler is
+    // `"lookout.exe" "%1"`, so a launcher that passed a raw `"` inside the URL
+    // would split it into extra arguments; none of them may be read as the
+    // installer flags below (`/S /D=\\host\share` would install from there).
+    if args.first().is_some_and(|a| is_deep_link(a)) {
+        return Mode::App;
+    }
     if let Some(file) = args.iter().find_map(|a| a.strip_prefix(ops::TRASH_ARG)) {
         return Mode::TrashInstaller { file: PathBuf::from(file) };
     }
@@ -88,8 +95,12 @@ fn mode_for(args: &[String]) -> Mode {
 
 /// Whether this exe is the installed copy (or a launch the installer must
 /// stay out of: deep links, the crash reporter).
+fn is_deep_link(arg: &str) -> bool {
+    arg.get(..10).is_some_and(|p| p.eq_ignore_ascii_case("lookout://"))
+}
+
 fn runs_from_install(args: &[String]) -> bool {
-    if args.iter().any(|a| a.starts_with("lookout://")) || crate::crash::is_reporter_process() {
+    if args.iter().any(|a| is_deep_link(a)) || crate::crash::is_reporter_process() {
         return true;
     }
     let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from)) else { return true };
@@ -189,6 +200,22 @@ mod tests {
         match mode_for(&args(&["/S", "/UPDATE", "/R"])) {
             Mode::Silent { relaunch: true, dir: None, report: None } => {}
             m => panic!("{m:?}"),
+        }
+    }
+
+    /// The protocol handler is `"lookout.exe" "%1"`; a URL that smuggled a
+    /// quote in must not turn its pieces into installer flags.
+    #[test]
+    fn deep_link_pieces_are_never_installer_flags() {
+        for line in [
+            &["lookout://session/?token=abc", "/S", "/R", "/D=\\\\attacker\\share"][..],
+            &["LOOKOUT://x", "--uninstall", "/S"][..],
+            &["lookout://x", "--trash-installer=C:\\Users\\me\\Documents"][..],
+        ] {
+            match mode_for(&args(line)) {
+                Mode::App => {}
+                m => panic!("{line:?} -> {m:?}"),
+            }
         }
     }
 

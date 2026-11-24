@@ -11,6 +11,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LOOKOUT_SKIP_SWIFT");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "windows" {
+        // Resolve the exe's static DLL imports from System32 only, never from
+        // the folder it runs in (Downloads, for the self-installer). See main.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+        }
         windows_resources();
         return;
     }

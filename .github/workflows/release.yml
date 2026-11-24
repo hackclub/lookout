@@ -405,7 +405,7 @@ jobs:
 
       - name: Install Rust stable
         if: steps.native.outputs.present == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Build lookout-update-tool
         if: steps.native.outputs.present == 'true'

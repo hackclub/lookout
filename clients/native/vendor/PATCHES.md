@@ -21,6 +21,13 @@ from `gpui-pre` (5 MB, not needed), and so were its `[[example]]` entries in
   buffer)` (Apple). The existing `paint_surface` sets zero radii.
 - `app.rs`: `App::hide_cursor_until_mouse_moves()` exposes the platform call
   GPUI already uses on typing (for the idle cursor over full-screen video).
+- `app.rs`: `App::open_url` only hands `external_url_allowed` URLs to the OS
+  (https; http to localhost/127.0.0.1; `x-apple.systempreferences:` on
+  macOS). Many URLs Lookout opens come from the server, and ShellExecute /
+  NSWorkspace / xdg-open would otherwise run `file://` shortcuts, `smb://`
+  shares, `ms-msdt:` and the like. Tests live in
+  `crates/lookout-native/src/programs.rs` (this crate's own suite doesn't
+  build without the pruned examples).
 
 ## gpui-pre-wgpu (Linux)
 

@@ -208,7 +208,16 @@ impl VideoPlayer {
             let _ = tx.try_send(());
         });
         let mut error = None;
-        let backend = match Backend::open(&url, waker) {
+        // The URL comes from the server. Keep the platform players (GStreamer
+        // source plugins especially) on web URLs; `file://` is a dev aid.
+        let allowed = crate::programs::acceptable_endpoint(Some(&url))
+            || (cfg!(debug_assertions) && url.starts_with("file://"));
+        let opened = if allowed {
+            Backend::open(&url, waker)
+        } else {
+            Err("this video link isn't a web address".into())
+        };
+        let backend = match opened {
             Ok(b) => Some(b),
             Err(e) => {
                 log::warn!("[video] {e}");

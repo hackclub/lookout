@@ -1952,8 +1952,17 @@ impl App {
     }
 
     /// Directs the platform's default browser to open the given URL.
+    // Lookout patch: only web links reach the OS opener. Many URLs Lookout
+    // opens come from the server (announcements, video links, program pages),
+    // and ShellExecute / NSWorkspace / xdg-open will just as happily run a
+    // `file://` shortcut, an `smb://` share's app, `ms-msdt:` or a `.desktop`
+    // file. One choke point means a future call site can't forget the check.
     pub fn open_url(&self, url: &str) {
-        self.platform.open_url(url);
+        if external_url_allowed(url) {
+            self.platform.open_url(url);
+        } else {
+            log::warn!("open_url: refused a non-web URL");
+        }
     }
 
     /// Registers the given URL scheme (e.g. `zed` for `zed://` urls) to be
@@ -3727,6 +3736,35 @@ impl<'a, T> Drop for GpuiBorrow<'a, T> {
         self.app.notify(lease.id);
         self.app.entities.end_lease(lease);
         self.app.finish_update();
+    }
+}
+
+// Lookout patch: see `App::open_url`. https anywhere, http only to this
+// machine (dev servers), and the macOS Settings deep links the permission
+// guides use. Everything else, `file:`, `smb:`, `ms-*:`, `search-ms:`,
+// custom app schemes, bare paths, is refused.
+pub fn external_url_allowed(url: &str) -> bool {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => rest.starts_with("//") && rest.len() > 2,
+        "http" => {
+            let Some(after) = rest.strip_prefix("//") else {
+                return false;
+            };
+            let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+            let host = match authority.rsplit_once(':') {
+                Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+                _ => authority,
+            };
+            matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1")
+        }
+        "x-apple.systempreferences" => cfg!(target_os = "macos"),
+        _ => false,
     }
 }
 

@@ -357,3 +357,42 @@ pub fn complete_pairing_and_open(url: String, main: Entity<MainWindow>, cx: &mut
     })
     .detach();
 }
+
+#[cfg(test)]
+mod external_url_tests {
+    // The vendored GPUI patch in `App::open_url` (its own test suite needs the
+    // pruned examples, so the tests live here).
+    use gpui_kit::gpui::external_url_allowed as ok;
+
+    #[test]
+    fn web_links_pass() {
+        assert!(ok("https://lookout.hackclub.com/releases"));
+        assert!(ok("HTTPS://example.com"));
+        assert!(ok("http://localhost:3000/session"));
+        assert!(ok("http://127.0.0.1/x"));
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        for bad in [
+            "file:///C:/Users/x/Downloads/a.lnk",
+            "file://attacker/share/x.exe",
+            "\\\\attacker@SSL\\DavWWWRoot\\x.exe",
+            "smb://attacker/share",
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x&crumb=location:\\\\attacker",
+            "javascript:alert(1)",
+            "http://evil.example/",
+            "http://localhost@evil.example/",
+            "http://localhost:80@evil.example/",
+            "https:\\\\evil.example",
+            "https://",
+            " https://example.com",
+            "https://example.com\n--x",
+            "/usr/share/applications/x.desktop",
+            "",
+        ] {
+            assert!(!ok(bad), "{bad:?} should be refused");
+        }
+    }
+}

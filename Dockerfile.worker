@@ -18,4 +18,7 @@ COPY --from=builder /app/packages/worker/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/shared/dist ./node_modules/@lookout/shared/dist
 COPY --from=builder /app/packages/shared/package.json ./node_modules/@lookout/shared/
+# ffmpeg parses user-uploaded clips; a decoder bug should not land as root.
+# The worker only writes under /tmp.
+USER node
 CMD ["node", "dist/index.js"]
