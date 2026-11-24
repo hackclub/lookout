@@ -19,7 +19,10 @@
  *
  * Plain Gio.DBusProxy on purpose, rather than makeProxyWrapper: the wrapper's
  * calling convention has shifted between gjs versions, and this file has to
- * load unchanged across GNOME 45 through 50.
+ * load unchanged on every GNOME from 45 on. GNOME refuses an extension whose
+ * metadata.json doesn't list the running shell version (no ranges), so
+ * metadata.json lists 45 through 60 ahead of time: a GNOME 51 that wasn't
+ * listed cost every Fedora 45 and Ubuntu 26.10 user their focus data.
  */
 
 import Clutter from 'gi://Clutter';
