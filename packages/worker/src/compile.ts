@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -253,12 +254,15 @@ async function uploadAndVerify(
   expectedSize: number,
   label: string,
 ): Promise<void> {
-  const bytes = await fs.readFile(localPath);
+  // Streamed from disk: a long session's MP4 runs to hundreds of MB, and
+  // reading it whole would hold a second copy of it in the heap next to the
+  // one already on the memory-backed /tmp.
   await r2Client.send(
     new PutObjectCommand({
       Bucket: R2_BUCKET,
       Key: r2Key,
-      Body: bytes,
+      Body: createReadStream(localPath),
+      ContentLength: expectedSize,
       ContentType: contentType,
     }),
   );
@@ -624,6 +628,10 @@ export async function compileTimelapse(sessionId: string): Promise<{
               err,
             );
           }
+          // /tmp is memory-backed, and a long session's clips add up to more
+          // than the worker's whole memory limit. The segment is all that's
+          // needed from here on.
+          await fs.rm(unitPath, { force: true });
           await reportUnitDone();
         }
       };
@@ -1039,6 +1047,7 @@ async function buildPublishFromUnits(
         failures++;
         console.warn(`Session ${sessionId}: publish segment ${slot} failed`, err);
       }
+      await fs.rm(unitPath, { force: true });
     }
   };
   await Promise.all(
